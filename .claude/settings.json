@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "mcp__Linear"
+    ],
+    "ask": [
+      "mcp__Linear__delete_attachment",
+      "mcp__Linear__delete_comment",
+      "mcp__Linear__delete_diff_comment",
+      "mcp__Linear__delete_status_update"
+    ]
+  }
+}
