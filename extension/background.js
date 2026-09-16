@@ -88,7 +88,12 @@ async function hlsSegmentInfo(url, sourceUrl, tabId) {
   throw new Error("No HLS segments found in the playlist");
 }
 
-function nativeDownload(request, jobId) {
+/**
+ * Connect, complete the `hello` handshake from `docs/protocol.md`, and only then
+ * start the download. An incompatible host is refused here, so the job fails with
+ * an explanation instead of hanging on a protocol the host does not speak.
+ */
+async function nativeDownload(request, jobId) {
   const port = browser.runtime.connectNative(NATIVE_HOST);
   const channel = new DownerTaskProtocol.NativeTaskChannel(
     port,
@@ -97,6 +102,17 @@ function nativeDownload(request, jobId) {
     () => browser.runtime.lastError?.message
   );
   nativeTasks.set(jobId, channel);
+  let compatibility;
+  try {
+    compatibility = DownerTaskProtocol.protocolCompatibility(await channel.hello());
+  } catch (error) {
+    compatibility = { ok: false, error: error.message || String(error) };
+  }
+  if (!compatibility.ok) {
+    nativeTasks.delete(jobId);
+    channel.close(compatibility.error);
+    throw new Error(compatibility.error);
+  }
   const completion = channel.start(request).finally(() => nativeTasks.delete(jobId));
   return { channel, completion };
 }
@@ -126,7 +142,9 @@ function handleNativeEvent(jobId, response) {
     });
   } else if (response?.state === "cancelling") {
     updateJob(jobId, { state: "cancelling", controlError: null, ...progress });
-  } else if (response?.state === "control-error") {
+  } else if (["control-error", "rejected"].includes(response?.state)) {
+    // Connection-level states describe one request, never the job, so they only
+    // surface an explanation and never change the job's state.
     updateJob(jobId, { controlError: response.error || "Could not control download.", ...progress });
   } else if (Object.keys(progress).length) {
     updateJob(jobId, progress);
@@ -212,7 +230,7 @@ async function runDownload(message, jobId) {
         });
       }
     }
-    const native = nativeDownload({
+    const native = await nativeDownload({
       command: "download",
       url: message.url,
       source_url: message.sourceUrl,
