@@ -1,0 +1,78 @@
+body {
+  color: #202124;
+  font: 14px system-ui, sans-serif;
+  margin: 0;
+  min-width: 340px;
+}
+
+main {
+  padding: 14px 16px 16px;
+}
+
+h1 {
+  font-size: 18px;
+  margin: 0 0 10px;
+}
+
+ul {
+  list-style: none;
+  margin: 12px 0;
+  padding: 0;
+}
+
+li {
+  border-top: 1px solid #ddd;
+  padding: 9px 0;
+}
+
+.task {
+  display: grid;
+  gap: 6px;
+}
+
+.url {
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.task-meta {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.segment-count {
+  color: #666;
+  font-size: 12px;
+  min-width: 150px;
+}
+
+.progress {
+  flex: 1;
+  height: 8px;
+}
+
+.controls {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+button {
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.muted {
+  color: #666;
+}
+
+.download-status {
+  color: #145dbf;
+  font-size: 12px;
+  min-height: 1.2em;
+}
+
+a {
+  color: #145dbf;
+}

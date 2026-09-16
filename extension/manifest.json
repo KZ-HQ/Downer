@@ -1,0 +1,38 @@
+{
+  "manifest_version": 2,
+  "name": "Downer Media Downloader",
+  "version": "0.3.0",
+  "description": "Find media loaded by the current page and download it with FFmpeg.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "downer@example.com",
+      "strict_min_version": "109.0"
+    }
+  },
+  "permissions": [
+    "activeTab",
+    "cookies",
+    "nativeMessaging",
+    "notifications",
+    "storage",
+    "<all_urls>"
+  ],
+  "background": {
+    "scripts": ["task-protocol.js", "background.js"]
+  },
+  "browser_action": {
+    "default_title": "Download media",
+    "default_popup": "popup.html"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
