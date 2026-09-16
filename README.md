@@ -1,5 +1,7 @@
 # downer
 
+[![CI](https://github.com/KZ-HQ/Downer/actions/workflows/ci.yml/badge.svg)](https://github.com/KZ-HQ/Downer/actions/workflows/ci.yml)
+
 `downer` downloads one HTTP(S) source or media URL per invocation through
 FFmpeg. Source pages are fetched and scanned for direct video files and HLS
 playlists (`.m3u8`); the best discovered media URL is then passed through the

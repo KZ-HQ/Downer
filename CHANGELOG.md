@@ -47,6 +47,10 @@ The Rust package and the Firefox extension share one product version; see
   extension's task protocol and HLS helpers, HLS fixtures shared by the Rust
   and JavaScript tests, and `web-ext lint` in `make check`.
 - `data_collection_permissions` declared as `none` in the extension manifest.
+- GitHub Actions CI running `make check`, a release build and extension
+  packaging on macOS and Linux, a job that builds against the declared MSRV,
+  and a `make version-check` target enforcing that the Cargo package and the
+  extension manifest share one version.
 
 ### Fixed
 

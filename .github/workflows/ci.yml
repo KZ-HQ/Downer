@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# A newer push to the same branch supersedes an in-flight run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # FFmpeg is deliberately not installed: the tests generate fake FFmpeg
+      # executables, so CI never depends on a real one or on network media.
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Cache cargo registry and build directory
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ matrix.os }}-cargo-
+
+      # Deterministic install of the development-only extension tooling
+      # (web-ext). `make extension-deps` then finds it and does nothing.
+      - name: Install extension tooling
+        run: npm ci
+
+      - name: make check
+        run: make check
+
+      - name: Release build
+        run: cargo build --release --locked
+
+      - name: Package the extension
+        run: make extension-package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: downer-${{ matrix.os }}
+          path: |
+            dist/downer-firefox.zip
+            target/release/downer
+          if-no-files-found: error
+
+  msrv:
+    name: Minimum supported Rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Proves the rust-version declared in Cargo.toml actually builds the
+      # workspace against the committed Cargo.lock.
+      - name: Build with the declared rust-version
+        run: |
+          msrv=$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml)
+          if [ -z "$msrv" ]; then
+            echo "error: no rust-version in Cargo.toml" >&2
+            exit 1
+          fi
+          echo "Declared MSRV: $msrv"
+          rustup toolchain install "$msrv" --profile minimal
+          cargo "+$msrv" check --all-targets --locked

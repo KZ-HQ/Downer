@@ -117,6 +117,21 @@ make extension-package
 `web-ext lint`, the extension's Node tests, and Firefox JavaScript/manifest
 validation. Record the outcome in the Linear handoff comment.
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request. The `check`
+job runs on `ubuntu-latest` and `macos-latest` and executes exactly what you
+run locally — `make check`, then `cargo build --release --locked` and
+`make extension-package` — and uploads the release binary and
+`dist/downer-firefox.zip` as run artifacts. A separate `msrv` job builds
+against the `rust-version` declared in `Cargo.toml`, so the declared minimum
+stays honest. FFmpeg is deliberately not installed in CI; tests generate fake
+FFmpeg executables instead.
+
+**CI must be green before an issue moves to In Review.** If a change needs a
+new check, add it to `make check` rather than to the workflow, so local runs
+and CI cannot drift apart.
+
 The root `package.json` is development-only tooling (`web-ext`); the extension
 itself ships without dependencies, and `node_modules/` is not tracked.
 `make extension-lint` installs it on first use, `make extension-test` runs the

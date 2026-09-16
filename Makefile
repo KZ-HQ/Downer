@@ -4,7 +4,7 @@ CARGO ?= cargo
 FFMPEG ?= ffmpeg
 NPM ?= npm
 
-.PHONY: help setup doctor build fmt fmt-check lint test extension-deps extension-lint extension-test extension-check check run install extension extension-package extension-install clean
+.PHONY: help setup doctor build fmt fmt-check lint test version-check extension-deps extension-lint extension-test extension-check check run install extension extension-package extension-install clean
 
 help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -39,6 +39,9 @@ lint: ## Run Clippy with warnings treated as errors
 test: ## Run unit, integration, and doc tests
 	$(CARGO) test
 
+version-check: ## Verify the Cargo package and extension manifest versions agree
+	@python3 scripts/check_versions.py
+
 extension-deps: ## Install development-only extension tooling (web-ext)
 	@test -x node_modules/.bin/web-ext || $(NPM) install --no-audit --no-fund
 
@@ -60,7 +63,7 @@ extension-check: extension-lint extension-test ## Validate Firefox extension JSO
 
 extension: extension-install extension-package ## Build/register the native host and package the extension
 
-check: fmt-check lint test extension-check ## Run Rust and Firefox extension checks
+check: fmt-check lint version-check test extension-check ## Run Rust and Firefox extension checks
 
 run: ## Run downer; pass CLI arguments with ARGS="..."
 	@test -n "$(ARGS)" || { echo 'usage: make run ARGS="URL [options]"' >&2; exit 2; }
