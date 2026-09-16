@@ -68,11 +68,10 @@ The minimum supported FFmpeg version is documented in `README.md`.
 
 ## Architecture decisions
 
-Architectural decisions are recorded as ADRs under `docs/adr/`. Linear issue
-KEI-50 creates that directory and seeds it with ADR-0001 (the native
-messaging protocol contract); KEI-63 later backfills the decisions already
-embodied in the code and adds the rest of the documentation set. Until
-`docs/adr/` exists, record decisions in the relevant Linear issue.
+Architectural decisions are recorded as ADRs under `docs/adr/`, numbered
+`NNNN-short-title.md`. ADR-0001 records the native messaging protocol
+contract; KEI-63 backfills the decisions already embodied in the code and adds
+the rest of the documentation set.
 
 Any change to the native messaging protocol, the host process model, the
 FFmpeg command layer, discovery ownership, or control semantics requires an
@@ -94,9 +93,15 @@ ADR.
   Two things this file cannot fix: settings are read at session start, so a
   change needs a fresh session, and if an organization sets a claude.ai
   connector tool to `ask`, allow rules for it never take effect.
+- `docs/`: `protocol.md`, the native messaging contract implemented by
+  `src/native.rs` and `extension/task-protocol.js`, and `adr/`, the
+  architecture decision records.
 - `tests/`: CLI and native-host integration tests (`tests/cli.rs`,
   `tests/native_host.rs`), the extension's Node tests (`tests/extension/`),
-  and playlist fixtures shared by both languages (`tests/fixtures/hls/`).
+  playlist fixtures shared by both languages (`tests/fixtures/hls/`), and
+  `tests/fixtures/protocol.json`, the native messaging protocol's wire
+  vocabulary, which both test suites read so the Rust and JavaScript sides
+  cannot rename a protocol term unilaterally.
 - `dist/`: build artifact directory for the packaged Firefox extension. It is
   produced by `make extension-package` (and by CI/release tooling) and is not
   tracked in git.

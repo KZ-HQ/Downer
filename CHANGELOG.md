@@ -30,9 +30,18 @@ The Rust package and the Firefox extension share one product version; see
   page's cookies and User-Agent to the native host for the selected download,
   and shows progress, completed/total HLS segments, and an estimated
   percentage.
-- Native messaging host (`downer --native-host`) implementing the `download`,
-  `pause`, `resume`, `cancel`, and `hls-info` commands with streamed progress
-  and FFmpeg log events.
+- Native messaging host (`downer --native-host`) implementing the `hello`,
+  `download`, `pause`, `resume`, `cancel`, and `hls-info` commands with
+  streamed progress and FFmpeg log events.
+- Versioned native messaging protocol (version 1), specified in
+  `docs/protocol.md` and decided in
+  `docs/adr/0001-native-messaging-protocol.md`. Every request and response
+  carries `protocol_version` and every response carries an explicit event
+  `type` and, on failures, a stable `error_code`. The extension performs a
+  `hello` handshake on connect and refuses to start a download against a host
+  that speaks a different protocol version, explaining the mismatch and naming
+  both versions instead of failing the download opaquely. Requests that omit
+  `protocol_version` are still served for one release cycle.
 - Pause, resume, and cancel controls in the popup; pause and resume use Unix
   process signals on macOS and Linux, cancel is supported on all platforms.
 - Settings page with a configurable output directory, an optional FFmpeg
@@ -54,6 +63,12 @@ The Rust package and the Firefox extension share one product version; see
 
 ### Fixed
 
+- A malformed, unsupported, or duplicate native messaging request can no longer
+  terminate a running download. Such requests are answered with the
+  non-terminal `rejected` state instead of `failed`, and the extension now
+  settles a job only on a terminal state that names that job. Previously one
+  bad control message ended a live download's channel while FFmpeg kept
+  running, leaving the job shown as failed and its controls inoperable.
 - Extension HLS variant selection now reads `BANDWIDTH` when it is the first
   attribute of `#EXT-X-STREAM-INF` (previously the first variant was chosen
   instead of the highest-bandwidth one), and no longer mistakes the first
