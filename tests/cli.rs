@@ -19,7 +19,7 @@ fn help_and_version_are_available() {
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("downer 0.1.0"));
+        .stdout(predicate::str::contains("downer 0.3.0"));
 }
 
 #[test]

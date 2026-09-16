@@ -47,6 +47,23 @@ When handing off, whether finished or not:
 - Update the project description only when the roadmap or the architecture
   summary changes.
 
+## Versioning
+
+The Rust package and the Firefox extension share **one product version**.
+`version` in `Cargo.toml` and `version` in `extension/manifest.json` must
+always be identical and are bumped together in the same commit, following
+semantic versioning for the product as a whole. There is no separate VERSION
+file; those two fields are the source of truth, and CI checks that they agree.
+
+Firefox refuses a temporary or signed add-on whose version goes backwards, so
+never lower the shared version. Record user-visible changes in `CHANGELOG.md`
+under `Unreleased`, and move that section under the new version number when
+the version is bumped.
+
+The minimum supported Rust version is declared as `rust-version` in
+`Cargo.toml`; raising it is a deliberate change that belongs in the changelog.
+The minimum supported FFmpeg version is documented in `README.md`.
+
 ## Architecture decisions
 
 Architectural decisions are recorded as ADRs under `docs/adr/` once that
@@ -62,8 +79,10 @@ semantics requires an ADR.
 - `extension/`: Firefox WebExtension files, popup, Settings page, background worker,
   content script, and native messaging protocol.
 - `scripts/`: native host installation and launcher scripts.
-- `tests/`: CLI integration tests.
-- `dist/`: generated Firefox extension package.
+- `tests/`: CLI and native-host integration tests.
+- `dist/`: build artifact directory for the packaged Firefox extension. It is
+  produced by `make extension-package` (and by CI/release tooling) and is not
+  tracked in git.
 
 ## Architecture map
 
@@ -154,5 +173,3 @@ native process layer.
   credentials.
 - Do not expose browser cookie headers in Settings logs, error messages, or
   Linear comments.
-- Keep generated `dist/downer-firefox.zip` synchronized when packaging is part
-  of the requested change.

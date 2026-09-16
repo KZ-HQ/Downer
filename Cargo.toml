@@ -1,7 +1,8 @@
 [package]
 name = "downer"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
+rust-version = "1.88"
 description = "A small FFmpeg-backed media downloader"
 license = "MIT"
 readme = "README.md"

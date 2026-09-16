@@ -17,9 +17,17 @@ already-established browser session be used for protected media.
 
 ## Prerequisites
 
-- Rust and Cargo, to build the CLI.
+- Rust and Cargo, to build the CLI. The minimum supported Rust version is
+  **1.88** (declared as `rust-version` in `Cargo.toml`); it is the floor
+  required by the dependency versions pinned in `Cargo.lock`.
 - FFmpeg available at runtime as `ffmpeg` on `PATH`, or supplied with
-  `--ffmpeg /path/to/ffmpeg`.
+  `--ffmpeg /path/to/ffmpeg`. The minimum supported FFmpeg version is **7.1**,
+  because HLS playlists with nonstandard segment names are downloaded with
+  `-extension_picky 0`, which older builds do not accept. Development and
+  testing currently use FFmpeg 9.0.1.
+
+The CLI and the Firefox extension share one product version; see "Versioning"
+in `AGENTS.md`. User-visible changes are listed in `CHANGELOG.md`.
 
 ## Handy Make commands
 
