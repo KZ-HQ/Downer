@@ -1,0 +1,26 @@
+{
+  "comment": "Single source of truth for the native messaging protocol's wire vocabulary. docs/protocol.md is the prose specification; tests/native_host.rs and tests/extension/task-protocol.test.js both read this file so the Rust host and the JavaScript client cannot drift apart silently.",
+  "protocol_version": 1,
+  "legacy_protocol_version": 0,
+  "max_message_bytes": 1048576,
+  "commands": ["hello", "download", "pause", "resume", "cancel", "hls-info"],
+  "event_types": ["hello", "ack", "progress", "log", "terminal", "rejected", "control-error"],
+  "job_states": {
+    "active": ["starting", "downloading", "paused", "cancelling"],
+    "terminal": ["completed", "failed", "cancelled"],
+    "extension_only": ["preparing"]
+  },
+  "connection_states": ["ready", "rejected", "control-error"],
+  "error_codes": [
+    "invalid_request",
+    "unsupported_command",
+    "unsupported_protocol_version",
+    "duplicate_job",
+    "task_not_active",
+    "control_failed",
+    "invalid_hls_info",
+    "download_failed",
+    "cancelled"
+  ],
+  "capabilities": ["pause_resume", "hls_info"]
+}

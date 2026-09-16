@@ -4,6 +4,12 @@
 //! stdio, and points the host at a fake FFmpeg through `DOWNER_FFMPEG`, so the
 //! observable protocol (field names, state strings, event order) is pinned without
 //! touching the network or a real FFmpeg.
+//!
+//! The contract these tests pin is written down in `docs/protocol.md` and decided
+//! in `docs/adr/0001-native-messaging-protocol.md`. The wire vocabulary lives in
+//! `tests/fixtures/protocol.json`, which the extension's Node tests read too, so
+//! neither implementation can rename a term without the other noticing. A failing
+//! test here is a protocol decision to make deliberately, not a test to adjust.
 
 #![cfg(unix)]
 
@@ -20,6 +26,43 @@ use std::{
 use serde_json::{json, Value};
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The shared wire vocabulary, read by this suite and by
+/// `tests/extension/task-protocol.test.js`.
+const PROTOCOL_FIXTURE: &str = include_str!("fixtures/protocol.json");
+
+fn protocol() -> Value {
+    serde_json::from_str(PROTOCOL_FIXTURE).expect("tests/fixtures/protocol.json is valid JSON")
+}
+
+fn protocol_strings(pointer: &str) -> Vec<String> {
+    protocol()
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("{pointer} is an array in tests/fixtures/protocol.json"))
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("protocol vocabulary entries are strings")
+                .to_string()
+        })
+        .collect()
+}
+
+/// Every host response carries the protocol version and an explicit event type.
+fn assert_envelope(event: &Value, expected_type: &str) {
+    assert_eq!(
+        event["protocol_version"],
+        protocol()["protocol_version"],
+        "{event}"
+    );
+    assert_eq!(event["type"], json!(expected_type), "{event}");
+    assert!(
+        protocol_strings("/event_types").contains(&expected_type.to_string()),
+        "{expected_type} is listed in tests/fixtures/protocol.json"
+    );
+}
 
 /// A running native host plus the framing helpers used to talk to it.
 struct NativeHost {
@@ -240,6 +283,7 @@ exit {exit_code}
 fn download_request(url: &str, output_dir: &Path) -> Value {
     json!({
         "command": "download",
+        "protocol_version": 1,
         "url": url,
         "source_url": "https://example.test/watch/123",
         "output_dir": output_dir,
@@ -280,15 +324,18 @@ fn successful_download_reports_starting_progress_and_completed() {
     host.send(&request);
 
     let starting = host.next_event();
+    assert_envelope(&starting, "progress");
     assert_eq!(starting["ok"], json!(true));
     assert_eq!(starting["job_id"], json!("job-success"));
     assert_eq!(starting["state"], json!("starting"));
 
     let (downloading, _) = host.wait_for_state("downloading");
+    assert_envelope(&downloading, "progress");
     assert_eq!(downloading["ok"], json!(true));
     assert_eq!(downloading["job_id"], json!("job-success"));
 
     let (completed, _) = host.wait_for_state("completed");
+    assert_envelope(&completed, "terminal");
     assert_eq!(completed["ok"], json!(true));
     assert_eq!(completed["job_id"], json!("job-success"));
     let path = PathBuf::from(
@@ -357,18 +404,24 @@ fn failing_ffmpeg_reports_failed_state_and_keeps_the_partial_file() {
     host.send(&request);
 
     let (failed, skipped) = host.wait_for_state("failed");
+    assert_envelope(&failed, "terminal");
     assert_eq!(failed["ok"], json!(false));
+    assert_eq!(failed["error_code"], json!("download_failed"));
     assert_eq!(failed["job_id"], json!("job-failure"));
     let error = failed["error"].as_str().expect("failure carries an error");
     assert!(error.contains("network failure"), "error text: {error}");
 
-    // FFmpeg stderr is streamed as log events on the same channel.
-    assert!(
-        skipped.iter().any(|event| event["log"]
-            .as_str()
-            .is_some_and(|line| line.contains("network failure"))),
-        "expected a log event, saw {skipped:#?}"
-    );
+    // FFmpeg stderr is streamed as log events on the same channel, tagged with an
+    // explicit type rather than recognised by the presence of a `log` field.
+    let log_event = skipped
+        .iter()
+        .find(|event| {
+            event["log"]
+                .as_str()
+                .is_some_and(|line| line.contains("network failure"))
+        })
+        .unwrap_or_else(|| panic!("expected a log event, saw {skipped:#?}"));
+    assert_envelope(log_event, "log");
     assert_eq!(
         fs::read_to_string(output_dir.join("video.mp4")).unwrap(),
         "partial media"
@@ -398,10 +451,13 @@ fn cancel_acknowledges_then_reports_the_cancelled_terminal_state() {
         "request_id": "job-cancel-1",
     }));
     let (ack, _) = host.wait_for_state("cancelling");
+    assert_envelope(&ack, "ack");
     assert_eq!(ack["ok"], json!(true));
     assert_eq!(ack["request_id"], json!("job-cancel-1"));
 
     let (cancelled, _) = host.wait_for_state("cancelled");
+    assert_envelope(&cancelled, "terminal");
+    assert_eq!(cancelled["error_code"], json!("cancelled"));
     assert_eq!(cancelled["ok"], json!(false));
     assert_eq!(cancelled["job_id"], json!("job-cancel"));
     assert_eq!(cancelled["error"], json!("download cancelled"));
@@ -541,7 +597,9 @@ fn hls_info_without_segment_totals_is_a_control_error() {
         "total_duration_ms": 0,
     }));
     let (error, _) = host.wait_for_state("control-error");
+    assert_envelope(&error, "control-error");
     assert_eq!(error["ok"], json!(false));
+    assert_eq!(error["error_code"], json!("invalid_hls_info"));
     assert_eq!(error["request_id"], json!("job-bad-hls-1"));
     assert_eq!(error["error"], json!("invalid HLS segment information"));
 }
@@ -561,8 +619,14 @@ fn control_commands_for_an_unknown_job_report_control_error() {
             "total_duration_ms": 3_000,
         }));
         let event = host.next_event();
+        assert_envelope(&event, "control-error");
         assert_eq!(event["ok"], json!(false), "{command}: {event}");
         assert_eq!(event["state"], json!("control-error"), "{command}: {event}");
+        assert_eq!(
+            event["error_code"],
+            json!("task_not_active"),
+            "{command}: {event}"
+        );
         assert_eq!(event["job_id"], json!("missing-job"), "{command}: {event}");
         assert_eq!(
             event["request_id"],
@@ -578,7 +642,7 @@ fn control_commands_for_an_unknown_job_report_control_error() {
 }
 
 #[test]
-fn duplicate_job_ids_are_rejected_without_starting_a_second_download() {
+fn duplicate_job_ids_are_rejected_without_terminating_the_running_download() {
     let temp = tempfile::tempdir().unwrap();
     let ffmpeg = FakeFfmpeg {
         progress_updates: 1,
@@ -596,18 +660,34 @@ fn duplicate_job_ids_are_rejected_without_starting_a_second_download() {
 
     request["request_id"] = json!("job-duplicate-2");
     host.send(&request);
-    let (rejected, _) = host.wait_for_state("failed");
+    let (rejected, _) = host.wait_for_state("rejected");
+    assert_envelope(&rejected, "rejected");
     assert_eq!(rejected["ok"], json!(false));
+    assert_eq!(rejected["error_code"], json!("duplicate_job"));
+    // The duplicate names the *running* job. Before the protocol was versioned
+    // this was reported as `failed`, which terminated the client's view of a
+    // download that was still running; `rejected` is never terminal.
     assert_eq!(rejected["job_id"], json!("job-duplicate"));
     assert_eq!(rejected["request_id"], json!("job-duplicate-2"));
     assert_eq!(
         rejected["error"],
         json!("download task already exists: job-duplicate")
     );
+
+    // The original download is untouched and still cancellable.
+    host.send(&json!({
+        "command": "cancel",
+        "protocol_version": 1,
+        "job_id": "job-duplicate",
+        "request_id": "job-duplicate-cancel",
+    }));
+    let (ack, _) = host.wait_for(|event| event["request_id"] == json!("job-duplicate-cancel"));
+    assert_eq!(ack["ok"], json!(true), "{ack}");
+    assert_eq!(ack["state"], json!("cancelling"), "{ack}");
 }
 
 #[test]
-fn malformed_json_is_reported_without_a_job_id() {
+fn malformed_json_is_rejected_without_a_job_id() {
     let temp = tempfile::tempdir().unwrap();
     let ffmpeg = FakeFfmpeg::default().install(temp.path());
     let mut host = NativeHost::start(&ffmpeg);
@@ -615,8 +695,10 @@ fn malformed_json_is_reported_without_a_job_id() {
     let payload = b"{not json";
     host.send_raw(payload.len() as u32, payload);
     let event = host.next_event();
+    assert_envelope(&event, "rejected");
     assert_eq!(event["ok"], json!(false));
-    assert_eq!(event["state"], json!("failed"));
+    assert_eq!(event["state"], json!("rejected"));
+    assert_eq!(event["error_code"], json!("invalid_request"));
     assert!(event["job_id"].is_null(), "{event}");
     assert!(
         event["error"]
@@ -626,27 +708,199 @@ fn malformed_json_is_reported_without_a_job_id() {
     );
 
     // The host keeps serving after a bad message.
-    host.send(&json!({"command": "pause", "job_id": "missing", "request_id": "after-bad-json"}));
+    host.send(&json!({
+        "command": "pause",
+        "protocol_version": 1,
+        "job_id": "missing",
+        "request_id": "after-bad-json",
+    }));
     let event = host.next_event();
     assert_eq!(event["request_id"], json!("after-bad-json"));
 }
 
 #[test]
-fn unsupported_commands_fail_without_a_job_id() {
+fn hello_reports_the_protocol_version_host_version_and_capabilities() {
     let temp = tempfile::tempdir().unwrap();
     let ffmpeg = FakeFfmpeg::default().install(temp.path());
     let mut host = NativeHost::start(&ffmpeg);
 
-    host.send(&json!({"command": "ping", "request_id": "ping-1"}));
+    host.send(&json!({
+        "command": "hello",
+        "protocol_version": 1,
+        "request_id": "hello-1",
+    }));
     let event = host.next_event();
+    assert_envelope(&event, "hello");
+    assert_eq!(event["ok"], json!(true));
+    assert_eq!(event["state"], json!("ready"));
+    assert_eq!(event["request_id"], json!("hello-1"));
+    assert_eq!(event["host_version"], json!(env!("CARGO_PKG_VERSION")));
+    // Pause and resume use Unix process signals; this suite is Unix-only.
+    assert_eq!(event["capabilities"]["pause_resume"], json!(true));
+    assert_eq!(event["capabilities"]["hls_info"], json!(true));
+    for capability in protocol_strings("/capabilities") {
+        assert!(
+            event["capabilities"][&capability].is_boolean(),
+            "capability {capability} is reported: {event}"
+        );
+    }
+}
+
+#[test]
+fn a_request_without_a_protocol_version_is_still_served_as_legacy() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg::default().install(temp.path());
+    let mut host = NativeHost::start(&ffmpeg);
+
+    // An extension built before the handshake omits the field entirely. It keeps
+    // working for one release cycle; see docs/protocol.md, "Versioning".
+    host.send(&json!({"command": "hello", "request_id": "legacy-1"}));
+    let event = host.next_event();
+    assert_envelope(&event, "hello");
+    assert_eq!(event["ok"], json!(true));
+    assert_eq!(event["request_id"], json!("legacy-1"));
+}
+
+#[test]
+fn a_request_with_an_unsupported_protocol_version_is_rejected() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg::default().install(temp.path());
+    let mut host = NativeHost::start(&ffmpeg);
+
+    host.send(&json!({
+        "command": "hello",
+        "protocol_version": 99,
+        "request_id": "future-1",
+    }));
+    let event = host.next_event();
+    assert_envelope(&event, "rejected");
     assert_eq!(event["ok"], json!(false));
-    assert_eq!(event["state"], json!("failed"));
+    assert_eq!(event["state"], json!("rejected"));
+    assert_eq!(event["error_code"], json!("unsupported_protocol_version"));
+    assert_eq!(event["request_id"], json!("future-1"));
+    assert!(
+        event["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("99")),
+        "the mismatch names the version it refused: {event}"
+    );
+}
+
+#[test]
+fn unsupported_commands_are_rejected_without_terminating_an_active_job() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg {
+        progress_updates: 1,
+        sleep_seconds: 30.0,
+        ..FakeFfmpeg::default()
+    }
+    .install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    let mut host = NativeHost::start(&ffmpeg);
+
+    let mut request = download_request("https://example.test/video.mp4", &output_dir);
+    request["job_id"] = json!("job-unsupported");
+    host.send(&request);
+    host.wait_for_state("downloading");
+
+    host.send(&json!({
+        "command": "ping",
+        "protocol_version": 1,
+        "request_id": "ping-1",
+    }));
+    let event = host.next_event();
+    assert_envelope(&event, "rejected");
+    assert_eq!(event["ok"], json!(false));
+    assert_eq!(event["state"], json!("rejected"));
+    assert_eq!(event["error_code"], json!("unsupported_command"));
     assert_eq!(event["error"], json!("unsupported native command: ping"));
     assert_eq!(event["request_id"], json!("ping-1"));
-    // Pinned as current behaviour: the JS NativeTaskChannel treats any `failed`
-    // state as terminal for the job owning the port, even without a `job_id`.
-    // KEI-50 (protocol contract) decides whether this should change.
+    // `rejected` is a connection state, not a job state: it carries no job_id and,
+    // crucially, is not terminal. Before ADR-0001 this was `failed`, which the JS
+    // NativeTaskChannel treated as terminal for the job owning the port.
     assert!(event["job_id"].is_null(), "{event}");
+    assert!(
+        !protocol_strings("/job_states/terminal").contains(&"rejected".to_string()),
+        "rejected is not a terminal job state in tests/fixtures/protocol.json"
+    );
+
+    // The download the rejection did not belong to is still running and controllable.
+    host.send(&json!({
+        "command": "cancel",
+        "protocol_version": 1,
+        "job_id": "job-unsupported",
+        "request_id": "job-unsupported-cancel",
+    }));
+    let (ack, _) = host.wait_for(|event| event["request_id"] == json!("job-unsupported-cancel"));
+    assert_envelope(&ack, "ack");
+    assert_eq!(ack["ok"], json!(true), "{ack}");
+    let (cancelled, _) = host.wait_for_state("cancelled");
+    assert_eq!(cancelled["job_id"], json!("job-unsupported"));
+}
+
+#[test]
+fn the_shared_protocol_vocabulary_matches_what_the_host_emits() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg::default().install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    let mut host = NativeHost::start(&ffmpeg);
+
+    let event_types = protocol_strings("/event_types");
+    let mut states = protocol_strings("/job_states/active");
+    states.extend(protocol_strings("/job_states/terminal"));
+    states.extend(protocol_strings("/connection_states"));
+
+    host.send(&json!({"command": "hello", "protocol_version": 1}));
+    let mut request = download_request("https://example.test/video.mp4", &output_dir);
+    request["job_id"] = json!("job-vocabulary");
+    host.send(&request);
+
+    let mut seen = Vec::new();
+    let (terminal, mut skipped) = host.wait_for(is_terminal);
+    skipped.push(terminal);
+    for event in &skipped {
+        let event_type = event["type"]
+            .as_str()
+            .unwrap_or_else(|| panic!("every response carries a type: {event}"));
+        assert!(
+            event_types.contains(&event_type.to_string()),
+            "unlisted event type {event_type}: {event}"
+        );
+        let state = event["state"]
+            .as_str()
+            .unwrap_or_else(|| panic!("every response carries a state: {event}"));
+        assert!(
+            states.contains(&state.to_string()),
+            "unlisted state {state}: {event}"
+        );
+        seen.push(event_type.to_string());
+    }
+    // `preparing` is listed as extension-only and must never reach the wire.
+    assert!(
+        !skipped.iter().any(|event| event["state"] == "preparing"),
+        "the host never emits the extension-only preparing state"
+    );
+    for expected in ["hello", "progress", "terminal"] {
+        assert!(seen.contains(&expected.to_string()), "saw {seen:?}");
+    }
+}
+
+#[test]
+fn the_documented_protocol_version_matches_the_shared_fixture() {
+    // docs/protocol.md is the prose contract; this keeps its version header, the
+    // shared fixture, and the host's own constant from drifting apart.
+    let spec = include_str!("../docs/protocol.md");
+    let version = protocol()["protocol_version"]
+        .as_u64()
+        .expect("protocol_version is an integer");
+    assert!(
+        spec.contains(&format!("Version **{version}**")),
+        "docs/protocol.md declares version {version}"
+    );
+    assert!(
+        std::path::Path::new("docs/adr/0001-native-messaging-protocol.md").exists(),
+        "ADR-0001 is committed"
+    );
 }
 
 #[test]

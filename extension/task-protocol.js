@@ -1,7 +1,57 @@
 /* global browser */
 
+/**
+ * Client half of the native messaging contract specified in `docs/protocol.md`
+ * and decided in `docs/adr/0001-native-messaging-protocol.md`. The wire
+ * vocabulary is pinned by `tests/fixtures/protocol.json`, which this file's
+ * Node tests and the Rust host's integration tests both read.
+ */
 var DownerTaskProtocol = (() => {
+  const PROTOCOL_VERSION = 1;
+
+  /** States that end a job. Only these settle a channel, and only for its own job. */
   const TERMINAL_STATES = new Set(["completed", "failed", "cancelled"]);
+  /**
+   * Connection-level states. They describe a request, not a job, and must never
+   * terminate a channel — that is what let a malformed control message end a
+   * running download before the protocol was versioned.
+   */
+  const CONNECTION_STATES = new Set(["ready", "rejected", "control-error"]);
+
+  /**
+   * Decide whether a `hello` response comes from a host this extension can talk
+   * to. Pure, so the Node tests can cover it without a port.
+   */
+  function protocolCompatibility(hello) {
+    if (!hello || hello.ok === false) {
+      return {
+        ok: false,
+        error: hello?.error
+          || "The Downer native host did not answer the protocol handshake."
+      };
+    }
+    const version = hello.protocol_version;
+    if (!Number.isInteger(version)) {
+      return {
+        ok: false,
+        error: "The Downer native host is too old: it reports no protocol version. "
+          + "Rebuild it with `make extension`."
+      };
+    }
+    if (version !== PROTOCOL_VERSION) {
+      return {
+        ok: false,
+        error: `The Downer native host speaks protocol version ${version}, but this `
+          + `extension needs version ${PROTOCOL_VERSION}. Rebuild the native host with `
+          + "`make extension`, or install a matching extension version."
+      };
+    }
+    return {
+      ok: true,
+      hostVersion: hello.host_version || null,
+      capabilities: hello.capabilities || {}
+    };
+  }
 
   class NativeTaskChannel {
     constructor(port, jobId, onEvent, disconnectError) {
@@ -12,20 +62,39 @@ var DownerTaskProtocol = (() => {
       this.pending = new Map();
       this.nextRequest = 1;
       this.settled = false;
+      this.startRequestId = null;
       this.completion = new Promise((resolve, reject) => {
         this.resolveCompletion = resolve;
         this.rejectCompletion = reject;
       });
+      // A host that disconnects during the handshake rejects `completion` before
+      // anything awaits it; mark it handled so that is not an unhandled rejection.
+      this.completion.catch(() => undefined);
       port.onMessage.addListener((response) => this.handleMessage(response));
       port.onDisconnect.addListener(() => this.handleDisconnect());
     }
 
+    /** Connection handshake. Sent before any download, per `docs/protocol.md`. */
+    hello(timeoutMs = 5000) {
+      return this.send("hello", {}, timeoutMs, false);
+    }
+
     start(request) {
-      this.port.postMessage({ ...request, job_id: this.jobId });
+      this.startRequestId = `${this.jobId}-start`;
+      this.port.postMessage({
+        protocol_version: PROTOCOL_VERSION,
+        ...request,
+        job_id: this.jobId,
+        request_id: this.startRequestId
+      });
       return this.completion;
     }
 
     request(command, payload = {}, timeoutMs = 5000) {
+      return this.send(command, payload, timeoutMs, true);
+    }
+
+    send(command, payload, timeoutMs, includeJobId) {
       if (this.settled) {
         return Promise.resolve({ ok: false, error: "Download task is no longer active." });
       }
@@ -38,8 +107,9 @@ var DownerTaskProtocol = (() => {
         this.pending.set(requestId, { resolve, timeout });
         try {
           this.port.postMessage({
+            protocol_version: PROTOCOL_VERSION,
             command,
-            job_id: this.jobId,
+            ...(includeJobId ? { job_id: this.jobId } : {}),
             request_id: requestId,
             ...payload
           });
@@ -52,23 +122,44 @@ var DownerTaskProtocol = (() => {
     }
 
     handleMessage(response) {
-      if (response?.job_id && response.job_id !== this.jobId) return;
-      if (response?.request_id) {
-        const pending = this.pending.get(response.request_id);
+      const event = response || {};
+      if (event.job_id && event.job_id !== this.jobId) return;
+      if (event.request_id) {
+        const pending = this.pending.get(event.request_id);
         if (pending) {
           clearTimeout(pending.timeout);
-          this.pending.delete(response.request_id);
-          pending.resolve(response);
+          this.pending.delete(event.request_id);
+          pending.resolve(event);
         }
       }
-      this.onEvent(response || {});
-      if (TERMINAL_STATES.has(response?.state)) this.finish(response);
+      this.onEvent(event);
+      if (event.type === "rejected" || event.state === "rejected") {
+        // A rejection answers one request. It ends the job only when the request
+        // it rejects is the one that would have started the job.
+        if (event.request_id && event.request_id === this.startRequestId) {
+          this.fail(new Error(event.error || "The native host rejected the download."));
+        }
+        return;
+      }
+      // A terminal state settles this channel only when it names this job, so an
+      // unattributed failure can never end a download that is still running.
+      if (TERMINAL_STATES.has(event.state) && event.job_id === this.jobId) this.finish(event);
     }
 
     handleDisconnect() {
       if (this.settled) return;
       const message = this.disconnectError?.() || "native host disconnected";
       this.fail(new Error(message));
+    }
+
+    /** Give up on a channel that never started a job (a failed handshake). */
+    close(reason = "The native host connection was closed.") {
+      this.fail(new Error(reason));
+      try {
+        this.port.disconnect();
+      } catch (_) {
+        // The port may already be gone; closing is best effort.
+      }
     }
 
     finish(response) {
@@ -95,7 +186,13 @@ var DownerTaskProtocol = (() => {
     }
   }
 
-  return { NativeTaskChannel, TERMINAL_STATES };
+  return {
+    NativeTaskChannel,
+    TERMINAL_STATES,
+    CONNECTION_STATES,
+    PROTOCOL_VERSION,
+    protocolCompatibility
+  };
 })();
 
 if (typeof module !== "undefined") module.exports = DownerTaskProtocol;

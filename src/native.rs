@@ -20,6 +20,38 @@ use crate::{
 };
 
 const MAX_MESSAGE_BYTES: u32 = 1_048_576;
+
+/// Wire contract version. See `docs/protocol.md` and
+/// `docs/adr/0001-native-messaging-protocol.md`; the vocabulary is pinned by
+/// `tests/fixtures/protocol.json`, which both test suites read.
+pub const PROTOCOL_VERSION: u32 = 1;
+/// Requests that omit `protocol_version` are treated as this legacy version and
+/// still served, so an extension built before the handshake keeps working for
+/// one release cycle.
+const LEGACY_PROTOCOL_VERSION: u32 = 0;
+
+const EVENT_HELLO: &str = "hello";
+const EVENT_ACK: &str = "ack";
+const EVENT_PROGRESS: &str = "progress";
+const EVENT_LOG: &str = "log";
+const EVENT_TERMINAL: &str = "terminal";
+const EVENT_REJECTED: &str = "rejected";
+const EVENT_CONTROL_ERROR: &str = "control-error";
+
+const STATE_READY: &str = "ready";
+const STATE_REJECTED: &str = "rejected";
+const STATE_CONTROL_ERROR: &str = "control-error";
+
+const ERROR_INVALID_REQUEST: &str = "invalid_request";
+const ERROR_UNSUPPORTED_COMMAND: &str = "unsupported_command";
+const ERROR_UNSUPPORTED_PROTOCOL_VERSION: &str = "unsupported_protocol_version";
+const ERROR_DUPLICATE_JOB: &str = "duplicate_job";
+const ERROR_TASK_NOT_ACTIVE: &str = "task_not_active";
+const ERROR_INVALID_HLS_INFO: &str = "invalid_hls_info";
+const ERROR_DOWNLOAD_FAILED: &str = "download_failed";
+const ERROR_CONTROL_FAILED: &str = "control_failed";
+const ERROR_CANCELLED: &str = "cancelled";
+
 static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(1);
 type SharedOutput = Arc<Mutex<io::Stdout>>;
 type ActiveTasks = Arc<Mutex<HashMap<String, ActiveTask>>>;
@@ -34,6 +66,8 @@ struct ActiveTask {
 #[derive(Debug, Deserialize)]
 struct NativeRequest {
     command: String,
+    #[serde(default)]
+    protocol_version: Option<u32>,
     #[serde(default)]
     url: String,
     #[serde(default)]
@@ -59,10 +93,26 @@ struct NativeRequest {
 }
 
 #[derive(Debug, Serialize)]
+struct Capabilities {
+    /// Pause and resume use Unix process signals, so they are unavailable elsewhere.
+    pause_resume: bool,
+    hls_info: bool,
+}
+
+#[derive(Debug, Serialize)]
 struct NativeResponse {
+    protocol_version: u32,
+    #[serde(rename = "type")]
+    event_type: &'static str,
     ok: bool,
     path: Option<PathBuf>,
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host_version: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capabilities: Option<Capabilities>,
     #[serde(skip_serializing_if = "Option::is_none")]
     job_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,8 +127,32 @@ struct NativeResponse {
     request_id: Option<String>,
 }
 
+impl Default for NativeResponse {
+    fn default() -> Self {
+        Self {
+            protocol_version: PROTOCOL_VERSION,
+            event_type: EVENT_PROGRESS,
+            ok: true,
+            path: None,
+            error: None,
+            error_code: None,
+            host_version: None,
+            capabilities: None,
+            job_id: None,
+            state: None,
+            completed_segments: None,
+            total_segments: None,
+            percent: None,
+            request_id: None,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct NativeLogResponse {
+    protocol_version: u32,
+    #[serde(rename = "type")]
+    event_type: &'static str,
     ok: bool,
     job_id: String,
     state: String,
@@ -99,42 +173,86 @@ pub fn run_stdio() -> DownerResult<()> {
         let request = match serde_json::from_slice::<NativeRequest>(&payload) {
             Ok(request) => request,
             Err(error) => {
-                let response = NativeResponse {
-                    ok: false,
-                    path: None,
-                    error: Some(format!("invalid native request: {error}")),
-                    job_id: None,
-                    state: Some("failed".to_string()),
-                    completed_segments: None,
-                    total_segments: None,
-                    percent: None,
-                    request_id: None,
-                };
+                // A malformed frame carries no request_id and no job_id, so it is
+                // rejected without touching any running job.
+                let response = rejected(
+                    ERROR_INVALID_REQUEST,
+                    format!("invalid native request: {error}"),
+                    None,
+                    None,
+                );
                 send_response(&output, &response).map_err(DownerError::NativeIo)?;
                 continue;
             }
         };
+        let version = request.protocol_version.unwrap_or(LEGACY_PROTOCOL_VERSION);
+        if version != PROTOCOL_VERSION && version != LEGACY_PROTOCOL_VERSION {
+            let response = rejected(
+                ERROR_UNSUPPORTED_PROTOCOL_VERSION,
+                format!(
+                    "unsupported protocol version {version}; this host speaks version {PROTOCOL_VERSION}"
+                ),
+                request.request_id,
+                None,
+            );
+            send_response(&output, &response).map_err(DownerError::NativeIo)?;
+            continue;
+        }
         if request.command == "download" {
             start_download(request, output.clone(), tasks.clone())
                 .map_err(DownerError::NativeIo)?;
             continue;
         }
         let response = match request.command.as_str() {
+            "hello" => hello_response(request.request_id),
             "pause" | "resume" | "cancel" => control_download(request, &tasks),
             "hls-info" => update_hls_info(request, &tasks),
-            command => NativeResponse {
-                ok: false,
-                path: None,
-                error: Some(format!("unsupported native command: {command}")),
-                job_id: None,
-                state: Some("failed".to_string()),
-                completed_segments: None,
-                total_segments: None,
-                percent: None,
-                request_id: request.request_id,
-            },
+            command => rejected(
+                ERROR_UNSUPPORTED_COMMAND,
+                format!("unsupported native command: {command}"),
+                request.request_id,
+                None,
+            ),
         };
         send_response(&output, &response).map_err(DownerError::NativeIo)?;
+    }
+}
+
+/// Answer the connection handshake. Cheap by design: the extension sends this on
+/// every connect because a host process is started per download.
+fn hello_response(request_id: Option<String>) -> NativeResponse {
+    NativeResponse {
+        event_type: EVENT_HELLO,
+        ok: true,
+        state: Some(STATE_READY.to_string()),
+        host_version: Some(env!("CARGO_PKG_VERSION")),
+        capabilities: Some(Capabilities {
+            pause_resume: cfg!(unix),
+            hls_info: true,
+        }),
+        request_id,
+        ..NativeResponse::default()
+    }
+}
+
+/// A request the host refused to act on. `rejected` is deliberately **not** a
+/// job state: the client must never treat it as terminal, so a malformed or
+/// unsupported message can no longer end a running job's channel.
+fn rejected(
+    error_code: &'static str,
+    error: String,
+    request_id: Option<String>,
+    job_id: Option<String>,
+) -> NativeResponse {
+    NativeResponse {
+        event_type: EVENT_REJECTED,
+        ok: false,
+        error: Some(error),
+        error_code: Some(error_code),
+        job_id,
+        state: Some(STATE_REJECTED.to_string()),
+        request_id,
+        ..NativeResponse::default()
     }
 }
 
@@ -160,19 +278,16 @@ fn start_download(
         .lock()
         .map_err(|_| io::Error::other("download task registry is unavailable"))?;
     if active.contains_key(&job_id) {
+        // Rejected rather than failed: the job named here is already running and
+        // must not be terminated by a duplicate start.
         return send_response(
             &output,
-            &NativeResponse {
-                ok: false,
-                path: None,
-                error: Some(format!("download task already exists: {job_id}")),
-                job_id: Some(job_id),
-                state: Some("failed".to_string()),
-                completed_segments: None,
-                total_segments: None,
-                percent: None,
-                request_id: request.request_id,
-            },
+            &rejected(
+                ERROR_DUPLICATE_JOB,
+                format!("download task already exists: {job_id}"),
+                request.request_id,
+                Some(job_id),
+            ),
         );
     }
     active.insert(job_id.clone(), task.clone());
@@ -181,15 +296,14 @@ fn start_download(
     if let Err(error) = send_response(
         &output,
         &NativeResponse {
+            event_type: EVENT_PROGRESS,
             ok: true,
-            path: None,
-            error: None,
             job_id: Some(job_id.clone()),
             state: Some("starting".to_string()),
-            completed_segments: None,
             total_segments: initial_info.map(|info| info.total_segments),
             percent: initial_info.map(|_| 0.0),
             request_id: request.request_id.clone(),
+            ..NativeResponse::default()
         },
     ) {
         if let Ok(mut active) = tasks.lock() {
@@ -215,15 +329,13 @@ fn start_download(
                     cancelled_response(&worker_job_id)
                 }
                 Err(error) => NativeResponse {
+                    event_type: EVENT_TERMINAL,
                     ok: false,
-                    path: None,
                     error: Some(error.to_string()),
+                    error_code: Some(ERROR_DOWNLOAD_FAILED),
                     job_id: Some(worker_job_id.clone()),
                     state: Some("failed".to_string()),
-                    completed_segments: None,
-                    total_segments: None,
-                    percent: None,
-                    request_id: None,
+                    ..NativeResponse::default()
                 },
             }
         };
@@ -249,6 +361,7 @@ fn completed_response(job_id: &str, path: PathBuf, task: &ActiveTask) -> NativeR
         "completed",
         None,
     );
+    response.event_type = EVENT_TERMINAL;
     response.path = Some(path);
     response
 }
@@ -320,7 +433,12 @@ fn control_download(request: NativeRequest, tasks: &ActiveTasks) -> NativeRespon
         .ok()
         .and_then(|active| active.get(&job_id).cloned());
     let Some(task) = task else {
-        return control_error(job_id, request.request_id, "download task is not active");
+        return control_error(
+            job_id,
+            request.request_id,
+            ERROR_TASK_NOT_ACTIVE,
+            "download task is not active",
+        );
     };
     let result = match request.command.as_str() {
         "pause" => task.control.pause().map(|()| "paused"),
@@ -330,17 +448,14 @@ fn control_download(request: NativeRequest, tasks: &ActiveTasks) -> NativeRespon
     };
     match result {
         Ok(state) => NativeResponse {
+            event_type: EVENT_ACK,
             ok: true,
-            path: None,
-            error: None,
             job_id: Some(job_id),
             state: Some(state.to_string()),
-            completed_segments: None,
-            total_segments: None,
-            percent: None,
             request_id: request.request_id,
+            ..NativeResponse::default()
         },
-        Err(error) => control_error(job_id, request.request_id, &error),
+        Err(error) => control_error(job_id, request.request_id, ERROR_CONTROL_FAILED, &error),
     }
 }
 
@@ -351,7 +466,12 @@ fn update_hls_info(request: NativeRequest, tasks: &ActiveTasks) -> NativeRespons
         .ok()
         .and_then(|active| active.get(&job_id).cloned());
     let Some(task) = task else {
-        return control_error(job_id, request.request_id, "download task is not active");
+        return control_error(
+            job_id,
+            request.request_id,
+            ERROR_TASK_NOT_ACTIVE,
+            "download task is not active",
+        );
     };
     let info = match (request.total_segments, request.total_duration_ms) {
         (Some(total_segments), Some(total_duration_ms)) if total_segments > 0 => HlsInfo {
@@ -362,6 +482,7 @@ fn update_hls_info(request: NativeRequest, tasks: &ActiveTasks) -> NativeRespons
             return control_error(
                 job_id,
                 request.request_id,
+                ERROR_INVALID_HLS_INFO,
                 "invalid HLS segment information",
             )
         }
@@ -372,6 +493,7 @@ fn update_hls_info(request: NativeRequest, tasks: &ActiveTasks) -> NativeRespons
         return control_error(
             job_id,
             request.request_id,
+            ERROR_CONTROL_FAILED,
             "HLS progress state is unavailable",
         );
     }
@@ -389,31 +511,35 @@ fn update_hls_info(request: NativeRequest, tasks: &ActiveTasks) -> NativeRespons
     )
 }
 
-fn control_error(job_id: String, request_id: Option<String>, error: &str) -> NativeResponse {
+/// A control command the host understood but could not apply. Like `rejected`,
+/// `control-error` is not a job state and never terminates a job.
+fn control_error(
+    job_id: String,
+    request_id: Option<String>,
+    error_code: &'static str,
+    error: &str,
+) -> NativeResponse {
     NativeResponse {
+        event_type: EVENT_CONTROL_ERROR,
         ok: false,
-        path: None,
         error: Some(error.to_string()),
+        error_code: Some(error_code),
         job_id: Some(job_id),
-        state: Some("control-error".to_string()),
-        completed_segments: None,
-        total_segments: None,
-        percent: None,
+        state: Some(STATE_CONTROL_ERROR.to_string()),
         request_id,
+        ..NativeResponse::default()
     }
 }
 
 fn cancelled_response(job_id: &str) -> NativeResponse {
     NativeResponse {
+        event_type: EVENT_TERMINAL,
         ok: false,
-        path: None,
         error: Some("download cancelled".to_string()),
+        error_code: Some(ERROR_CANCELLED),
         job_id: Some(job_id.to_string()),
         state: Some("cancelled".to_string()),
-        completed_segments: None,
-        total_segments: None,
-        percent: None,
-        request_id: None,
+        ..NativeResponse::default()
     }
 }
 
@@ -512,6 +638,8 @@ fn download(
         let _ = send_response(
             &log_output,
             &NativeLogResponse {
+                protocol_version: PROTOCOL_VERSION,
+                event_type: EVENT_LOG,
                 ok: true,
                 job_id: log_job_id.clone(),
                 state: "downloading".to_string(),
@@ -561,15 +689,15 @@ fn progress_response(
         (None, _) => (None, None, None),
     };
     NativeResponse {
+        event_type: EVENT_PROGRESS,
         ok: true,
-        path: None,
-        error: None,
         job_id: Some(job_id.to_string()),
         state: Some(state.to_string()),
         completed_segments,
         total_segments,
         percent,
         request_id,
+        ..NativeResponse::default()
     }
 }
 
