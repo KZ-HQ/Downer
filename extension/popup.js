@@ -1,3 +1,7 @@
+/* global DownerJobView */
+
+const { RENDER_STALE, renderableJobs } = DownerJobView;
+
 const statusElement = document.getElementById("status");
 const listElement = document.getElementById("media-list");
 const helpElement = document.getElementById("help");
@@ -9,70 +13,74 @@ function showStatus(message) {
   statusElement.textContent = message;
 }
 
+/**
+ * Render one job's state. A job with no row on this page is not about what the
+ * user is looking at, so it renders nothing at all — in particular it does not
+ * set the headline status, which is the defect this guard closes.
+ */
 function renderDownloadStatus(job) {
   const row = rowsByJobId.get(job.id) || rowsByUrl.get(job.url);
-  if (row) {
-    rowsByJobId.set(job.id, row);
-    const button = row.download;
-    button.dataset.jobId = job.id;
-    const showProgress = ["starting", "preparing", "downloading", "paused", "cancelling", "completed"].includes(job.state);
-    row.progress.hidden = !showProgress;
-    if (job.totalSegments) {
-      const completed = job.state === "completed"
-        ? job.totalSegments
-        : Math.min(job.completedSegments || 0, job.totalSegments);
-      row.count.textContent = String(completed) + " / " + String(job.totalSegments) + " segments";
-      row.progress.max = 100;
-      row.progress.value = job.state === "completed"
-        ? 100
-        : Math.max(0, Math.min(100, job.percent || 0));
-    } else if (job.state === "completed") {
-      row.count.textContent = "Complete";
-      row.progress.max = 100;
-      row.progress.value = 100;
-    } else if (job.state === "cancelled") {
-      row.count.textContent = "Cancelled";
-      row.progress.removeAttribute("value");
-    } else if (job.state === "failed") {
-      row.count.textContent = "Failed";
-      row.progress.removeAttribute("value");
-    } else {
-      row.count.textContent = job.metadataError
-        ? "Waiting for playlist metadata…"
-        : "Waiting for FFmpeg progress…";
-      row.progress.removeAttribute("value");
-    }
-    if (job.state === "completed") {
-      button.disabled = true;
-      button.textContent = "Downloaded";
-    } else if (job.state === "failed") {
-      button.disabled = false;
-      button.textContent = "Retry";
-    } else if (job.state === "cancelled") {
-      button.disabled = false;
-      button.textContent = "Download again";
-    } else if (job.state === "preparing") {
-      button.disabled = true;
-      button.textContent = "Preparing…";
-    } else if (job.state === "paused") {
-      button.disabled = true;
-      button.textContent = "Paused";
-    } else if (job.state === "cancelling") {
-      button.disabled = true;
-      button.textContent = "Cancelling…";
-    } else {
-      button.disabled = true;
-      button.textContent = "Downloading…";
-    }
-
-    const active = ["starting", "preparing", "downloading", "paused", "cancelling"].includes(job.state);
-    row.pause.hidden = !active || !["starting", "preparing", "downloading"].includes(job.state);
-    row.resume.hidden = !active || job.state !== "paused";
-    row.cancel.hidden = !active || job.state === "cancelling";
-    row.pause.disabled = !["starting", "preparing", "downloading"].includes(job.state);
-    row.resume.disabled = job.state !== "paused";
-    row.cancel.disabled = !["starting", "preparing", "downloading", "paused"].includes(job.state);
+  if (!row) return;
+  rowsByJobId.set(job.id, row);
+  const button = row.download;
+  button.dataset.jobId = job.id;
+  const showProgress = ["starting", "preparing", "downloading", "paused", "cancelling", "completed"].includes(job.state);
+  row.progress.hidden = !showProgress;
+  if (job.totalSegments) {
+    const completed = job.state === "completed"
+      ? job.totalSegments
+      : Math.min(job.completedSegments || 0, job.totalSegments);
+    row.count.textContent = String(completed) + " / " + String(job.totalSegments) + " segments";
+    row.progress.max = 100;
+    row.progress.value = job.state === "completed"
+      ? 100
+      : Math.max(0, Math.min(100, job.percent || 0));
+  } else if (job.state === "completed") {
+    row.count.textContent = "Complete";
+    row.progress.max = 100;
+    row.progress.value = 100;
+  } else if (job.state === "cancelled") {
+    row.count.textContent = "Cancelled";
+    row.progress.removeAttribute("value");
+  } else if (job.state === "failed") {
+    row.count.textContent = "Failed";
+    row.progress.removeAttribute("value");
+  } else {
+    row.count.textContent = job.metadataError
+      ? "Waiting for playlist metadata…"
+      : "Waiting for FFmpeg progress…";
+    row.progress.removeAttribute("value");
   }
+  if (job.state === "completed") {
+    button.disabled = true;
+    button.textContent = "Downloaded";
+  } else if (job.state === "failed") {
+    button.disabled = false;
+    button.textContent = "Retry";
+  } else if (job.state === "cancelled") {
+    button.disabled = false;
+    button.textContent = "Download again";
+  } else if (job.state === "preparing") {
+    button.disabled = true;
+    button.textContent = "Preparing…";
+  } else if (job.state === "paused") {
+    button.disabled = true;
+    button.textContent = "Paused";
+  } else if (job.state === "cancelling") {
+    button.disabled = true;
+    button.textContent = "Cancelling…";
+  } else {
+    button.disabled = true;
+    button.textContent = "Downloading…";
+  }
+
+  const active = ["starting", "preparing", "downloading", "paused", "cancelling"].includes(job.state);
+  row.pause.hidden = !active || !["starting", "preparing", "downloading"].includes(job.state);
+  row.resume.hidden = !active || job.state !== "paused";
+  row.cancel.hidden = !active || job.state === "cancelling";
+  row.pause.disabled = !["starting", "preparing", "downloading"].includes(job.state);
+  row.resume.disabled = job.state !== "paused";
+  row.cancel.disabled = !["starting", "preparing", "downloading", "paused"].includes(job.state);
 
   if (job.state === "completed") {
     showStatus(`Download complete: ${job.path}`);
@@ -193,10 +201,42 @@ browser.runtime.onMessage.addListener((message) => {
   }
 });
 
+/**
+ * Show a job that was still running when its session ended. No native task
+ * exists for it, so the row must not offer Pause or Cancel and must not disable
+ * Download: `controlDownload` would only answer "Download task is no longer
+ * active." This is a popup-local presentation, not a job state — KEI-56 owns
+ * reconciling such jobs in storage.
+ */
+function renderInterruptedJob(job) {
+  const row = rowsByUrl.get(job.url);
+  if (!row) return;
+  row.count.textContent = "Interrupted — not running";
+  row.progress.hidden = true;
+  row.progress.removeAttribute("value");
+  row.download.disabled = false;
+  row.download.textContent = "Download";
+  // Deliberately leave `dataset.jobId` unset: nothing may be wired to a task
+  // that no longer exists.
+  delete row.download.dataset.jobId;
+  for (const control of [row.pause, row.resume, row.cancel]) {
+    control.hidden = true;
+    control.disabled = true;
+  }
+}
+
 async function restoreDownloadStatuses() {
   try {
     const response = await browser.runtime.sendMessage({ type: "get-download-statuses" });
-    for (const job of response?.jobs || []) renderDownloadStatus(job);
+    const decisions = renderableJobs({
+      jobs: response?.jobs || [],
+      candidateUrls: [...rowsByUrl.keys()],
+      sessionJobIds: response?.sessionJobIds || []
+    });
+    for (const { job, render } of decisions) {
+      if (render === RENDER_STALE) renderInterruptedJob(job);
+      else renderDownloadStatus(job);
+    }
   } catch (_) {
     // Status restoration is optional; a new download still works.
   }

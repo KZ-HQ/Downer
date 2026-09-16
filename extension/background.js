@@ -3,6 +3,12 @@ const MAX_SAVED_JOBS = 20;
 const MAX_LOG_LINES = 500;
 const jobs = new Map();
 const nativeTasks = new Map();
+/**
+ * Jobs begun since this background script loaded. Persisted jobs restored from
+ * `storage.local` are deliberately not in here, so the popup can tell a live
+ * download from history left by an earlier session (see extension/job-view.js).
+ */
+const sessionJobs = new Set();
 let storageWrite = Promise.resolve();
 
 const {
@@ -274,6 +280,7 @@ function beginDownload(message) {
     startedAt: Date.now()
   };
   jobs.set(jobId, job);
+  sessionJobs.add(jobId);
   broadcast(job);
   void saveJobs();
   void runDownload(message, jobId);
@@ -285,7 +292,10 @@ browser.runtime.onMessage.addListener((message) => {
     return Promise.resolve(beginDownload(message));
   }
   if (message?.type === "get-download-statuses") {
-    return jobsReady.then(() => ({ jobs: Array.from(jobs.values()).slice(-MAX_SAVED_JOBS) }));
+    return jobsReady.then(() => ({
+      jobs: Array.from(jobs.values()).slice(-MAX_SAVED_JOBS),
+      sessionJobIds: Array.from(sessionJobs)
+    }));
   }
   if (message?.type === "control-download") {
     return controlDownload(message.jobId, message.command);

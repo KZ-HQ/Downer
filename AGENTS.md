@@ -102,7 +102,10 @@ ADR.
    lives in `extension/media-scan.js`, whose attribute list is kept identical to
    `src/scraper.rs::extract_media_urls` so the CLI and the extension find the
    same media on the same page.
-2. `extension/popup.js` starts downloads and renders status/control events.
+2. `extension/popup.js` starts downloads and renders status/control events. Which
+   persisted jobs a popup renders is decided by `extension/job-view.js`: only
+   media listed on the page being viewed, and only jobs begun in the current
+   browser session may set the headline status.
 3. `extension/background.js` owns persistent jobs, cookies, playlist metadata,
    native task channels, progress state, and log history.
 4. `extension/task-protocol.js` correlates native control acknowledgements and
