@@ -1,0 +1,616 @@
+use std::{
+    collections::HashMap,
+    io::{self, Read, Write},
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    error::{DownerError, DownerResult},
+    ffmpeg::{FfmpegProgress, ProcessControl},
+    scraper::{hls_info_with_timeout, HlsInfo, ResolvedMedia},
+    DownloadOptions,
+};
+
+const MAX_MESSAGE_BYTES: u32 = 1_048_576;
+static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(1);
+type SharedOutput = Arc<Mutex<io::Stdout>>;
+type ActiveTasks = Arc<Mutex<HashMap<String, ActiveTask>>>;
+
+#[derive(Clone, Debug)]
+struct ActiveTask {
+    control: ProcessControl,
+    hls_info: Arc<Mutex<Option<HlsInfo>>>,
+    progress: Arc<Mutex<Option<FfmpegProgress>>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NativeRequest {
+    command: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    job_id: Option<String>,
+    #[serde(default)]
+    source_url: Option<String>,
+    #[serde(default)]
+    output_dir: Option<PathBuf>,
+    #[serde(default)]
+    overwrite: bool,
+    #[serde(default)]
+    cookie: Option<String>,
+    #[serde(default)]
+    user_agent: Option<String>,
+    #[serde(default)]
+    threads: Option<u16>,
+    #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
+    total_segments: Option<u64>,
+    #[serde(default)]
+    total_duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct NativeResponse {
+    ok: bool,
+    path: Option<PathBuf>,
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completed_segments: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_segments: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct NativeLogResponse {
+    ok: bool,
+    job_id: String,
+    state: String,
+    log: String,
+}
+
+pub fn run_stdio() -> DownerResult<()> {
+    let stdin = io::stdin();
+    let mut input = stdin.lock();
+    let output = Arc::new(Mutex::new(io::stdout()));
+    let tasks = Arc::new(Mutex::new(HashMap::new()));
+
+    loop {
+        let Some(payload) = read_message(&mut input).map_err(DownerError::NativeIo)? else {
+            cancel_all(&tasks);
+            return Ok(());
+        };
+        let request = match serde_json::from_slice::<NativeRequest>(&payload) {
+            Ok(request) => request,
+            Err(error) => {
+                let response = NativeResponse {
+                    ok: false,
+                    path: None,
+                    error: Some(format!("invalid native request: {error}")),
+                    job_id: None,
+                    state: Some("failed".to_string()),
+                    completed_segments: None,
+                    total_segments: None,
+                    percent: None,
+                    request_id: None,
+                };
+                send_response(&output, &response).map_err(DownerError::NativeIo)?;
+                continue;
+            }
+        };
+        if request.command == "download" {
+            start_download(request, output.clone(), tasks.clone())
+                .map_err(DownerError::NativeIo)?;
+            continue;
+        }
+        let response = match request.command.as_str() {
+            "pause" | "resume" | "cancel" => control_download(request, &tasks),
+            "hls-info" => update_hls_info(request, &tasks),
+            command => NativeResponse {
+                ok: false,
+                path: None,
+                error: Some(format!("unsupported native command: {command}")),
+                job_id: None,
+                state: Some("failed".to_string()),
+                completed_segments: None,
+                total_segments: None,
+                percent: None,
+                request_id: request.request_id,
+            },
+        };
+        send_response(&output, &response).map_err(DownerError::NativeIo)?;
+    }
+}
+
+fn start_download(
+    request: NativeRequest,
+    output: SharedOutput,
+    tasks: ActiveTasks,
+) -> io::Result<()> {
+    let job_id = request.job_id.clone().unwrap_or_else(next_job_id);
+    let initial_info = match (request.total_segments, request.total_duration_ms) {
+        (Some(total_segments), Some(total_duration_ms)) if total_segments > 0 => Some(HlsInfo {
+            total_segments,
+            total_duration_ms,
+        }),
+        _ => None,
+    };
+    let task = ActiveTask {
+        control: ProcessControl::new(),
+        hls_info: Arc::new(Mutex::new(initial_info)),
+        progress: Arc::new(Mutex::new(None)),
+    };
+    let mut active = tasks
+        .lock()
+        .map_err(|_| io::Error::other("download task registry is unavailable"))?;
+    if active.contains_key(&job_id) {
+        return send_response(
+            &output,
+            &NativeResponse {
+                ok: false,
+                path: None,
+                error: Some(format!("download task already exists: {job_id}")),
+                job_id: Some(job_id),
+                state: Some("failed".to_string()),
+                completed_segments: None,
+                total_segments: None,
+                percent: None,
+                request_id: request.request_id,
+            },
+        );
+    }
+    active.insert(job_id.clone(), task.clone());
+    drop(active);
+
+    if let Err(error) = send_response(
+        &output,
+        &NativeResponse {
+            ok: true,
+            path: None,
+            error: None,
+            job_id: Some(job_id.clone()),
+            state: Some("starting".to_string()),
+            completed_segments: None,
+            total_segments: initial_info.map(|info| info.total_segments),
+            percent: initial_info.map(|_| 0.0),
+            request_id: request.request_id.clone(),
+        },
+    ) {
+        if let Ok(mut active) = tasks.lock() {
+            active.remove(&job_id);
+        }
+        return Err(error);
+    }
+
+    start_hls_preflight(&request, &job_id, &task, output.clone(), tasks.clone());
+
+    let worker_job_id = job_id.clone();
+    let worker_task = task.clone();
+    thread::spawn(move || {
+        let response = if worker_task.control.is_cancelled() {
+            cancelled_response(&worker_job_id)
+        } else {
+            match download(request, &worker_task, output.clone(), &worker_job_id) {
+                Ok(_path) if worker_task.control.is_cancelled() => {
+                    cancelled_response(&worker_job_id)
+                }
+                Ok(path) => completed_response(&worker_job_id, path, &worker_task),
+                Err(_error) if worker_task.control.is_cancelled() => {
+                    cancelled_response(&worker_job_id)
+                }
+                Err(error) => NativeResponse {
+                    ok: false,
+                    path: None,
+                    error: Some(error.to_string()),
+                    job_id: Some(worker_job_id.clone()),
+                    state: Some("failed".to_string()),
+                    completed_segments: None,
+                    total_segments: None,
+                    percent: None,
+                    request_id: None,
+                },
+            }
+        };
+        let _ = send_response(&output, &response);
+        if let Ok(mut active) = tasks.lock() {
+            active.remove(&worker_job_id);
+        }
+    });
+
+    Ok(())
+}
+
+fn completed_response(job_id: &str, path: PathBuf, task: &ActiveTask) -> NativeResponse {
+    let info = task.hls_info.lock().ok().and_then(|info| *info);
+    let progress = task.progress.lock().ok().and_then(|progress| *progress);
+    let mut response = progress_response(
+        job_id,
+        info,
+        Some(FfmpegProgress {
+            out_time_ms: progress.and_then(|value| value.out_time_ms),
+            finished: true,
+        }),
+        "completed",
+        None,
+    );
+    response.path = Some(path);
+    response
+}
+
+fn start_hls_preflight(
+    request: &NativeRequest,
+    job_id: &str,
+    task: &ActiveTask,
+    output: SharedOutput,
+    tasks: ActiveTasks,
+) {
+    if task.hls_info.lock().ok().and_then(|info| *info).is_some()
+        || !request.url.to_ascii_lowercase().contains(".m3u8")
+    {
+        return;
+    }
+    let Ok(url) = crate::output::validate_url(&request.url) else {
+        return;
+    };
+    let referer = request
+        .source_url
+        .as_deref()
+        .and_then(|url| crate::output::validate_url(url).ok());
+    let user_agent = request
+        .user_agent
+        .clone()
+        .unwrap_or_else(|| "Mozilla/5.0 (Firefox; downer native host)".to_string());
+    let cookie = request.cookie.clone();
+    let job_id = job_id.to_string();
+    let task = task.clone();
+    thread::spawn(move || {
+        let info = hls_info_with_timeout(
+            &url,
+            &user_agent,
+            referer.as_ref(),
+            cookie.as_deref(),
+            Duration::from_secs(8),
+        );
+        let Some(info) = info else {
+            return;
+        };
+        let still_active = tasks
+            .lock()
+            .ok()
+            .is_some_and(|active| active.contains_key(&job_id));
+        if !still_active {
+            return;
+        }
+        if let Ok(mut current) = task.hls_info.lock() {
+            *current = Some(info);
+        }
+        let progress = task.progress.lock().ok().and_then(|progress| *progress);
+        let state = if task.control.is_paused() {
+            "paused"
+        } else {
+            "downloading"
+        };
+        let _ = send_response(
+            &output,
+            &progress_response(&job_id, Some(info), progress, state, None),
+        );
+    });
+}
+
+fn control_download(request: NativeRequest, tasks: &ActiveTasks) -> NativeResponse {
+    let job_id = request.job_id.unwrap_or_default();
+    let task = tasks
+        .lock()
+        .ok()
+        .and_then(|active| active.get(&job_id).cloned());
+    let Some(task) = task else {
+        return control_error(job_id, request.request_id, "download task is not active");
+    };
+    let result = match request.command.as_str() {
+        "pause" => task.control.pause().map(|()| "paused"),
+        "resume" => task.control.resume().map(|()| "downloading"),
+        "cancel" => task.control.cancel().map(|()| "cancelling"),
+        _ => Err("unsupported task control".to_string()),
+    };
+    match result {
+        Ok(state) => NativeResponse {
+            ok: true,
+            path: None,
+            error: None,
+            job_id: Some(job_id),
+            state: Some(state.to_string()),
+            completed_segments: None,
+            total_segments: None,
+            percent: None,
+            request_id: request.request_id,
+        },
+        Err(error) => control_error(job_id, request.request_id, &error),
+    }
+}
+
+fn update_hls_info(request: NativeRequest, tasks: &ActiveTasks) -> NativeResponse {
+    let job_id = request.job_id.unwrap_or_default();
+    let task = tasks
+        .lock()
+        .ok()
+        .and_then(|active| active.get(&job_id).cloned());
+    let Some(task) = task else {
+        return control_error(job_id, request.request_id, "download task is not active");
+    };
+    let info = match (request.total_segments, request.total_duration_ms) {
+        (Some(total_segments), Some(total_duration_ms)) if total_segments > 0 => HlsInfo {
+            total_segments,
+            total_duration_ms,
+        },
+        _ => {
+            return control_error(
+                job_id,
+                request.request_id,
+                "invalid HLS segment information",
+            )
+        }
+    };
+    if let Ok(mut current) = task.hls_info.lock() {
+        *current = Some(info);
+    } else {
+        return control_error(
+            job_id,
+            request.request_id,
+            "HLS progress state is unavailable",
+        );
+    }
+    let progress = task.progress.lock().ok().and_then(|progress| *progress);
+    progress_response(
+        &job_id,
+        Some(info),
+        progress,
+        if task.control.is_paused() {
+            "paused"
+        } else {
+            "downloading"
+        },
+        request.request_id,
+    )
+}
+
+fn control_error(job_id: String, request_id: Option<String>, error: &str) -> NativeResponse {
+    NativeResponse {
+        ok: false,
+        path: None,
+        error: Some(error.to_string()),
+        job_id: Some(job_id),
+        state: Some("control-error".to_string()),
+        completed_segments: None,
+        total_segments: None,
+        percent: None,
+        request_id,
+    }
+}
+
+fn cancelled_response(job_id: &str) -> NativeResponse {
+    NativeResponse {
+        ok: false,
+        path: None,
+        error: Some("download cancelled".to_string()),
+        job_id: Some(job_id.to_string()),
+        state: Some("cancelled".to_string()),
+        completed_segments: None,
+        total_segments: None,
+        percent: None,
+        request_id: None,
+    }
+}
+
+fn cancel_all(tasks: &ActiveTasks) {
+    if let Ok(active) = tasks.lock() {
+        for task in active.values() {
+            let _ = task.control.cancel();
+        }
+    }
+}
+
+fn send_response<T: Serialize>(output: &SharedOutput, response: &T) -> io::Result<()> {
+    let mut output = output
+        .lock()
+        .map_err(|_| io::Error::other("native output is unavailable"))?;
+    write_message(&mut *output, response)
+}
+
+fn next_job_id() -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    let sequence = NEXT_JOB_ID.fetch_add(1, Ordering::Relaxed);
+    format!("native-{timestamp}-{sequence}")
+}
+
+fn download(
+    request: NativeRequest,
+    task: &ActiveTask,
+    output: SharedOutput,
+    job_id: &str,
+) -> DownerResult<PathBuf> {
+    let url = crate::output::validate_url(&request.url)?;
+    let referer = request
+        .source_url
+        .as_deref()
+        .map(crate::output::validate_url)
+        .transpose()?;
+    let user_agent = request
+        .user_agent
+        .unwrap_or_else(|| "Mozilla/5.0 (Firefox; downer native host)".to_string());
+    let media = ResolvedMedia {
+        url,
+        referer,
+        user_agent: user_agent.clone(),
+    };
+    let options = DownloadOptions {
+        output: None,
+        dir: Some(
+            request
+                .output_dir
+                .or_else(dirs::download_dir)
+                .unwrap_or_else(|| PathBuf::from(".")),
+        ),
+        overwrite: request.overwrite,
+        ffmpeg: ffmpeg_path(),
+        user_agent,
+        cookie: request.cookie,
+        threads: request.threads,
+        quiet: true,
+    };
+    let info = task.hls_info.lock().ok().and_then(|info| *info);
+    let state = if task.control.is_paused() {
+        "paused"
+    } else {
+        "downloading"
+    };
+    let _ = send_response(&output, &progress_response(job_id, info, None, state, None));
+    let progress_output = output.clone();
+    let progress_job_id = job_id.to_string();
+    let progress_task = task.clone();
+    let progress = move |value: FfmpegProgress| {
+        if let Ok(mut current) = progress_task.progress.lock() {
+            *current = Some(value);
+        }
+        let info = progress_task.hls_info.lock().ok().and_then(|info| *info);
+        let _ = send_response(
+            &progress_output,
+            &progress_response(
+                &progress_job_id,
+                info,
+                Some(value),
+                if progress_task.control.is_paused() {
+                    "paused"
+                } else {
+                    "downloading"
+                },
+                None,
+            ),
+        );
+    };
+    let log_output = output.clone();
+    let log_job_id = job_id.to_string();
+    let log = move |line: String| {
+        let _ = send_response(
+            &log_output,
+            &NativeLogResponse {
+                ok: true,
+                job_id: log_job_id.clone(),
+                state: "downloading".to_string(),
+                log: line,
+            },
+        );
+    };
+    crate::download_resolved_controlled_with_progress_and_logs(
+        media,
+        &options,
+        &task.control,
+        progress,
+        log,
+    )
+}
+
+fn progress_response(
+    job_id: &str,
+    info: Option<HlsInfo>,
+    progress: Option<FfmpegProgress>,
+    state: &str,
+    request_id: Option<String>,
+) -> NativeResponse {
+    let (completed_segments, total_segments, percent) = match (info, progress) {
+        (Some(info), Some(progress)) if progress.finished => (
+            Some(info.total_segments),
+            Some(info.total_segments),
+            Some(100.0),
+        ),
+        (Some(info), Some(progress)) => {
+            let completed = progress
+                .out_time_ms
+                .filter(|_| info.total_duration_ms > 0)
+                .map(|elapsed| {
+                    (elapsed.saturating_mul(info.total_segments) / info.total_duration_ms)
+                        .min(info.total_segments)
+                })
+                .unwrap_or(0);
+            let percent = if info.total_segments == 0 {
+                0.0
+            } else {
+                completed as f64 * 100.0 / info.total_segments as f64
+            };
+            (Some(completed), Some(info.total_segments), Some(percent))
+        }
+        (Some(info), None) => (Some(0), Some(info.total_segments), Some(0.0)),
+        (None, _) => (None, None, None),
+    };
+    NativeResponse {
+        ok: true,
+        path: None,
+        error: None,
+        job_id: Some(job_id.to_string()),
+        state: Some(state.to_string()),
+        completed_segments,
+        total_segments,
+        percent,
+        request_id,
+    }
+}
+
+fn ffmpeg_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("DOWNER_FFMPEG") {
+        return PathBuf::from(path);
+    }
+    for path in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"] {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return path;
+        }
+    }
+    PathBuf::from("ffmpeg")
+}
+
+fn read_message(input: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
+    let mut length = [0_u8; 4];
+    match input.read_exact(&mut length) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    let length = u32::from_le_bytes(length);
+    if length > MAX_MESSAGE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native message exceeds 1 MiB",
+        ));
+    }
+    let mut payload = vec![0_u8; length as usize];
+    input.read_exact(&mut payload)?;
+    Ok(Some(payload))
+}
+
+fn write_message<T: Serialize>(output: &mut impl Write, response: &T) -> io::Result<()> {
+    let payload = serde_json::to_vec(response)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let length = u32::try_from(payload.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "native response is too large"))?;
+    output.write_all(&length.to_le_bytes())?;
+    output.write_all(&payload)?;
+    output.flush()
+}
