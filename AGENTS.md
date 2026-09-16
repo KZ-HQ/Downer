@@ -85,7 +85,14 @@ ADR.
 - `scripts/`: native host installation and launcher scripts.
 - `.claude/settings.json`: Claude Code project settings. It pre-approves the
   Linear MCP tools so agent sessions do not prompt for routine issue and
-  comment updates, while still asking before any Linear delete.
+  comment updates, while still asking before any MCP delete. Permission rules
+  match on the MCP **server name as configured in that session**, which varies
+  by how Linear was connected, so the allow list carries every spelling seen so
+  far. If a session still prompts, read the server name from the tool named in
+  the prompt (`mcp__<server>__<tool>`) and add `mcp__<server>` to the list.
+  Two things this file cannot fix: settings are read at session start, so a
+  change needs a fresh session, and if an organization sets a claude.ai
+  connector tool to `ask`, allow rules for it never take effect.
 - `docs/`: `protocol.md`, the native messaging contract implemented by
   `src/native.rs` and `extension/task-protocol.js`, and `adr/`, the
   architecture decision records.
