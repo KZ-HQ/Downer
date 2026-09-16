@@ -359,9 +359,15 @@ mod tests {
         assert!(resolved.referer.is_none());
     }
 
+    /// Fixtures are shared with the extension's Node tests in `tests/extension/`,
+    /// so both parsers stay pinned to the same inputs until they are consolidated.
+    const SEGMENTS_PLAYLIST: &str = include_str!("../tests/fixtures/hls/segments.m3u8");
+    const TOLERANT_PLAYLIST: &str = include_str!("../tests/fixtures/hls/segments-tolerant.m3u8");
+    const MASTER_PLAYLIST: &str = include_str!("../tests/fixtures/hls/master.m3u8");
+
     #[test]
     fn counts_hls_segments_and_duration() {
-        let playlist = "#EXTM3U\n#EXTINF:6.006,\nvideo0.jpeg\n#EXTINF:4.5,\nvideo1.jpeg\n";
+        let playlist = SEGMENTS_PLAYLIST;
         assert_eq!(
             parse_hls_info(playlist),
             Some(HlsInfo {
@@ -373,7 +379,7 @@ mod tests {
 
     #[test]
     fn hls_metadata_tolerates_indentation_and_bad_duration_lines() {
-        let playlist = "#EXTM3U\n  #EXTINF:2.5,\nvideo0.jpeg\n#EXTINF:not-a-number,\nignored.jpeg\n#EXTINF:3,\nvideo1.jpeg\n";
+        let playlist = TOLERANT_PLAYLIST;
         assert_eq!(
             parse_hls_info(playlist),
             Some(HlsInfo {
@@ -385,7 +391,7 @@ mod tests {
 
     #[test]
     fn hls_variant_selection_tolerates_indentation() {
-        let playlist = "#EXTM3U\n  #EXT-X-STREAM-INF:BANDWIDTH=100\nlow/video.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=200\nhigh/video.m3u8\n";
+        let playlist = MASTER_PLAYLIST;
         let base = Url::parse("https://example.test/master.m3u8").unwrap();
         assert_eq!(
             select_variant(playlist, &base, None).unwrap().as_str(),

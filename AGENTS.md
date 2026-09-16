@@ -44,17 +44,39 @@ When handing off, whether finished or not:
   binary or reload the temporary add-on), and any follow-up issues created.
 - Move the issue to **In Review** when complete, or leave it **In Progress**
   with the comment when not, and update blockers on dependent issues.
+- **Done means merged.** An issue moves to **Done** only once the pull request
+  carrying its work is merged, not when the work is pushed or reviewed.
 - Update the project description only when the roadmap or the architecture
   summary changes.
 
+## Versioning
+
+The Rust package and the Firefox extension share **one product version**.
+`version` in `Cargo.toml` and `version` in `extension/manifest.json` must
+always be identical and are bumped together in the same commit, following
+semantic versioning for the product as a whole. There is no separate VERSION
+file; those two fields are the source of truth, and CI checks that they agree.
+
+Firefox refuses a temporary or signed add-on whose version goes backwards, so
+never lower the shared version. Record user-visible changes in `CHANGELOG.md`
+under `Unreleased`, and move that section under the new version number when
+the version is bumped.
+
+The minimum supported Rust version is declared as `rust-version` in
+`Cargo.toml`; raising it is a deliberate change that belongs in the changelog.
+The minimum supported FFmpeg version is documented in `README.md`.
+
 ## Architecture decisions
 
-Architectural decisions are recorded as ADRs under `docs/adr/` once that
-directory exists (Linear issue KEI-63 creates it and seeds it with the
-decisions already embodied in the code). Until then, record decisions in the
-relevant Linear issue. Any change to the native messaging protocol, the host
-process model, the FFmpeg command layer, discovery ownership, or control
-semantics requires an ADR.
+Architectural decisions are recorded as ADRs under `docs/adr/`. Linear issue
+KEI-50 creates that directory and seeds it with ADR-0001 (the native
+messaging protocol contract); KEI-63 later backfills the decisions already
+embodied in the code and adds the rest of the documentation set. Until
+`docs/adr/` exists, record decisions in the relevant Linear issue.
+
+Any change to the native messaging protocol, the host process model, the
+FFmpeg command layer, discovery ownership, or control semantics requires an
+ADR.
 
 ## Repository layout
 
@@ -62,8 +84,12 @@ semantics requires an ADR.
 - `extension/`: Firefox WebExtension files, popup, Settings page, background worker,
   content script, and native messaging protocol.
 - `scripts/`: native host installation and launcher scripts.
-- `tests/`: CLI integration tests.
-- `dist/`: generated Firefox extension package.
+- `tests/`: CLI and native-host integration tests (`tests/cli.rs`,
+  `tests/native_host.rs`), the extension's Node tests (`tests/extension/`),
+  and playlist fixtures shared by both languages (`tests/fixtures/hls/`).
+- `dist/`: build artifact directory for the packaged Firefox extension. It is
+  produced by `make extension-package` (and by CI/release tooling) and is not
+  tracked in git.
 
 ## Architecture map
 
@@ -93,8 +119,32 @@ make extension-package
 ```
 
 `make check` runs Rust formatting, Clippy with warnings denied, Rust tests,
-and Firefox JavaScript/manifest validation. Record the outcome in the Linear
-handoff comment.
+`web-ext lint`, the extension's Node tests, and Firefox JavaScript/manifest
+validation. Record the outcome in the Linear handoff comment.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request. The `check`
+job runs on `ubuntu-latest` and `macos-latest` and executes exactly what you
+run locally — `make check`, then `cargo build --release --locked` and
+`make extension-package` — and uploads the release binary and
+`dist/downer-firefox.zip` as run artifacts. A separate `msrv` job builds
+against the `rust-version` declared in `Cargo.toml`, so the declared minimum
+stays honest. FFmpeg is deliberately not installed in CI; tests generate fake
+FFmpeg executables instead.
+
+**CI must be green before an issue moves to In Review.** If a change needs a
+new check, add it to `make check` rather than to the workflow, so local runs
+and CI cannot drift apart.
+
+The root `package.json` is development-only tooling (`web-ext`); the extension
+itself ships without dependencies, and `node_modules/` is not tracked.
+`make extension-lint` installs it on first use, `make extension-test` runs the
+`node:test` suites in `tests/extension/`, and both run as part of
+`make check`. Pure extension helpers belong in an importable file with the
+`module.exports` guard used by `extension/task-protocol.js` and
+`extension/hls.js`, so they can be tested from Node; files that touch the
+`browser` global at load time cannot be imported.
 
 For a complete local extension setup on macOS or Linux:
 
@@ -154,5 +204,3 @@ native process layer.
   credentials.
 - Do not expose browser cookie headers in Settings logs, error messages, or
   Linear comments.
-- Keep generated `dist/downer-firefox.zip` synchronized when packaging is part
-  of the requested change.

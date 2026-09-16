@@ -1,0 +1,14 @@
+{
+  "name": "downer-dev",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Development-only tooling for the Downer Firefox extension. The extension itself ships with no dependencies.",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test tests/extension/*.test.js",
+    "lint": "web-ext lint --source-dir extension --warnings-as-errors"
+  },
+  "devDependencies": {
+    "web-ext": "^8.5.0"
+  }
+}
