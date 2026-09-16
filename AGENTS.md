@@ -79,7 +79,9 @@ semantics requires an ADR.
 - `extension/`: Firefox WebExtension files, popup, Settings page, background worker,
   content script, and native messaging protocol.
 - `scripts/`: native host installation and launcher scripts.
-- `tests/`: CLI and native-host integration tests.
+- `tests/`: CLI and native-host integration tests (`tests/cli.rs`,
+  `tests/native_host.rs`), the extension's Node tests (`tests/extension/`),
+  and playlist fixtures shared by both languages (`tests/fixtures/hls/`).
 - `dist/`: build artifact directory for the packaged Firefox extension. It is
   produced by `make extension-package` (and by CI/release tooling) and is not
   tracked in git.
@@ -112,8 +114,17 @@ make extension-package
 ```
 
 `make check` runs Rust formatting, Clippy with warnings denied, Rust tests,
-and Firefox JavaScript/manifest validation. Record the outcome in the Linear
-handoff comment.
+`web-ext lint`, the extension's Node tests, and Firefox JavaScript/manifest
+validation. Record the outcome in the Linear handoff comment.
+
+The root `package.json` is development-only tooling (`web-ext`); the extension
+itself ships without dependencies, and `node_modules/` is not tracked.
+`make extension-lint` installs it on first use, `make extension-test` runs the
+`node:test` suites in `tests/extension/`, and both run as part of
+`make check`. Pure extension helpers belong in an importable file with the
+`module.exports` guard used by `extension/task-protocol.js` and
+`extension/hls.js`, so they can be tested from Node; files that touch the
+`browser` global at load time cannot be imported.
 
 For a complete local extension setup on macOS or Linux:
 

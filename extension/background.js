@@ -5,6 +5,13 @@ const jobs = new Map();
 const nativeTasks = new Map();
 let storageWrite = Promise.resolve();
 
+const {
+  matchingVariant,
+  highestBandwidthVariant,
+  parentPlaylistUrl,
+  parseHlsInfo
+} = DownerHls;
+
 const jobsReady = browser.storage.local.get({ downloadJobs: [] }).then((stored) => {
   for (const job of stored.downloadJobs || []) {
     if (job?.id) jobs.set(job.id, job);
@@ -38,42 +45,6 @@ async function fetchPlaylist(url, sourceUrl) {
 async function fetchPlaylistFromPage(tabId, url, referrer) {
   if (tabId === undefined || tabId === null) throw new Error("No source tab is available");
   return browser.tabs.sendMessage(tabId, { type: "fetch-playlist", url, referrer });
-}
-
-function highestBandwidthVariant(text, baseUrl) {
-  return matchingVariant(text, baseUrl, null);
-}
-
-function matchingVariant(text, baseUrl, targetUrl) {
-  let bandwidth = -1;
-  let selected = null;
-  let matching = null;
-  let pendingBandwidth = 0;
-  for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (line.startsWith("#EXT-X-STREAM-INF:")) {
-      pendingBandwidth = Number(
-        (line.match(/(?:^|,)BANDWIDTH=(\d+)/) || [])[1] || 0
-      );
-    } else if (line && !line.startsWith("#")) {
-      const candidate = new URL(line, baseUrl).href;
-      if (targetUrl && candidate === new URL(targetUrl).href) matching = candidate;
-      if (pendingBandwidth > bandwidth) {
-        selected = candidate;
-        bandwidth = pendingBandwidth;
-      }
-      pendingBandwidth = 0;
-    }
-  }
-  return matching || selected;
-}
-
-function parentPlaylistUrl(url) {
-  try {
-    return new URL("../playlist.m3u8", url).href;
-  } catch (_) {
-    return null;
-  }
 }
 
 async function fetchPlaylistForSession(tabId, url, referrer, sourceUrl) {
@@ -115,20 +86,6 @@ async function hlsSegmentInfo(url, sourceUrl, tabId) {
 
   if (firstError) throw firstError;
   throw new Error("No HLS segments found in the playlist");
-}
-
-function parseHlsInfo(text) {
-  let totalSegments = 0;
-  let totalDurationMs = 0;
-  for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line.startsWith("#EXTINF:")) continue;
-    const duration = Number(line.slice(8).split(",")[0]);
-    if (!Number.isFinite(duration)) continue;
-    totalSegments += 1;
-    totalDurationMs += Math.round(duration * 1000);
-  }
-  return totalSegments ? { totalSegments, totalDurationMs } : null;
 }
 
 function nativeDownload(request, jobId) {

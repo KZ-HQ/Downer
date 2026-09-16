@@ -2,8 +2,9 @@
 
 CARGO ?= cargo
 FFMPEG ?= ffmpeg
+NPM ?= npm
 
-.PHONY: help setup doctor build fmt fmt-check lint test extension-check check run install extension extension-package extension-install clean
+.PHONY: help setup doctor build fmt fmt-check lint test extension-deps extension-lint extension-test extension-check check run install extension extension-package extension-install clean
 
 help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -38,9 +39,19 @@ lint: ## Run Clippy with warnings treated as errors
 test: ## Run unit, integration, and doc tests
 	$(CARGO) test
 
-extension-check: ## Validate Firefox extension JSON and JavaScript
+extension-deps: ## Install development-only extension tooling (web-ext)
+	@test -x node_modules/.bin/web-ext || $(NPM) install --no-audit --no-fund
+
+extension-lint: extension-deps ## Lint the Firefox extension with web-ext
+	@node_modules/.bin/web-ext lint --source-dir extension --warnings-as-errors
+
+extension-test: ## Run the extension's Node unit tests
+	@node --test tests/extension/*.test.js
+
+extension-check: extension-lint extension-test ## Validate Firefox extension JSON and JavaScript
 	@python3 -m json.tool extension/manifest.json >/dev/null
 	@node --check extension/background.js
+	@node --check extension/hls.js
 	@node --check extension/task-protocol.js
 	@node --check extension/content.js
 	@node --check extension/options.js

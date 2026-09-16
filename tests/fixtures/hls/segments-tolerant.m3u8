@@ -1,0 +1,7 @@
+#EXTM3U
+  #EXTINF:2.5,
+video0.jpeg
+#EXTINF:not-a-number,
+ignored.jpeg
+#EXTINF:3,
+video1.jpeg

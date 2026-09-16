@@ -6,7 +6,10 @@
   "browser_specific_settings": {
     "gecko": {
       "id": "downer@example.com",
-      "strict_min_version": "109.0"
+      "strict_min_version": "109.0",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
     }
   },
   "permissions": [
@@ -18,7 +21,7 @@
     "<all_urls>"
   ],
   "background": {
-    "scripts": ["task-protocol.js", "background.js"]
+    "scripts": ["task-protocol.js", "hls.js", "background.js"]
   },
   "browser_action": {
     "default_title": "Download media",

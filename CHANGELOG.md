@@ -43,6 +43,17 @@ The Rust package and the Firefox extension share one product version; see
   Linux.
 - MIT `LICENSE`, this changelog, a declared Rust MSRV, and a documented
   minimum FFmpeg version.
+- Integration tests for the native messaging host, Node unit tests for the
+  extension's task protocol and HLS helpers, HLS fixtures shared by the Rust
+  and JavaScript tests, and `web-ext lint` in `make check`.
+- `data_collection_permissions` declared as `none` in the extension manifest.
+
+### Fixed
+
+- Extension HLS variant selection now reads `BANDWIDTH` when it is the first
+  attribute of `#EXT-X-STREAM-INF` (previously the first variant was chosen
+  instead of the highest-bandwidth one), and no longer mistakes the first
+  segment of a media playlist for a variant.
 
 ### Known limitations
 
