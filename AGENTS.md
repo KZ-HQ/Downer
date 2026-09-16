@@ -144,7 +144,9 @@ native process layer.
 
 ## Editing and testing guidance
 
-- Use `apply_patch` for source edits.
+- Use `apply_patch` for source edits when running in Codex. This instruction
+  is Codex-specific; Claude Code sessions should ignore it and use their own
+  file editing tools.
 - Add or update tests with behavior changes.
 - Prefer local fixtures and fake FFmpeg executables over live protected URLs.
   Do not assume a live CDN is reachable from the development environment.
