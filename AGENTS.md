@@ -84,6 +84,9 @@ ADR.
 - `extension/`: Firefox WebExtension files, popup, Settings page, background worker,
   content script, and native messaging protocol.
 - `scripts/`: native host installation and launcher scripts.
+- `.claude/settings.json`: Claude Code project settings. It pre-approves the
+  Linear MCP tools so agent sessions do not prompt for routine issue and
+  comment updates, while still asking before any Linear delete.
 - `tests/`: CLI and native-host integration tests (`tests/cli.rs`,
   `tests/native_host.rs`), the extension's Node tests (`tests/extension/`),
   and playlist fixtures shared by both languages (`tests/fixtures/hls/`).
