@@ -89,15 +89,19 @@ ADR.
   comment updates, while still asking before any Linear delete.
 - `tests/`: CLI and native-host integration tests (`tests/cli.rs`,
   `tests/native_host.rs`), the extension's Node tests (`tests/extension/`),
-  and playlist fixtures shared by both languages (`tests/fixtures/hls/`).
+  and fixtures shared by both languages: HLS playlists in
+  `tests/fixtures/hls/` and HTML pages in `tests/fixtures/pages/`.
 - `dist/`: build artifact directory for the packaged Firefox extension. It is
   produced by `make extension-package` (and by CI/release tooling) and is not
   tracked in git.
 
 ## Architecture map
 
-1. `extension/content.js` scans page DOM and resource entries. It can also
-   fetch an HLS playlist using the source page's browser session.
+1. `extension/content.js` scans page DOM and resource entries, and can fetch an
+   HLS playlist using the source page's browser session. The detection itself
+   lives in `extension/media-scan.js`, whose attribute list is kept identical to
+   `src/scraper.rs::extract_media_urls` so the CLI and the extension find the
+   same media on the same page.
 2. `extension/popup.js` starts downloads and renders status/control events.
 3. `extension/background.js` owns persistent jobs, cookies, playlist metadata,
    native task channels, progress state, and log history.

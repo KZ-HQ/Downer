@@ -54,6 +54,16 @@ The Rust package and the Firefox extension share one product version; see
 
 ### Fixed
 
+- The extension now detects media linked with an anchor. `<a href="movie.mp4">`
+  was never scanned: `href` was missing from the content script's attribute
+  list, an anchor is not a fetched resource until it is clicked, and the
+  page-markup fallback matched only absolute URLs, so a relative `href` was
+  missed as well. The content script's attribute list is now identical to
+  `src/scraper.rs::extract_media_urls` (`href`, `data-file`, `file`, and
+  `video_url` were missing on the JavaScript side; `data-hls` was missing on the
+  Rust side), and page markup is scanned for those attributes with relative
+  values resolved against the page. The `blob:`/`data:` exclusion and the
+  http/https-only rule are unchanged.
 - Extension HLS variant selection now reads `BANDWIDTH` when it is the first
   attribute of `#EXT-X-STREAM-INF` (previously the first variant was chosen
   instead of the highest-bandwidth one), and no longer mistakes the first
