@@ -44,6 +44,8 @@ When handing off, whether finished or not:
   binary or reload the temporary add-on), and any follow-up issues created.
 - Move the issue to **In Review** when complete, or leave it **In Progress**
   with the comment when not, and update blockers on dependent issues.
+- **Done means merged.** An issue moves to **Done** only once the pull request
+  carrying its work is merged, not when the work is pushed or reviewed.
 - Update the project description only when the roadmap or the architecture
   summary changes.
 
@@ -66,12 +68,15 @@ The minimum supported FFmpeg version is documented in `README.md`.
 
 ## Architecture decisions
 
-Architectural decisions are recorded as ADRs under `docs/adr/` once that
-directory exists (Linear issue KEI-63 creates it and seeds it with the
-decisions already embodied in the code). Until then, record decisions in the
-relevant Linear issue. Any change to the native messaging protocol, the host
-process model, the FFmpeg command layer, discovery ownership, or control
-semantics requires an ADR.
+Architectural decisions are recorded as ADRs under `docs/adr/`. Linear issue
+KEI-50 creates that directory and seeds it with ADR-0001 (the native
+messaging protocol contract); KEI-63 later backfills the decisions already
+embodied in the code and adds the rest of the documentation set. Until
+`docs/adr/` exists, record decisions in the relevant Linear issue.
+
+Any change to the native messaging protocol, the host process model, the
+FFmpeg command layer, discovery ownership, or control semantics requires an
+ADR.
 
 ## Repository layout
 
