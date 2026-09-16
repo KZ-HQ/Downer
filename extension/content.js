@@ -1,56 +1,24 @@
-const MEDIA_EXTENSIONS = [
-  ".m3u8", ".mpd", ".mp4", ".webm", ".mov", ".m4v", ".mkv", ".avi",
-  ".flv", ".ts", ".mpeg", ".mpg", ".ogg", ".ogv", ".3gp"
-];
+/* global DownerMediaScan */
 
-function isMediaUrl(value) {
-  const lower = value.toLowerCase();
-  return MEDIA_EXTENSIONS.some((extension) => lower.includes(extension));
-}
-
-function addCandidate(candidates, value) {
-  if (!value || value.startsWith("blob:") || value.startsWith("data:")) {
-    return;
-  }
-  try {
-    const url = new URL(value, window.location.href);
-    if ((url.protocol === "http:" || url.protocol === "https:") && isMediaUrl(url.href)) {
-      if (!candidates.some((candidate) => candidate.url === url.href)) {
-        candidates.push({
-          url: url.href,
-          type: url.href.toLowerCase().includes(".m3u8") ? "hls" : "video"
-        });
-      }
-    }
-  } catch (_) {
-    // Ignore malformed and non-URL attributes.
-  }
-}
+// Detection lives in extension/media-scan.js so it can be tested from Node over
+// HTML fixtures; this file is the DOM adapter that feeds it the live page.
+const { MEDIA_ATTRIBUTES, MEDIA_SELECTOR, collectCandidates } = DownerMediaScan;
 
 function scanMedia() {
-  const candidates = [];
-  const elements = document.querySelectorAll("video, video source, source, [src], [data-src], [data-video], [data-hls], [data-url]");
-  for (const element of elements) {
-    for (const attribute of ["src", "data-src", "data-video", "data-hls", "data-url"]) {
-      addCandidate(candidates, element.getAttribute(attribute));
+  const attributeValues = [];
+  for (const element of document.querySelectorAll(MEDIA_SELECTOR)) {
+    for (const attribute of MEDIA_ATTRIBUTES) {
+      const value = element.getAttribute(attribute);
+      if (value) attributeValues.push(value);
     }
   }
 
-  for (const entry of performance.getEntriesByType("resource")) {
-    addCandidate(candidates, entry.name);
-  }
-
-  const pageText = document.documentElement?.outerHTML || "";
-  const absoluteUrls = pageText.match(/https?:\/\/[^"'\s<>]+/gi) || [];
-  for (const value of absoluteUrls) {
-    addCandidate(candidates, value.replaceAll("\\/", "/"));
-  }
-
-  candidates.sort((left, right) => {
-    if (left.type === right.type) return 0;
-    return left.type === "hls" ? -1 : 1;
+  return collectCandidates({
+    attributeValues,
+    resourceUrls: performance.getEntriesByType("resource").map((entry) => entry.name),
+    html: document.documentElement?.outerHTML || "",
+    baseUrl: window.location.href
   });
-  return candidates;
 }
 
 async function fetchPlaylist(url, referrer) {

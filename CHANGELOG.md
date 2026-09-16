@@ -69,6 +69,30 @@ The Rust package and the Firefox extension share one product version; see
   settles a job only on a terminal state that names that job. Previously one
   bad control message ended a live download's channel while FFmpeg kept
   running, leaving the job shown as failed and its controls inoperable.
+- The popup's headline status is no longer set by a persisted download job from
+  an earlier session. `get-download-statuses` returns every stored job, and
+  `renderDownloadStatus` updated the headline outside its row-lookup guard, so a
+  job cancelled days earlier for an unrelated page announced itself as this
+  page's status while every candidate row read "Not started". The popup now
+  renders a job only when it belongs to media listed on the page being viewed,
+  and a job is allowed to set the headline only when it also began in the
+  current browser session.
+- A download that was still running when the browser closed no longer presents
+  as live. Such a job is persisted as `downloading` and never resumes, but its
+  URL could match a candidate on the page, giving a row with the Download button
+  disabled and Pause/Cancel wired to a native task that no longer exists — the
+  row stayed unusable until storage was cleared. It is now shown as
+  "Interrupted — not running", with Download enabled and no controls.
+- The extension now detects media linked with an anchor. `<a href="movie.mp4">`
+  was never scanned: `href` was missing from the content script's attribute
+  list, an anchor is not a fetched resource until it is clicked, and the
+  page-markup fallback matched only absolute URLs, so a relative `href` was
+  missed as well. The content script's attribute list is now identical to
+  `src/scraper.rs::extract_media_urls` (`href`, `data-file`, `file`, and
+  `video_url` were missing on the JavaScript side; `data-hls` was missing on the
+  Rust side), and page markup is scanned for those attributes with relative
+  values resolved against the page. The `blob:`/`data:` exclusion and the
+  http/https-only rule are unchanged.
 - Extension HLS variant selection now reads `BANDWIDTH` when it is the first
   attribute of `#EXT-X-STREAM-INF` (previously the first variant was chosen
   instead of the highest-bandwidth one), and no longer mistakes the first

@@ -248,7 +248,7 @@ pub fn extract_media_urls(html: &str, base: &Url) -> Vec<Url> {
         .replace("\\u0026", "&")
         .replace("&amp;", "&");
     let attribute_pattern = Regex::new(
-        r#"(?is)(?:src|href|data-src|data-video|data-url|data-file|file|video_url)\s*=\s*["']([^"']+)["']"#,
+        r#"(?is)(?:src|href|data-src|data-video|data-hls|data-url|data-file|file|video_url)\s*=\s*["']([^"']+)["']"#,
     )
     .expect("media attribute pattern is valid");
     let raw_url_pattern =
@@ -359,8 +359,74 @@ mod tests {
         assert!(resolved.referer.is_none());
     }
 
-    /// Fixtures are shared with the extension's Node tests in `tests/extension/`,
-    /// so both parsers stay pinned to the same inputs until they are consolidated.
+    /// HTML fixtures shared with the extension's `tests/extension/media-scan.test.js`.
+    /// The CLI and the extension must find the same media on the same page; the
+    /// attribute lists here and in `extension/media-scan.js` are kept identical,
+    /// and these tests fail together if one side drifts.
+    const ANCHOR_RELATIVE_PAGE: &str = include_str!("../tests/fixtures/pages/anchor-relative.html");
+    const ANCHOR_NON_MEDIA_PAGE: &str =
+        include_str!("../tests/fixtures/pages/anchor-non-media.html");
+    const ANCHOR_AND_SRC_PAGE: &str = include_str!("../tests/fixtures/pages/anchor-and-src.html");
+    const SCRAPER_ATTRIBUTES_PAGE: &str =
+        include_str!("../tests/fixtures/pages/scraper-attributes.html");
+
+    fn scanned(html: &str) -> Vec<String> {
+        let base = Url::parse("https://example.test/files/index.html").unwrap();
+        let mut urls: Vec<String> = extract_media_urls(html, &base)
+            .iter()
+            .map(|url| url.to_string())
+            .collect();
+        urls.sort();
+        urls
+    }
+
+    #[test]
+    fn resolves_relative_anchor_links_like_the_extension() {
+        assert_eq!(
+            scanned(ANCHOR_RELATIVE_PAGE),
+            [
+                "https://cdn.example.test/promo.mp4",
+                "https://example.test/archive/talk.webm",
+                "https://example.test/files/media/clip.m3u8",
+                "https://example.test/files/movie.mp4",
+            ]
+        );
+    }
+
+    #[test]
+    fn ignores_anchors_to_non_media_files() {
+        assert!(scanned(ANCHOR_NON_MEDIA_PAGE).is_empty());
+    }
+
+    #[test]
+    fn deduplicates_media_reached_by_both_src_and_href() {
+        assert_eq!(
+            scanned(ANCHOR_AND_SRC_PAGE),
+            ["https://example.test/media/feature.mp4"]
+        );
+    }
+
+    #[test]
+    fn reads_every_attribute_the_extension_reads() {
+        assert_eq!(
+            scanned(SCRAPER_ATTRIBUTES_PAGE),
+            [
+                "https://example.test/a/eight.ogv",
+                "https://example.test/a/five.mov",
+                "https://example.test/a/four.mkv",
+                "https://example.test/a/nine.mpd",
+                "https://example.test/a/one.mp4",
+                "https://example.test/a/seven.flv",
+                "https://example.test/a/six.m4v",
+                "https://example.test/a/three.m3u8",
+                "https://example.test/a/two.webm",
+            ]
+        );
+    }
+
+    /// Playlist fixtures are shared with the extension's Node tests in
+    /// `tests/extension/`, so both parsers stay pinned to the same inputs until
+    /// they are consolidated.
     const SEGMENTS_PLAYLIST: &str = include_str!("../tests/fixtures/hls/segments.m3u8");
     const TOLERANT_PLAYLIST: &str = include_str!("../tests/fixtures/hls/segments-tolerant.m3u8");
     const MASTER_PLAYLIST: &str = include_str!("../tests/fixtures/hls/master.m3u8");

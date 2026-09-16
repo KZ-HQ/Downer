@@ -98,7 +98,8 @@ ADR.
   architecture decision records.
 - `tests/`: CLI and native-host integration tests (`tests/cli.rs`,
   `tests/native_host.rs`), the extension's Node tests (`tests/extension/`),
-  playlist fixtures shared by both languages (`tests/fixtures/hls/`), and
+  and fixtures shared by both languages: HLS playlists in
+  `tests/fixtures/hls/`, HTML pages in `tests/fixtures/pages/`, and
   `tests/fixtures/protocol.json`, the native messaging protocol's wire
   vocabulary, which both test suites read so the Rust and JavaScript sides
   cannot rename a protocol term unilaterally.
@@ -108,9 +109,15 @@ ADR.
 
 ## Architecture map
 
-1. `extension/content.js` scans page DOM and resource entries. It can also
-   fetch an HLS playlist using the source page's browser session.
-2. `extension/popup.js` starts downloads and renders status/control events.
+1. `extension/content.js` scans page DOM and resource entries, and can fetch an
+   HLS playlist using the source page's browser session. The detection itself
+   lives in `extension/media-scan.js`, whose attribute list is kept identical to
+   `src/scraper.rs::extract_media_urls` so the CLI and the extension find the
+   same media on the same page.
+2. `extension/popup.js` starts downloads and renders status/control events. Which
+   persisted jobs a popup renders is decided by `extension/job-view.js`: only
+   media listed on the page being viewed, and only jobs begun in the current
+   browser session may set the headline status.
 3. `extension/background.js` owns persistent jobs, cookies, playlist metadata,
    native task channels, progress state, and log history.
 4. `extension/task-protocol.js` correlates native control acknowledgements and

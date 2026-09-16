@@ -57,7 +57,9 @@ extension-check: extension-lint extension-test ## Validate Firefox extension JSO
 	@node --check extension/hls.js
 	@node --check extension/task-protocol.js
 	@node --check extension/content.js
+	@node --check extension/media-scan.js
 	@node --check extension/options.js
+	@node --check extension/job-view.js
 	@node --check extension/popup.js
 	@echo "Firefox extension files are valid"
 
