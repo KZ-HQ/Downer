@@ -143,6 +143,15 @@ impl HeaderRecorder {
         self.host
     }
 
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// `host:port`, as it appears in the request's `Host` header.
+    pub fn authority(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+
     pub fn requests(&self) -> Vec<RecordedRequest> {
         self.received
             .lock()

@@ -63,21 +63,42 @@ fn real_ffmpeg(test: &str) -> Option<PathBuf> {
     found
 }
 
-/// Run FFmpeg over `url` with the given cookie-passing arguments and wait for it
-/// to finish. The exit status is ignored on purpose: the fixture server serves
-/// bytes that are not decodable media, so FFmpeg is expected to fail. What is
-/// being measured is which requests it made and what it put on them.
-fn run_ffmpeg(ffmpeg: &PathBuf, cookie_args: &[&str], url: &str, output: &PathBuf) {
+/// Run FFmpeg over `url` with the given cookie-passing arguments and return what
+/// it wrote to stderr.
+///
+/// The exit status is ignored on purpose: the fixture server serves bytes that
+/// are not decodable media, so FFmpeg is expected to fail. What is being
+/// measured is which requests it made and what it put on them.
+///
+/// stderr is captured rather than discarded because it is the only place FFmpeg
+/// explains itself. When a cookie reaches nobody at all, the difference between
+/// "FFmpeg cannot scope cookies" and "this argument was spelled wrong" is
+/// usually a line in here.
+fn run_ffmpeg(ffmpeg: &PathBuf, cookie_args: &[&str], url: &str, output: &PathBuf) -> String {
     let mut command = Command::new(ffmpeg);
-    command.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
+    command.args(["-hide_banner", "-loglevel", "verbose", "-nostdin"]);
     command.args(cookie_args);
     command.args(["-i", url, "-c", "copy", "-y"]);
     command.arg(output);
-    let _ = command
+    match command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+        .stderr(Stdio::piped())
+        .output()
+    {
+        Ok(output) => String::from_utf8_lossy(&output.stderr).into_owned(),
+        Err(error) => format!("(FFmpeg could not be started: {error})"),
+    }
+}
+
+/// The tail of FFmpeg's stderr, for a failure message.
+fn stderr_tail(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let start = lines.len().saturating_sub(12);
+    lines[start..].join("\n    ")
 }
 
 /// `-headers` with a raw `Cookie:` line: today's behaviour.
@@ -158,7 +179,7 @@ fn ffmpeg_cookie_scope_across_a_redirect() {
         } else {
             headers_args(SENTINEL)
         };
-        run_ffmpeg(
+        let stderr = run_ffmpeg(
             &ffmpeg,
             &as_args(&args),
             &origin.url("/video.mp4"),
@@ -190,8 +211,14 @@ fn ffmpeg_cookie_scope_across_a_redirect() {
         assert!(
             origin_got,
             "[{mode}] the media host received no cookie at all. For `cookies` this \
-             refutes domain-scoped -cookies: FFmpeg did not match the cookie to its \
-             own domain, so switching to -cookies would break protected downloads."
+             refutes domain-scoped -cookies *as spelled here* — but a cookie that \
+             reaches nobody usually means FFmpeg discarded it while parsing or \
+             matching, not that it cannot scope. Run the spelling probe before \
+             concluding anything:\n    \
+             DOWNER_COOKIE_MATRIX=1 cargo test --test cookie_scope \
+             ffmpeg_cookies_option_spelling_matrix -- --nocapture\n  \
+             FFmpeg said:\n    {}",
+            stderr_tail(&stderr)
         );
         if scoped {
             assert!(
@@ -241,7 +268,7 @@ fn ffmpeg_cookie_scope_for_a_cross_host_hls_segment() {
         } else {
             headers_args(SENTINEL)
         };
-        run_ffmpeg(
+        let stderr = run_ffmpeg(
             &ffmpeg,
             &as_args(&args),
             &origin.url("/stream.m3u8"),
@@ -269,8 +296,13 @@ fn ffmpeg_cookie_scope_for_a_cross_host_hls_segment() {
 
         assert!(
             playlist_got,
-            "[{mode}] the playlist host received no cookie. For `cookies` this refutes \
-             domain-scoped -cookies: a protected playlist would stop downloading."
+            "[{mode}] the playlist host received no cookie. For `cookies` this \
+             refutes domain-scoped -cookies *as spelled here*; see the spelling \
+             probe before concluding anything:\n    \
+             DOWNER_COOKIE_MATRIX=1 cargo test --test cookie_scope \
+             ffmpeg_cookies_option_spelling_matrix -- --nocapture\n  \
+             FFmpeg said:\n    {}",
+            stderr_tail(&stderr)
         );
         if scoped {
             assert!(
@@ -288,5 +320,178 @@ fn ffmpeg_cookie_scope_for_a_cross_host_hls_segment() {
                  revisit the ADR."
             );
         }
+    }
+}
+
+/// Which spelling of `-cookies`, if any, makes FFmpeg send the cookie to the
+/// host it is scoped to?
+///
+/// `ffmpeg_cookie_scope_across_a_redirect` established that
+/// `name=value; path=/; domain=<host>` reaches *nobody* — not even the media
+/// host. A cookie that reaches nobody was discarded during parsing or matching,
+/// which is a different finding from "FFmpeg cannot scope cookies", and the two
+/// lead to opposite decisions in KEI-78. This probe tells them apart by trying
+/// the plausible spellings against one host and reporting what arrived.
+///
+/// It is a diagnostic, not a check: it asserts nothing and cannot fail. Run it
+/// explicitly, since it is only interesting when something is already wrong:
+///
+/// ```sh
+/// DOWNER_COOKIE_MATRIX=1 cargo test --test cookie_scope \
+///     ffmpeg_cookies_option_spelling_matrix -- --nocapture
+/// ```
+#[test]
+fn ffmpeg_cookies_option_spelling_matrix() {
+    if std::env::var_os("DOWNER_COOKIE_MATRIX").is_none() {
+        eprintln!(
+            "SKIP: ffmpeg_cookies_option_spelling_matrix is a diagnostic. Run it with \
+             DOWNER_COOKIE_MATRIX=1 when the -cookies scope tests report that the media \
+             host received no cookie."
+        );
+        return;
+    }
+    let Some(ffmpeg) = real_ffmpeg("ffmpeg_cookies_option_spelling_matrix") else {
+        return;
+    };
+    let temp = tempfile::tempdir().unwrap();
+
+    eprintln!("\n=== -cookies spelling probe ===");
+    eprintln!("FFmpeg: {}", ffmpeg.display());
+    let version = Command::new(&ffmpeg)
+        .arg("-version")
+        .output()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_string()
+        })
+        .unwrap_or_default();
+    eprintln!("{version}");
+    eprintln!(
+        "\nEach row sends one cookie to a single-host server and reports whether the\n\
+         server saw a Cookie header. `-headers` is the control: it must say yes.\n"
+    );
+    eprintln!("{:<52}  COOKIE ARRIVED", "SPELLING");
+    eprintln!("{}", "-".repeat(70));
+
+    // Each probe is built from the live server, because some spellings need the
+    // port and the port is only known once it is bound.
+    type Build = fn(&str, u16) -> (String, Vec<String>);
+    let probes: Vec<Build> = vec![
+        |_host, _port| {
+            (
+                "-headers (control, today's behaviour)".to_string(),
+                vec!["-headers".to_string(), format!("Cookie: {SENTINEL}\r\n")],
+            )
+        },
+        |host, _port| {
+            (
+                format!("-cookies  …; path=/; domain={host}"),
+                vec![
+                    "-cookies".to_string(),
+                    format!("{SENTINEL}; path=/; domain={host}"),
+                ],
+            )
+        },
+        |host, port| {
+            (
+                format!("-cookies  …; path=/; domain={host}:{port}"),
+                vec![
+                    "-cookies".to_string(),
+                    format!("{SENTINEL}; path=/; domain={host}:{port}"),
+                ],
+            )
+        },
+        |host, _port| {
+            (
+                format!("-cookies  …; path=/; domain=.{host}"),
+                vec![
+                    "-cookies".to_string(),
+                    format!("{SENTINEL}; path=/; domain=.{host}"),
+                ],
+            )
+        },
+        |host, _port| {
+            (
+                format!("-cookies  …; domain={host}; path=/  (reordered)"),
+                vec![
+                    "-cookies".to_string(),
+                    format!("{SENTINEL}; domain={host}; path=/"),
+                ],
+            )
+        },
+        |_host, _port| {
+            (
+                "-cookies  …; path=/   (no domain)".to_string(),
+                vec!["-cookies".to_string(), format!("{SENTINEL}; path=/")],
+            )
+        },
+        |_host, _port| {
+            (
+                "-cookies  …   (bare name=value)".to_string(),
+                vec!["-cookies".to_string(), SENTINEL.to_string()],
+            )
+        },
+        |host, _port| {
+            (
+                format!("-cookies  …; path=/; domain={host}; expires=…"),
+                vec![
+                    "-cookies".to_string(),
+                    format!(
+                        "{SENTINEL}; path=/; domain={host}; \
+                         expires=Wed, 01 Jan 2031 00:00:00 GMT"
+                    ),
+                ],
+            )
+        },
+    ];
+
+    let mut any_scoped_worked = false;
+    for (index, build) in probes.iter().enumerate() {
+        let server = HeaderRecorder::start("localhost");
+        server.route("/video.mp4", Reply::text("video/mp4", "not real media"));
+        let (label, args) = build(server.host(), server.port());
+
+        let stderr = run_ffmpeg(
+            &ffmpeg,
+            &as_args(&args),
+            &server.url("/video.mp4"),
+            &temp.path().join(format!("probe-{index}.mp4")),
+        );
+
+        let requests = server.requests_for("/video.mp4");
+        let verdict = if requests.is_empty() {
+            "— (FFmpeg never made the request)"
+        } else if requests.iter().any(|request| request.cookie().is_some()) {
+            if index > 0 {
+                any_scoped_worked = true;
+            }
+            "YES"
+        } else {
+            "no"
+        };
+        eprintln!("{label:<52}  {verdict}");
+
+        // Only the first failing scoped spelling needs its stderr shown; more
+        // than that is noise.
+        if index == 1 && verdict == "no" {
+            eprintln!(
+                "\n  FFmpeg's own account of the failing case:\n    {}\n",
+                stderr_tail(&stderr)
+            );
+        }
+    }
+
+    eprintln!("{}", "-".repeat(70));
+    if any_scoped_worked {
+        eprintln!("A spelling works. KEI-78 should adopt it; ADR-0002's approach stands.\n");
+    } else {
+        eprintln!(
+            "No -cookies spelling reached even its own host. Domain-scoped -cookies is\n\
+             refuted for this FFmpeg, and KEI-78 needs a different approach — most\n\
+             likely per-request scoping done by the native host (KEI-68/KEI-70).\n"
+        );
     }
 }
