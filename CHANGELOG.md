@@ -20,8 +20,8 @@ The Rust package and the Firefox extension share one product version; see
   a browser-like User-Agent, and reporting Cloudflare challenge responses
   explicitly.
 - Output handling that percent-decodes and sanitizes inferred filenames,
-  writes playlist downloads as `.mp4`, refuses collisions unless
-  `--overwrite` is supplied, and retains partial files after failures.
+  writes playlist downloads as `.mp4`, resolves collisions according to
+  `--on-conflict`, and retains partial files after failures.
 - Stable exit codes: `2` invalid input, `3` output-path problem, `4` FFmpeg
   unavailable, `5` media or FFmpeg failure.
 - Acceptance of HLS playlists with nonstandard segment names, including
@@ -92,6 +92,29 @@ The Rust package and the Firefox extension share one product version; see
 
 ### Changed
 
+- A download whose media URL has a generic filename — `index`, `playlist`,
+  `master`, `download`, `video`, `media`, or digits only, which covers most HLS
+  playlists — is now named after the source page's title, falling back to the
+  source host. The extension sends the page title; `--name` supplies one on the
+  command line. A title is sanitized like any inferred name and truncated to 80
+  characters, and never appears in a log, an error, or any native event other
+  than the finished file's path. Media URLs with a real filename are unaffected.
+- An output collision is now resolved by renaming rather than refusing, when
+  *Downer* inferred the filename: the download is written as `name (2).mp4`,
+  `name (3).mp4`, and so on, and nothing existing is replaced. An exact
+  `--output` path still fails on a collision. `--on-conflict
+  fail|rename|overwrite` sets the policy explicitly, the Settings page offers
+  the same choice for extension downloads, and `--overwrite` is now shorthand
+  for `--on-conflict overwrite` (the two cannot be combined). This replaces the
+  previous "refuse every collision unless `--overwrite`" rule; see
+  `docs/adr/0004-output-naming-and-collision-policy.md`. A download that fails
+  before FFmpeg writes anything leaves no file behind, and the next attempt gets
+  the same name rather than being pushed onto ` (2)`; anything FFmpeg did write
+  is still preserved.
+- The native messaging protocol's `download` request gains two optional fields,
+  `title` and `on_conflict`, without a `protocol_version` bump. `overwrite` is
+  superseded by `on_conflict` but still accepted. An absent `on_conflict` means
+  `rename`; a value outside the documented set is refused rather than ignored.
 - Per-download FFmpeg logs are stored under their own `downloadLogs:<jobId>`
   key instead of inside each job record, and storage writes are coalesced in a
   300 ms window, immediately on a terminal state. Saving job state no longer
@@ -106,6 +129,11 @@ The Rust package and the Firefox extension share one product version; see
 
 ### Fixed
 
+- The second HLS download no longer fails with "output already exists". Because
+  most playlists are called `index.m3u8`, `playlist.m3u8` or `master.m3u8` and
+  the extension always requested `overwrite: false`, any two HLS downloads
+  collided on the same inferred filename — from different sites, about different
+  videos — with no way to proceed from the popup.
 - A signed token in a URL that FFmpeg echoes through its own stderr is no longer
   persisted. FFmpeg's HLS demuxer logs one `Opening '<url>' for reading` line per
   segment, and those URLs routinely carry one; the line was forwarded as a log

@@ -109,11 +109,37 @@ downer 'https://example.com/live/index.m3u8' --dir ./downloads
 downer 'https://example.com/watch/video' --dir ./downloads
 downer 'https://example.com/video.mp4' --output ./downloads/video.mp4
 downer 'https://example.com/video.mp4' --output ./downloads/video.mp4 --overwrite
+downer 'https://example.com/live/index.m3u8' --dir ./downloads --name 'Episode 4'
+downer 'https://example.com/live/index.m3u8' --dir ./downloads --on-conflict fail
 ```
+
+### Output names and collisions
 
 By default, an inferred filename is written to the current directory. URL
 path names are percent-decoded and sanitized; playlist names become `.mp4`
-outputs. Existing files are never replaced unless `--overwrite` is present.
+outputs.
+
+When the media URL's own filename is generic — `index`, `playlist`, `master`,
+`download`, `video`, `media`, or digits only, which covers most HLS playlists —
+the download is named after the page title instead, falling back to the source
+host. The browser extension supplies the title automatically; on the command
+line, `--name` does. A title is sanitized the same way a URL-derived name is and
+is truncated to 80 characters.
+
+A collision is then resolved according to who chose the filename:
+
+| Situation | Default | Effect |
+| --- | --- | --- |
+| Inferred filename (`--dir`, or neither flag, and every extension download) | `rename` | Writes `name (2).mp4`, `name (3).mp4`, … beside the existing file. Nothing is replaced. |
+| Exact path (`--output`) | `fail` | Refuses with exit code 3 and leaves the existing file untouched. |
+
+`--on-conflict fail|rename|overwrite` overrides the default in either
+direction, and `--overwrite` remains shorthand for `--on-conflict overwrite`.
+The two cannot be combined. The extension exposes the same choice on its
+Settings page; `overwrite` there permanently discards the existing file.
+
+The policy and the reasoning behind it are recorded in
+[ADR-0004](docs/adr/0004-output-naming-and-collision-policy.md).
 Partial files are retained if FFmpeg fails for diagnostics. Resuming failed
 downloads is not promised in v1.
 

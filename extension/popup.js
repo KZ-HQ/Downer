@@ -149,7 +149,7 @@ function renderDownloadStatus(job) {
   if (job.controlError) downloadStatusElement.textContent = job.controlError;
 }
 
-function addMediaRow(candidate, sourceUrl, tabId) {
+function addMediaRow(candidate, sourceUrl, tabId, title) {
   const item = document.createElement("li");
   const task = document.createElement("div");
   task.className = "task";
@@ -226,6 +226,9 @@ function addMediaRow(candidate, sourceUrl, tabId) {
         type: "download-media",
         url: candidate.url,
         sourceUrl,
+        // The page title names the file when the playlist URL is generic
+        // (`index.m3u8` and friends); the host bounds and sanitises it.
+        title,
         tabId
       });
       if (response?.ok && response.jobId) {
@@ -323,7 +326,7 @@ async function scanActiveTab() {
     }
     showStatus(`${candidates.length} media URL${candidates.length === 1 ? "" : "s"} found.`);
     helpElement.textContent = "HLS playlists are listed first when available.";
-    candidates.forEach((candidate) => addMediaRow(candidate, result.sourceUrl, tab.id));
+    candidates.forEach((candidate) => addMediaRow(candidate, result.sourceUrl, tab.id, result.title));
     await restoreDownloadStatuses();
   } catch (error) {
     showStatus("Could not inspect this page.");

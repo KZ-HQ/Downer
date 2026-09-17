@@ -2,6 +2,18 @@ const NATIVE_HOST = "com.downer.native";
 const MAX_SAVED_JOBS = 20;
 
 /**
+ * The collision policies the native host understands, and the default.
+ *
+ * Kept identical to `on_conflict_policies` and `default_on_conflict` in
+ * `tests/fixtures/protocol.json`, which both test suites read. `rename` is the
+ * default because the host always infers a filename into the output directory —
+ * it is never given an exact path — so a second download of the same stream
+ * lands beside the first instead of failing (KEI-60).
+ */
+const ON_CONFLICT_POLICIES = ["fail", "rename", "overwrite"];
+const DEFAULT_ON_CONFLICT = "rename";
+
+/**
  * How long storage writes and log broadcasts are coalesced for.
  *
  * FFmpeg's HLS demuxer logs one line per segment at `-loglevel info`, so a
@@ -413,7 +425,11 @@ async function notify(job) {
 async function runDownload(message, jobId) {
   try {
     updateJob(jobId, { state: "preparing" });
-    const settings = await browser.storage.local.get({ outputDir: "", ffmpegThreads: null });
+    const settings = await browser.storage.local.get({
+      outputDir: "",
+      ffmpegThreads: null,
+      onConflict: DEFAULT_ON_CONFLICT
+    });
     const cookie = await cookieHeader(message.url);
     let playlistInfo = null;
     if (message.url.toLowerCase().includes(".m3u8")) {
@@ -438,6 +454,13 @@ async function runDownload(message, jobId) {
       output_dir: settings.outputDir || null,
       cookie: cookie || null,
       user_agent: navigator.userAgent,
+      title: typeof message.title === "string" && message.title.trim() ? message.title.trim() : null,
+      on_conflict: ON_CONFLICT_POLICIES.includes(settings.onConflict)
+        ? settings.onConflict
+        : DEFAULT_ON_CONFLICT,
+      // Superseded by `on_conflict`, still sent so an older host that predates
+      // that field keeps its current, strict behaviour rather than silently
+      // replacing a file.
       overwrite: false,
       threads: Number.isInteger(settings.ffmpegThreads) && settings.ffmpegThreads > 0
         ? settings.ffmpegThreads

@@ -17,6 +17,15 @@
       <input id="ffmpeg-threads" type="number" min="1" step="1" placeholder="Auto">
     </label>
     <p class="hint">Leave blank to let FFmpeg choose. This affects processing, not parallel HLS segment requests.</p>
+    <label>
+      When a file of that name already exists
+      <select id="on-conflict">
+        <option value="rename">Keep both — save as "name (2)"</option>
+        <option value="fail">Stop and report the collision</option>
+        <option value="overwrite">Replace the existing file</option>
+      </select>
+    </label>
+    <p class="hint">Downloads are named after the page title when the media URL says nothing useful, so two pages rarely collide. "Replace the existing file" permanently discards what is already there.</p>
     <button id="save">Save</button>
     <p id="status"></p>
     <section aria-labelledby="logs-heading">

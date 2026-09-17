@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
+use crate::output::OnConflict;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "downer",
@@ -22,9 +24,23 @@ pub struct Cli {
     #[arg(long, value_name = "DIRECTORY", conflicts_with = "output")]
     pub dir: Option<PathBuf>,
 
-    /// Replace an existing output file.
+    /// Replace an existing output file. Shorthand for `--on-conflict overwrite`.
     #[arg(long)]
     pub overwrite: bool,
+
+    /// What to do when the output file already exists.
+    ///
+    /// Defaults to `rename` for an inferred filename and `fail` for the exact
+    /// path given by `--output`.
+    #[arg(long, value_name = "POLICY", value_enum, conflicts_with = "overwrite")]
+    pub on_conflict: Option<OnConflict>,
+
+    /// Title to name the download after when the URL says nothing useful.
+    ///
+    /// Used only when the URL-derived filename stem is generic (`index`,
+    /// `playlist`, `master`, `download`, `video`, `media`, or digits only).
+    #[arg(long, value_name = "TITLE")]
+    pub name: Option<String>,
 
     /// FFmpeg executable to invoke (default: ffmpeg on PATH).
     #[arg(long, value_name = "PATH", default_value = "ffmpeg")]

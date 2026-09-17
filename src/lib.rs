@@ -14,7 +14,7 @@ use error::{DownerError, DownerResult};
 use ffmpeg::{
     execute, execute_controlled_with_progress, FfmpegCommand, FfmpegProgress, ProcessControl,
 };
-use output::{check_output_path, resolve_output_path};
+use output::{release_reservation, resolve_conflict, resolve_output_path, NamingHints, OnConflict};
 use scraper::ResolvedMedia;
 
 /// Environment variable holding a cookie header, used when neither `--cookie`
@@ -30,12 +30,38 @@ pub const MEDIA_FAILURE_EXIT: i32 = 5;
 pub struct DownloadOptions {
     pub output: Option<PathBuf>,
     pub dir: Option<PathBuf>,
+    /// Shorthand for [`OnConflict::Overwrite`], kept because the CLI flag and
+    /// the protocol's `overwrite` field both predate `on_conflict`.
     pub overwrite: bool,
+    /// What to do when the resolved output path is taken. `None` means "decide
+    /// from the shape of the request": `Fail` for the exact path given by
+    /// `--output`, `Rename` for an inferred filename.
+    pub on_conflict: Option<OnConflict>,
+    /// Naming material the URL does not carry: a page title and its host.
+    pub naming: NamingHints,
     pub ffmpeg: PathBuf,
     pub user_agent: String,
     pub cookie: Option<String>,
     pub threads: Option<u16>,
     pub quiet: bool,
+}
+
+impl DownloadOptions {
+    /// The collision policy actually in force.
+    ///
+    /// An explicit `on_conflict` always wins. Otherwise `--overwrite` still
+    /// means overwrite, and the default depends on what was asked for: an exact
+    /// `--output` path is a place the user named, so a collision there is an
+    /// error, while an inferred filename is ours to choose and renames beside
+    /// the existing file.
+    pub fn conflict_policy(&self) -> OnConflict {
+        match (self.on_conflict, self.overwrite, self.output.is_some()) {
+            (Some(policy), _, _) => policy,
+            (None, true, _) => OnConflict::Overwrite,
+            (None, false, true) => OnConflict::Fail,
+            (None, false, false) => OnConflict::Rename,
+        }
+    }
 }
 
 /// Resolve the cookie header from the three accepted sources, in order of
@@ -77,10 +103,18 @@ fn normalize_cookie(raw: &str) -> Option<String> {
 pub fn run(cli: Cli) -> DownerResult<()> {
     let cookie = resolve_cookie(&cli)?;
     let media = scraper::resolve_media(&cli.url, &cli.user_agent, cookie.as_deref())?;
+    let source_host = media
+        .referer
+        .as_ref()
+        .unwrap_or(&media.url)
+        .host_str()
+        .map(str::to_string);
     let options = DownloadOptions {
         output: cli.output,
         dir: cli.dir,
         overwrite: cli.overwrite,
+        on_conflict: cli.on_conflict,
+        naming: NamingHints::new(cli.name, source_host),
         ffmpeg: cli.ffmpeg,
         user_agent: cli.user_agent,
         cookie,
@@ -143,8 +177,10 @@ fn download_resolved_with_executor(
         options.output.as_deref(),
         options.dir.as_deref(),
         Path::new("."),
+        &options.naming,
     )?;
-    check_output_path(&destination, options.overwrite)?;
+    let target = resolve_conflict(destination, options.conflict_policy())?;
+    let destination = target.path.clone();
 
     if !options.quiet {
         if let Some(referer) = &media.referer {
@@ -162,12 +198,21 @@ fn download_resolved_with_executor(
         options.ffmpeg.clone(),
         url.as_str(),
         destination,
-        options.overwrite,
+        target.overwrite,
         headers.as_deref(),
         cookies.as_deref(),
         options.threads,
     );
-    let destination = execute(&command)?;
+    let destination = match execute(&command) {
+        Ok(destination) => destination,
+        Err(error) => {
+            // A name we reserved and never wrote to is residue, not output.
+            // Anything FFmpeg did write is kept; `release_reservation` only
+            // takes the file back while it is still empty.
+            release_reservation(&target);
+            return Err(error);
+        }
+    };
     if !options.quiet {
         println!("Download complete: {}", destination.display());
     }
