@@ -107,10 +107,24 @@ fn headers_args(cookie: &str) -> Vec<String> {
 }
 
 /// `-cookies` in Set-Cookie syntax, scoped to one host.
-fn cookies_args(cookie: &str, domain: &str) -> Vec<String> {
+///
+/// `domain` must be the URL's **authority as written**, not its hostname.
+/// FFmpeg's `get_cookies()` requires the cookie's `domain=` to be a suffix of
+/// the string `http_open_cnx_internal()` built with
+/// `ff_url_join(hoststr, ..., tmp_host, port, NULL)`, and that call happens
+/// *before* the `port < 0` defaulting — so `port` is still -1 for a URL that
+/// states no port. In practice:
+///
+/// * `http://localhost:60254/v.mp4` → `domain=localhost:60254`
+/// * `https://cdn.example.test/v.mp4` → `domain=cdn.example.test` (no `:443`)
+///
+/// Getting this wrong is silent: FFmpeg makes the request and simply omits the
+/// cookie, which is how the first run of these tests was misread as `-cookies`
+/// not working at all.
+fn cookies_args(cookie: &str, authority: &str) -> Vec<String> {
     vec![
         "-cookies".to_string(),
-        format!("{cookie}; path=/; domain={domain}"),
+        format!("{cookie}; path=/; domain={authority}"),
     ]
 }
 
@@ -175,7 +189,7 @@ fn ffmpeg_cookie_scope_across_a_redirect() {
         origin.route("/video.mp4", Reply::Redirect(elsewhere.url("/real.mp4")));
 
         let args = if scoped {
-            cookies_args(SENTINEL, origin.host())
+            cookies_args(SENTINEL, &origin.authority())
         } else {
             headers_args(SENTINEL)
         };
@@ -264,7 +278,7 @@ fn ffmpeg_cookie_scope_for_a_cross_host_hls_segment() {
         );
 
         let args = if scoped {
-            cookies_args(SENTINEL, origin.host())
+            cookies_args(SENTINEL, &origin.authority())
         } else {
             headers_args(SENTINEL)
         };
@@ -442,6 +456,23 @@ fn ffmpeg_cookies_option_spelling_matrix() {
                     format!(
                         "{SENTINEL}; path=/; domain={host}; \
                          expires=Wed, 01 Jan 2031 00:00:00 GMT"
+                    ),
+                ],
+            )
+        },
+        // Two entries, newline-delimited: one spelled with the port and one
+        // without. FFmpeg matches `domain=` against the authority as written,
+        // so exactly one of these can ever match and the other is skipped.
+        // Emitting both is immune to the with-port/without-port distinction and
+        // to a future FFmpeg changing which one it uses.
+        |host, port| {
+            (
+                "-cookies  both domain= spellings, newline-delimited".to_string(),
+                vec![
+                    "-cookies".to_string(),
+                    format!(
+                        "{SENTINEL}; path=/; domain={host}\n\
+                         {SENTINEL}; path=/; domain={host}:{port}"
                     ),
                 ],
             )
