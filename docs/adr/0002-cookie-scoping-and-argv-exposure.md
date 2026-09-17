@@ -152,9 +152,23 @@ with no warning even at `-loglevel verbose`. Getting this wrong in production
 therefore breaks protected downloads with no diagnostic, which is the single
 sharpest edge in adopting `-cookies`.
 
-One residual: every run used an explicit, non-default port, because the fixture
-server binds an ephemeral one. That the rule also holds for an implicit `:443`
-is read off the source above, not observed.
+This was verified in both directions on 2026-09-17, with the fixture server
+bound to port 80 so the URL states no port:
+
+```text
+default-port/headers: cookie arrived = true
+default-port/cookies (downer's rendering): cookie arrived = true
+default-port/cookies with an explicit :80: cookie arrived = false
+```
+
+The converse row is what makes the rule "the authority as written" rather than
+"the authority, port optional" — without it, a pass would also be consistent
+with FFmpeg simply being lenient about ports.
+
+One residual, smaller than it was: the observed default port is 80 over http.
+That `:443` over https behaves the same follows from `ff_url_join` running
+before either default is applied, which is a single code path, but it has not
+been observed separately.
 
 A belt-and-braces form was considered and **not** adopted: emit both spellings
 as two newline-delimited entries, `domain=host` and `domain=host:port`, so that
@@ -168,7 +182,7 @@ than removing one, so KEI-78 implements the precise rule instead. The probe's
 `matching one FIRST` row settles whether the fallback is order-safe, should the
 precise rule ever need replacing.
 
-The default-port case is instead reachable directly:
+The default-port case is reachable directly:
 `tests/cookie_scope.rs::ffmpeg_cookie_scope_on_a_default_port` binds the fixture
 server to port 80, so the URL states no port exactly as a production one does,
 and checks that what `ffmpeg_cookies` renders for it arrives. It also checks the

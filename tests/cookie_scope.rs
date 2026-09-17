@@ -22,11 +22,21 @@
 //! the HLS demuxer, which was the uncertain part. `-headers` leaks in both
 //! cases, as ADR-0002 describes.
 //!
-//! One thing is **not** covered: every run used an explicit, non-default port,
-//! because the fixture server binds an ephemeral one. That the rule below also
-//! holds for a production URL with an implicit `:443` is read off FFmpeg's
-//! source, not observed. See `cookies_args`. Emitting both spellings at once
-//! sidesteps that, and the spelling probe confirms FFmpeg honours it.
+//! The default-port case is covered too, by
+//! `ffmpeg_cookie_scope_on_a_default_port` binding port 80 so the URL states no
+//! port (opt-in; it needs `sudo`):
+//!
+//! ```text
+//! default-port/headers: cookie arrived = true
+//! default-port/cookies (downer's rendering): cookie arrived = true
+//! default-port/cookies with an explicit :80: cookie arrived = false
+//! ```
+//!
+//! So `domain=` is the authority *as written*, in both directions. The one step
+//! still taken on faith is the scheme: the observed default port is 80 over
+//! http, and that `:443` over https behaves the same follows from `ff_url_join`
+//! running before either default is applied, which is one code path. See
+//! `cookies_args`.
 //!
 //! # Running them
 //!
