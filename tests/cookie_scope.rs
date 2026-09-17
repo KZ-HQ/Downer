@@ -22,10 +22,11 @@
 //! the HLS demuxer, which was the uncertain part. `-headers` leaks in both
 //! cases, as ADR-0002 describes.
 //!
-//! One thing is **not** covered: every run so far used an explicit, non-default
-//! port, because the fixture server binds an ephemeral one. That the rule below
-//! also holds for a production URL with an implicit `:443` is read off FFmpeg's
-//! source, not observed. See `cookies_args`.
+//! One thing is **not** covered: every run used an explicit, non-default port,
+//! because the fixture server binds an ephemeral one. That the rule below also
+//! holds for a production URL with an implicit `:443` is read off FFmpeg's
+//! source, not observed. See `cookies_args`. Emitting both spellings at once
+//! sidesteps that, and the spelling probe confirms FFmpeg honours it.
 //!
 //! # Running them
 //!

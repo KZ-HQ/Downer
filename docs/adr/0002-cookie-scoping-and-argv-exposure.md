@@ -151,14 +151,17 @@ with no warning even at `-loglevel verbose`. Getting this wrong in production
 therefore breaks protected downloads with no diagnostic, which is the single
 sharpest edge in adopting `-cookies`.
 
-One residual: every run so far used an explicit, non-default port, because the
-fixture server binds an ephemeral one. That the rule also holds for an implicit
-`:443` is read off the source above, not observed. KEI-78 should therefore emit
-**both** spellings as two newline-delimited entries — `domain=host` and
-`domain=host:port`. `domain=` is matched against one authority string, so at
-most one can ever match and the other is skipped; the form is immune both to
-the default-port question and to a future FFmpeg changing which string it
-builds.
+One residual: every run used an explicit, non-default port, because the fixture
+server binds an ephemeral one. That the rule also holds for an implicit `:443`
+is read off the source above, not observed.
+
+KEI-78 should therefore emit **both** spellings as two newline-delimited
+entries — `domain=host` and `domain=host:port`. `domain=` is matched against one
+authority string, so at most one can ever match and the other is skipped, which
+makes the form immune both to the default-port question and to a future FFmpeg
+changing which string it builds. That form is **confirmed** by the same probe
+run: FFmpeg accepts newline-delimited entries, and carrying a non-matching one
+alongside does not stop the matching one being sent.
 
 ## Consequences
 
