@@ -103,6 +103,13 @@ ADR.
   `tests/fixtures/protocol.json`, the native messaging protocol's wire
   vocabulary, which both test suites read so the Rust and JavaScript sides
   cannot rename a protocol term unilaterally.
+  `tests/fixtures/protected_site.py` is a standard-library HTTP server that
+  gates media on a session cookie, run with `make fixture-site` and
+  `make fixture-site-peer`. It exists for the checks no automated test can
+  make: whether a cookie survives the whole path from Firefox's cookie jar
+  through the native port to FFmpeg, and whether it stops at the media host.
+  Two instances on `localhost` and `127.0.0.1` give two host strings on one
+  network. It logs whether a `Cookie` header arrived, never its value.
 - `dist/`: build artifact directory for the packaged Firefox extension. It is
   produced by `make extension-package` (and by CI/release tooling) and is not
   tracked in git.

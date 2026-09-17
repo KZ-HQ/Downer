@@ -4,7 +4,7 @@ CARGO ?= cargo
 FFMPEG ?= ffmpeg
 NPM ?= npm
 
-.PHONY: help setup doctor build fmt fmt-check lint test version-check extension-deps extension-lint extension-test extension-check check run install extension extension-package extension-install clean
+.PHONY: help setup doctor build fmt fmt-check lint test version-check extension-deps extension-lint extension-test extension-check check run install extension extension-package extension-install fixture-site fixture-site-peer clean
 
 help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -78,6 +78,14 @@ extension-check: extension-lint extension-test ## Validate Firefox extension JSO
 extension: extension-install extension-package ## Build/register the native host and package the extension
 
 check: fmt-check lint version-check test extension-check ## Run Rust and Firefox extension checks
+
+FIXTURE_SITE := python3 tests/fixtures/protected_site.py
+
+fixture-site: ## Serve cookie-gated media on localhost:8080 for manual verification
+	$(FIXTURE_SITE) --host localhost --port 8080 --peer http://127.0.0.1:8081 --ffmpeg $(FFMPEG)
+
+fixture-site-peer: ## Second fixture origin on 127.0.0.1:8081, for the cross-host cases
+	$(FIXTURE_SITE) --host 127.0.0.1 --port 8081 --peer http://localhost:8080 --ffmpeg $(FFMPEG)
 
 run: ## Run downer; pass CLI arguments with ARGS="..."
 	@test -n "$(ARGS)" || { echo 'usage: make run ARGS="URL [options]"' >&2; exit 2; }
