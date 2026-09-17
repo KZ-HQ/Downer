@@ -8,21 +8,39 @@
 //! against each request's host — if that matching holds across redirects and
 //! inside the HLS demuxer, it is the fix.
 //!
-//! # These tests have never been run against a real FFmpeg
+//! # Result: domain-scoped `-cookies` is confirmed (FFmpeg 9.0.1, macOS/arm64)
 //!
-//! FFmpeg is deliberately not installed in CI (see `AGENTS.md`) and is not
-//! available in the environment this file was written in, so every test below
-//! that needs one **skips**. They are written to be run by someone who has
-//! FFmpeg, and KEI-54's follow-up issue is gated on that run:
+//! ```text
+//! redirect/headers: media host received cookie = true,  redirect target = true
+//! redirect/cookies: media host received cookie = true,  redirect target = false
+//! hls/headers:      playlist host received cookie = true, segment host  = true
+//! hls/cookies:      playlist host received cookie = true, segment host  = false
+//! ```
+//!
+//! `-cookies` reaches the host it is scoped to and stays off both a redirect
+//! target and a cross-host HLS segment server; the scoping does propagate into
+//! the HLS demuxer, which was the uncertain part. `-headers` leaks in both
+//! cases, as ADR-0002 describes.
+//!
+//! One thing is **not** covered: every run so far used an explicit, non-default
+//! port, because the fixture server binds an ephemeral one. That the rule below
+//! also holds for a production URL with an implicit `:443` is read off FFmpeg's
+//! source, not observed. See `cookies_args`.
+//!
+//! # Running them
+//!
+//! FFmpeg is deliberately not installed in CI (see `AGENTS.md`), so every test
+//! below that needs one **skips** there, printing a line beginning `SKIP:`.
+//! A green CI run is therefore not evidence; only a local run is.
 //!
 //! ```sh
 //! cargo test --test cookie_scope -- --nocapture
 //! ```
 //!
-//! A skip prints a line beginning `SKIP:`. Nothing here fakes an FFmpeg: a fake
-//! would only tell us what we asked FFmpeg to do, which is what the argv-
-//! recording fakes in `tests/cli.rs` and `tests/native_host.rs` already prove.
-//! Only a real FFmpeg on a real socket shows what reaches the wire.
+//! Nothing here fakes an FFmpeg: a fake would only tell us what we asked FFmpeg
+//! to do, which is what the argv-recording fakes in `tests/cli.rs` and
+//! `tests/native_host.rs` already prove. Only a real FFmpeg on a real socket
+//! shows what reaches the wire.
 //!
 //! The two servers bind `localhost` and `127.0.0.1`. Both are loopback, but they
 //! are different host *strings*, which is what FFmpeg's cookie matching compares

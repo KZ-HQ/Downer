@@ -78,7 +78,8 @@ The Rust package and the Firefox extension share one product version; see
 - A dependency-free loopback HTTP server in `tests/support/` that records the
   headers it receives, and `tests/cookie_scope.rs`, which drives a real FFmpeg
   against two of them through a redirect and a cross-host HLS segment to
-  establish which requests a forwarded cookie actually reaches. The tests that
+  establish which requests a forwarded cookie actually reaches, plus an opt-in
+  probe reporting which spellings of `-cookies` FFmpeg honours. The tests that
   need a real FFmpeg skip when none is present, as in CI.
 
 ### Fixed
@@ -144,9 +145,9 @@ The Rust package and the Firefox extension share one product version; see
 - A forwarded cookie is sent to every host FFmpeg contacts for an input, not
   only the media host: `-headers` applies to redirect targets and, for HLS, to
   cross-host segment and key servers. Scoping cookies with FFmpeg's `-cookies`
-  is the proposed fix and is not yet adopted, because its behaviour across
-  redirects and inside the HLS demuxer has not been verified against a real
-  FFmpeg. See `docs/adr/0002-cookie-scoping-and-argv-exposure.md`.
+  is the fix, and it is verified against FFmpeg 9.0.1 — a scoped cookie stays
+  off both a redirect target and a cross-host HLS segment server — but it is
+  not yet adopted. See `docs/adr/0002-cookie-scoping-and-argv-exposure.md`.
 - A cookie supplied to the CLI or forwarded by the extension is visible in
   FFmpeg's process arguments to other processes on the same machine for the
   duration of a download.

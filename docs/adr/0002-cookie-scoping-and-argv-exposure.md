@@ -98,26 +98,79 @@ Switching the main download path to an option whose behaviour nobody has
 observed would risk breaking every protected HLS download, and the failure
 would surface only in a browser.
 
-So this ADR records domain-scoped `-cookies` as the **proposed and unverified**
-direction. What lands now is the apparatus to settle it:
-`tests/support/mod.rs` is a dependency-free loopback HTTP server that records
-the headers it receives, and `tests/cookie_scope.rs` drives a real FFmpeg
-against two of them — bound to `localhost` and `127.0.0.1`, which are one
-network but two host strings — through a redirect and through a cross-host HLS
-segment, with `-headers` and with `-cookies`. Without a real FFmpeg those tests
-skip, loudly. The follow-up issue that flips the default is gated on that run.
+So what landed in KEI-54 is the apparatus to settle it: `tests/support/mod.rs`
+is a dependency-free loopback HTTP server that records the headers it receives,
+and `tests/cookie_scope.rs` drives a real FFmpeg against two of them — bound to
+`localhost` and `127.0.0.1`, which are one network but two host strings —
+through a redirect and through a cross-host HLS segment, with `-headers` and
+with `-cookies`. Without a real FFmpeg those tests skip, loudly.
+
+### Verified: FFmpeg 9.0.1, macOS/arm64, 2026-09-17
+
+That run has since happened, on the reporter's machine:
+
+```text
+redirect/headers: media host received cookie = true,  redirect target = true
+redirect/cookies: media host received cookie = true,  redirect target = false
+hls/headers:      playlist host received cookie = true, segment host  = true
+hls/cookies:      playlist host received cookie = true, segment host  = false
+```
+
+**Domain-scoped `-cookies` is confirmed.** The cookie reaches the host it is
+scoped to and stays off both a redirect target and a cross-host HLS segment
+server. The scoping propagates into the HLS demuxer, which was the part most in
+doubt. `-headers` leaks in both cases, so the problem this ADR describes is
+real and not theoretical.
+
+#### The `domain=` value is the URL authority, not the hostname
+
+The first run appeared to refute the whole approach — the cookie reached
+*nobody*, not even its own host. That was a malformed argument, not a
+limitation. FFmpeg's `get_cookies()` keeps a cookie only when its `domain=` is a
+suffix of the string `http_open_cnx_internal()` builds with
+
+```c
+ff_url_join(hoststr, sizeof(hoststr), NULL, NULL, tmp_host, port, NULL);
+```
+
+and that call sits *before* the `if (port < 0) port = 443/80` defaulting. So
+`port` is whatever `av_url_split()` found in the URL — `-1` when the URL states
+none, for which `ff_url_join` appends nothing. The rule is the URL's authority
+**exactly as written**:
+
+| media URL | required `domain=` |
+| --- | --- |
+| `http://localhost:60254/v.mp4` | `localhost:60254` |
+| `https://cdn.example.test/v.mp4` | `cdn.example.test` (no `:443`) |
+
+In Rust that is `Url::port()`, which is `None` for a default port — not
+`port_or_known_default()`.
+
+**A mismatch is silent.** FFmpeg makes the request and simply omits the cookie,
+with no warning even at `-loglevel verbose`. Getting this wrong in production
+therefore breaks protected downloads with no diagnostic, which is the single
+sharpest edge in adopting `-cookies`.
+
+One residual: every run so far used an explicit, non-default port, because the
+fixture server binds an ephemeral one. That the rule also holds for an implicit
+`:443` is read off the source above, not observed. KEI-78 should therefore emit
+**both** spellings as two newline-delimited entries — `domain=host` and
+`domain=host:port`. `domain=` is matched against one authority string, so at
+most one can ever match and the other is skipped; the form is immune both to
+the default-port question and to a future FFmpeg changing which string it
+builds.
 
 ## Consequences
 
 * A cookie can be supplied without entering shell history, and cannot inject a
   second header line. Neither property depended on FFmpeg semantics, so both
   ship now.
-* Cookies still reach redirect targets and cross-host HLS segments. That is the
-  known, unfixed part of KEI-54, and it is why the follow-up exists rather than
-  the issue simply closing.
-* `tests/cookie_scope.rs` passes in CI without proving anything about FFmpeg.
-  Its doc comment says so in the first paragraph, and a skip prints a line
-  beginning `SKIP:`. A green run is not evidence.
+* Cookies still reach redirect targets and cross-host HLS segments. The fix is
+  now verified rather than merely proposed, but it is KEI-78 that applies it;
+  this ADR changed no cookie rendering.
+* `tests/cookie_scope.rs` passes in CI without proving anything about FFmpeg,
+  because it skips there. A green CI run is not evidence; only a local run is,
+  and the result of one is recorded above.
 * The wire protocol is unchanged and stays at version 1. The extension is
   unchanged by KEI-54.
 * One gap is out of scope here: if FFmpeg itself echoes a token-bearing URL
