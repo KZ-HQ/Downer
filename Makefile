@@ -48,7 +48,7 @@ extension-deps: ## Install development-only extension tooling (web-ext)
 extension-lint: extension-deps ## Lint the Firefox extension with web-ext
 	@node_modules/.bin/web-ext lint --source-dir extension --warnings-as-errors
 
-extension-test: ## Run the extension's Node unit tests
+extension-test: extension-deps ## Run the extension's Node unit tests
 	@node --test tests/extension/*.test.js
 
 extension-check: extension-lint extension-test ## Validate Firefox extension JSON and JavaScript
