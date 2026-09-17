@@ -14,7 +14,7 @@ use error::{DownerError, DownerResult};
 use ffmpeg::{
     execute, execute_controlled_with_progress, FfmpegCommand, FfmpegProgress, ProcessControl,
 };
-use output::{resolve_conflict, resolve_output_path, NamingHints, OnConflict};
+use output::{release_reservation, resolve_conflict, resolve_output_path, NamingHints, OnConflict};
 use scraper::ResolvedMedia;
 
 /// Environment variable holding a cookie header, used when neither `--cookie`
@@ -180,7 +180,7 @@ fn download_resolved_with_executor(
         &options.naming,
     )?;
     let target = resolve_conflict(destination, options.conflict_policy())?;
-    let destination = target.path;
+    let destination = target.path.clone();
 
     if !options.quiet {
         if let Some(referer) = &media.referer {
@@ -203,7 +203,16 @@ fn download_resolved_with_executor(
         cookies.as_deref(),
         options.threads,
     );
-    let destination = execute(&command)?;
+    let destination = match execute(&command) {
+        Ok(destination) => destination,
+        Err(error) => {
+            // A name we reserved and never wrote to is residue, not output.
+            // Anything FFmpeg did write is kept; `release_reservation` only
+            // takes the file back while it is still empty.
+            release_reservation(&target);
+            return Err(error);
+        }
+    };
     if !options.quiet {
         println!("Download complete: {}", destination.display());
     }

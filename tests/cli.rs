@@ -272,6 +272,122 @@ fn an_unknown_conflict_policy_is_an_input_error() {
         .stderr(predicate::str::contains("invalid value"));
 }
 
+/// A download that fails before FFmpeg writes anything must leave nothing
+/// behind: the reserved name is a placeholder this process created, not output.
+#[cfg(unix)]
+#[test]
+fn a_download_that_writes_nothing_leaves_no_file_behind() {
+    let temp = tempfile::tempdir().unwrap();
+    let silent = fake_silent_ffmpeg(temp.path());
+    let output_dir = temp.path().join("downloads");
+
+    for _ in 0..2 {
+        Command::cargo_bin("downer")
+            .unwrap()
+            .args(["https://example.test/hls/index.m3u8", "--dir"])
+            .arg(&output_dir)
+            .arg("--ffmpeg")
+            .arg(&silent)
+            .arg("--name")
+            .arg("Lecture 3")
+            .assert()
+            .code(5);
+    }
+
+    assert_eq!(
+        fs::read_dir(&output_dir).unwrap().count(),
+        0,
+        "a failed download leaves no residue: {:?}",
+        fs::read_dir(&output_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>()
+    );
+
+    // Two failures did not walk the name forward either, so a later success
+    // still gets the name the user expects.
+    let working = fake_ffmpeg(temp.path(), false);
+    Command::cargo_bin("downer")
+        .unwrap()
+        .args(["https://example.test/hls/index.m3u8", "--dir"])
+        .arg(&output_dir)
+        .arg("--ffmpeg")
+        .arg(&working)
+        .arg("--name")
+        .arg("Lecture 3")
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(output_dir.join("Lecture 3.mp4")).unwrap(),
+        "fake media"
+    );
+}
+
+/// The other half of the rule: bytes FFmpeg did write are diagnostic output and
+/// survive the failure, exactly as `AGENTS.md` requires.
+#[cfg(unix)]
+#[test]
+fn a_partially_written_download_is_still_preserved() {
+    let temp = tempfile::tempdir().unwrap();
+    let failing = fake_ffmpeg(temp.path(), true);
+    let output_dir = temp.path().join("downloads");
+
+    Command::cargo_bin("downer")
+        .unwrap()
+        .args(["https://example.test/hls/index.m3u8", "--dir"])
+        .arg(&output_dir)
+        .arg("--ffmpeg")
+        .arg(&failing)
+        .arg("--name")
+        .arg("Lecture 3")
+        .assert()
+        .code(5);
+
+    assert_eq!(
+        fs::read_to_string(output_dir.join("Lecture 3.mp4")).unwrap(),
+        "partial media",
+        "partial output is never mistaken for a reservation"
+    );
+}
+
+/// An FFmpeg that cannot even be started is the same case: nothing was written,
+/// so nothing should be left.
+#[cfg(unix)]
+#[test]
+fn a_missing_ffmpeg_leaves_no_file_behind() {
+    let temp = tempfile::tempdir().unwrap();
+    let output_dir = temp.path().join("downloads");
+
+    Command::cargo_bin("downer")
+        .unwrap()
+        .args(["https://example.test/hls/index.m3u8", "--dir"])
+        .arg(&output_dir)
+        .arg("--ffmpeg")
+        .arg(temp.path().join("missing-ffmpeg"))
+        .arg("--name")
+        .arg("Lecture 3")
+        .assert()
+        .code(4);
+
+    assert_eq!(fs::read_dir(&output_dir).unwrap().count(), 0);
+}
+
+/// An FFmpeg that fails without writing to the output path at all.
+#[cfg(unix)]
+fn fake_silent_ffmpeg(directory: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let script = directory.join("fake-silent-ffmpeg");
+    fs::write(
+        &script,
+        "#!/bin/sh\necho 'could not open input' >&2\nexit 1\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script, permissions).unwrap();
+    script
+}
+
 #[cfg(unix)]
 fn fake_ffmpeg(directory: &Path, fail: bool) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;

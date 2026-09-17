@@ -93,11 +93,21 @@ together are two processes racing for the same directory; a probe leaves a
 window in which both pick ` (2)` and one silently overwrites the other — the
 exact outcome this ADR exists to prevent.
 
-The cost is a zero-byte file left behind if the download then fails before
-FFmpeg writes anything, and a subsequent retry therefore landing on ` (2)`.
-That was accepted over the race: the "preserve partial output and diagnostic
-files after download failures" rule says not to clean up after a failure anyway,
-and a stray empty file is recoverable where a clobbered download is not.
+A reservation is a placeholder, not output, so a download that fails without
+using it **releases** it: `release_reservation` deletes the file and the next
+attempt gets the name it expected rather than ` (2)`. Leaving it was considered
+first, on the grounds that "preserve partial output and diagnostic files after
+download failures" says not to clean up after a failure — but that rule protects
+*FFmpeg's* bytes, and an empty file this process created to claim a name is not
+among them. It is residue: a file the user never asked for, in their Downloads
+folder, that also walks the name forward on every retry.
+
+The two are told apart by the only signal that cannot be wrong about it: the
+file is removed **only while it is still empty**, the state the reservation
+created it in. The moment FFmpeg writes a byte the file stops being a
+reservation and is kept, so a partial download survives its failure exactly as
+before. A path that was not reserved — every `fail` and `overwrite` target — is
+never touched at all, so an empty file that was already the user's stays put.
 
 ### The protocol gains two optional fields and stays at version 1
 
@@ -148,8 +158,9 @@ rather than being talked into replacing a file.
   stem. This is intended, and it is why two lifecycle tests in
   `tests/native_host.rs` moved to a distinctive URL: they are about the event
   sequence, and naming is covered on its own.
-* A failed download can leave a zero-byte file at the name it reserved, as
-  above.
+* A failed download leaves nothing behind, and a retry gets the same name it
+  would have had the first time. Partial output is unaffected: the release is
+  conditional on the file still being empty.
 
 ## Unverified
 
@@ -168,3 +179,10 @@ rather than being talked into replacing a file.
   name" is untested here.
 * The ` (2)` reservation race is argued, not demonstrated: no test starts two
   host processes against one directory simultaneously.
+* Releasing a reservation is a delete, and deletes deserve suspicion. The
+  narrowness of it — reserved by this process, in this run, still zero bytes —
+  is pinned from both sides: `releasing_never_deletes_output_ffmpeg_actually_wrote`
+  and `a_partially_written_download_is_still_preserved` fail if the emptiness
+  check is dropped, and `releasing_never_touches_a_path_we_did_not_reserve`
+  covers a target we did not create. What is *not* covered is a file another
+  process writes into our reservation between the failure and the release.

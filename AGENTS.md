@@ -238,10 +238,15 @@ stale release binary is the most common cause of "it worked before" reports.
   fail|rename|overwrite` and the matching Settings option make the choice
   explicit, and `--overwrite` remains shorthand for `overwrite`. Renaming takes
   its name by creating the file exclusively, so two hosts racing for one
-  directory cannot pick the same name. This rule replaces the earlier "refuse
+  directory cannot pick the same name; a download that then fails without
+  writing anything deletes that reservation, so a failure leaves no residue and
+  a retry gets the same name. This rule replaces the earlier "refuse
   output collisions unless `--overwrite` is explicitly supplied"; the reasoning
   is in ADR-0004.
-- Preserve partial output and diagnostic files after download failures.
+- Preserve partial output and diagnostic files after download failures. This
+  covers what FFmpeg wrote, not a still-empty name the output layer reserved
+  before invoking it: that is released on failure (see ADR-0004). The emptiness
+  check is the line between the two — never widen a cleanup past it.
 - Keep one URL per invocation; batch downloading and authentication workflows
   are out of scope unless explicitly requested.
 - Keep browser controls (pause, resume, cancel) functional for native-host

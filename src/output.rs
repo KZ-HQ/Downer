@@ -67,11 +67,14 @@ impl NamingHints {
 ///
 /// `overwrite` is what FFmpeg is told. Under [`OnConflict::Rename`] the path
 /// was reserved by this process (see [`resolve_conflict`]), so replacing that
-/// reservation is both safe and required.
+/// reservation is both safe and required, and `reserved` is set so
+/// [`release_reservation`] can take the empty file back if the download never
+/// writes to it.
 #[derive(Debug, Clone)]
 pub struct OutputTarget {
     pub path: PathBuf,
     pub overwrite: bool,
+    pub reserved: bool,
 }
 
 /// Accept only network media URLs that FFmpeg can open directly.
@@ -158,12 +161,14 @@ pub fn resolve_conflict(path: PathBuf, policy: OnConflict) -> DownerResult<Outpu
         OnConflict::Overwrite => Ok(OutputTarget {
             path,
             overwrite: true,
+            reserved: false,
         }),
         OnConflict::Fail => {
             check_output_path(&path, false)?;
             Ok(OutputTarget {
                 path,
                 overwrite: false,
+                reserved: false,
             })
         }
         OnConflict::Rename => reserve_unused_path(path),
@@ -191,6 +196,7 @@ fn reserve_unused_path(path: PathBuf) -> DownerResult<OutputTarget> {
                     // empty file this reservation just created.
                     path: candidate,
                     overwrite: true,
+                    reserved: true,
                 });
             }
             Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
@@ -198,6 +204,31 @@ fn reserve_unused_path(path: PathBuf) -> DownerResult<OutputTarget> {
         }
     }
     Err(DownerError::OutputExists(path))
+}
+
+/// Take back a reservation the download never used.
+///
+/// A reservation is a placeholder this process created to claim a name, not
+/// output. If the download then fails, leaving it behind would be residue: an
+/// empty file the user did not ask for, which also pushes the next attempt onto
+/// ` (2)`. So a failed download releases it.
+///
+/// The one thing this must never do is delete real output. "Preserve partial
+/// output and diagnostic files after download failures" is the rule, and a
+/// failure after FFmpeg has written some bytes is exactly the case it protects.
+/// So the file is removed only while it is still **empty** — the state the
+/// reservation created it in. The moment FFmpeg writes a byte it stops being a
+/// reservation and is kept, and a path we did not reserve is never touched.
+pub fn release_reservation(target: &OutputTarget) {
+    if !target.reserved {
+        return;
+    }
+    let is_empty = fs::metadata(&target.path).is_ok_and(|metadata| metadata.len() == 0);
+    if is_empty {
+        // Best effort: failing to tidy up must not replace the download's own
+        // error, which is the one the user needs to read.
+        let _ = fs::remove_file(&target.path);
+    }
 }
 
 /// `video.mp4` and 2 become `video (2).mp4`; the suffix goes before the
@@ -528,6 +559,52 @@ mod tests {
         fs::remove_file(directory.path().join("Lecture 3 (2).mp4")).unwrap();
         let fourth = resolve_conflict(base, OnConflict::Rename).unwrap();
         assert_eq!(fourth.path, directory.path().join("Lecture 3 (2).mp4"));
+    }
+
+    #[test]
+    fn a_failed_download_leaves_no_reservation_behind() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().join("Lecture 3.mp4");
+
+        let target = resolve_conflict(base.clone(), OnConflict::Rename).unwrap();
+        assert!(target.path.exists(), "the reservation was created");
+        release_reservation(&target);
+        assert!(
+            !target.path.exists(),
+            "an unused reservation is residue and must not survive"
+        );
+
+        // And the name is free again, so a retry does not start at " (2)".
+        let retry = resolve_conflict(base.clone(), OnConflict::Rename).unwrap();
+        assert_eq!(retry.path, base);
+    }
+
+    #[test]
+    fn releasing_never_deletes_output_ffmpeg_actually_wrote() {
+        let directory = tempfile::tempdir().unwrap();
+        let target =
+            resolve_conflict(directory.path().join("Lecture 3.mp4"), OnConflict::Rename).unwrap();
+        // The moment FFmpeg writes a byte the file stops being a reservation:
+        // "preserve partial output after failures" takes over from here.
+        fs::write(&target.path, b"partial media").unwrap();
+
+        release_reservation(&target);
+        assert_eq!(fs::read_to_string(&target.path).unwrap(), "partial media");
+    }
+
+    #[test]
+    fn releasing_never_touches_a_path_we_did_not_reserve() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("existing.mp4");
+        fs::write(&path, b"keep me").unwrap();
+
+        // `overwrite` and `fail` never reserve, so an empty file at the target
+        // belongs to the user and must survive a failed download.
+        let overwriting = resolve_conflict(path.clone(), OnConflict::Overwrite).unwrap();
+        assert!(!overwriting.reserved);
+        fs::write(&path, b"").unwrap();
+        release_reservation(&overwriting);
+        assert!(path.exists(), "an empty file we did not create is not ours");
     }
 
     #[test]

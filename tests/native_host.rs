@@ -441,6 +441,61 @@ fn an_unknown_conflict_policy_is_rejected_rather_than_ignored() {
     );
 }
 
+/// The host path leaves no residue either. A download the extension starts and
+/// that fails before FFmpeg writes anything must not leave the reserved name
+/// behind — and must not push the next attempt onto ` (2)`.
+#[test]
+fn a_failed_host_download_leaves_no_reserved_file_behind() {
+    let temp = tempfile::tempdir().unwrap();
+    let silent = FakeFfmpeg {
+        content: "",
+        stderr_line: Some("could not open input"),
+        exit_code: 1,
+        ..FakeFfmpeg::default()
+    }
+    .install(temp.path());
+    let output_dir = temp.path().join("downloads");
+
+    for job in ["job-residue-a", "job-residue-b"] {
+        let mut host = NativeHost::start(&silent);
+        let mut request = download_request("https://example.test/hls/index.m3u8", &output_dir);
+        request["job_id"] = json!(job);
+        request["title"] = json!("Lecture 3");
+        host.send(&request);
+        let (failed, _) = host.wait_for_state("failed");
+        assert_envelope(&failed, "terminal");
+    }
+
+    let left_behind: Vec<_> = fs::read_dir(&output_dir)
+        .map(|entries| {
+            entries
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    assert!(
+        left_behind.is_empty(),
+        "a failed download leaves no residue: {left_behind:?}"
+    );
+
+    // The name is still free, so the first success gets it rather than " (3)".
+    let working = FakeFfmpeg::default().install(temp.path());
+    let mut host = NativeHost::start(&working);
+    let mut request = download_request("https://example.test/hls/index.m3u8", &output_dir);
+    request["job_id"] = json!("job-residue-ok");
+    request["title"] = json!("Lecture 3");
+    host.send(&request);
+    let (completed, _) = host.wait_for_state("completed");
+    assert_eq!(
+        PathBuf::from(
+            completed["path"]
+                .as_str()
+                .expect("completed carries a path")
+        ),
+        output_dir.join("Lecture 3.mp4")
+    );
+}
+
 /// A title is naming material, not diagnostics. It must not appear in any event
 /// the host emits — the filename in the `terminal` path is the only place a
 /// title-derived string legitimately shows up.

@@ -107,7 +107,10 @@ The Rust package and the Firefox extension share one product version; see
   the same choice for extension downloads, and `--overwrite` is now shorthand
   for `--on-conflict overwrite` (the two cannot be combined). This replaces the
   previous "refuse every collision unless `--overwrite`" rule; see
-  `docs/adr/0004-output-naming-and-collision-policy.md`.
+  `docs/adr/0004-output-naming-and-collision-policy.md`. A download that fails
+  before FFmpeg writes anything leaves no file behind, and the next attempt gets
+  the same name rather than being pushed onto ` (2)`; anything FFmpeg did write
+  is still preserved.
 - The native messaging protocol's `download` request gains two optional fields,
   `title` and `on_conflict`, without a `protocol_version` bump. `overwrite` is
   superseded by `on_conflict` but still accepted. An absent `on_conflict` means
