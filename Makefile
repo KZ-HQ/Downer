@@ -66,6 +66,8 @@ extension-check: extension-lint extension-test ## Validate Firefox extension JSO
 	@python3 -m json.tool extension/manifest.json >/dev/null
 	@node --check extension/background.js
 	@node --check extension/hls.js
+	@node --check extension/redact.js
+	@node --check extension/job-logs.js
 	@node --check extension/task-protocol.js
 	@node --check extension/content.js
 	@node --check extension/media-scan.js

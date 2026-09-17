@@ -5,6 +5,11 @@
 //! observable protocol (field names, state strings, event order) is pinned without
 //! touching the network or a real FFmpeg.
 //!
+//! Two tests at the end are the exception: they point the host at a *real*
+//! FFmpeg, because KEI-55's redaction is a claim about FFmpeg's own output and a
+//! fake can only echo what we told it to say. They skip loudly when none is
+//! installed, as `tests/cookie_scope.rs` does.
+//!
 //! The contract these tests pin is written down in `docs/protocol.md` and decided
 //! in `docs/adr/0001-native-messaging-protocol.md`. The wire vocabulary lives in
 //! `tests/fixtures/protocol.json`, which the extension's Node tests read too, so
@@ -12,6 +17,8 @@
 //! test here is a protocol decision to make deliberately, not a test to adjust.
 
 #![cfg(unix)]
+
+mod support;
 
 use std::{
     fs,
@@ -972,9 +979,9 @@ fn closing_stdin_cancels_active_downloads_and_exits_cleanly() {
 ///
 /// A sentinel, never a real cookie: `AGENTS.md` forbids one in a test.
 ///
-/// This covers what the host controls. It does not cover FFmpeg echoing a
-/// token-bearing URL back through its own stderr; redacting *that* before
-/// persistence is KEI-55, and ADR-0002 records it as the remaining gap.
+/// This covers what the host controls. FFmpeg echoing a token-bearing URL back
+/// through its own stderr was the remaining gap ADR-0002 named; it is closed by
+/// `no_host_event_carries_a_url_query` below (KEI-55, ADR-0003).
 #[test]
 fn no_host_event_carries_the_cookie_value() {
     const SENTINEL: &str = "downer_sentinel=KEI54-not-a-real-session";
@@ -1014,5 +1021,176 @@ fn no_host_event_carries_the_cookie_value() {
     assert!(
         args.iter().any(|argument| argument.contains(SENTINEL)),
         "the cookie still reaches FFmpeg: {args:?}"
+    );
+}
+
+/// KEI-55 acceptance criterion, host side: FFmpeg's own stderr must not carry a
+/// URL query out of this process.
+///
+/// This is the gap ADR-0002 left open. `no_host_event_carries_the_cookie_value`
+/// above proves the host never *originates* a secret; this proves it does not
+/// relay one either. FFmpeg's HLS demuxer logs one `Opening '<url>' for reading`
+/// line per segment at `-loglevel info`, and those URLs routinely carry a signed
+/// token — which the host used to forward verbatim as a `log` event, and the
+/// extension used to persist until "Clear logs" was pressed.
+///
+/// The extension redacts again on its side (`extension/redact.js`); the two
+/// layers and the reason for both are in ADR-0003.
+///
+/// A sentinel, never a real token: `AGENTS.md` forbids one in a test. The fake
+/// FFmpeg echoes its stderr line inside single quotes, so the line here uses
+/// none — the quoting FFmpeg really puts around the URL is covered by
+/// `tests/fixtures/redaction.json` and, against FFmpeg's genuine output, by
+/// `tests/log_redaction.rs`.
+///
+/// This test uses a fake FFmpeg so it runs everywhere, including CI. Its
+/// real-FFmpeg counterpart is `no_host_event_carries_a_url_query_from_a_real_ffmpeg`
+/// at the end of this file, which skips when none is installed.
+#[test]
+fn no_host_event_carries_a_url_query() {
+    const SENTINEL: &str = "KEI55-not-a-real-signed-token";
+    const LINE: &str = "Opening https://cdn.example.test/hls/seg42.ts?token=KEI55-not-a-real-signed-token&e=1790000000 for reading";
+
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg {
+        content: "partial media",
+        stderr_line: Some(LINE),
+        exit_code: 17,
+        ..FakeFfmpeg::default()
+    }
+    .install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    let mut host = NativeHost::start(&ffmpeg);
+
+    let mut request = download_request("https://example.test/video.mp4", &output_dir);
+    request["job_id"] = json!("job-token");
+    host.send(&request);
+
+    let (terminal, earlier) = host.wait_for_state("failed");
+    assert_envelope(&terminal, "terminal");
+
+    for event in earlier.iter().chain(std::iter::once(&terminal)) {
+        let rendered = serde_json::to_string(event).expect("event serializes");
+        assert!(
+            !rendered.contains(SENTINEL),
+            "a host event carried a signed token: {}",
+            event["type"]
+        );
+    }
+
+    // The line is still a useful log line: scheme, host and path survive, and
+    // only the query is replaced. A log event that redacted the whole URL would
+    // pass the assertion above while making the logs worthless.
+    let log_event = earlier
+        .iter()
+        .find(|event| event["type"] == json!("log"))
+        .unwrap_or_else(|| panic!("expected a log event, saw {earlier:#?}"));
+    assert_eq!(
+        log_event["log"],
+        json!("Opening https://cdn.example.test/hls/seg42.ts?… for reading")
+    );
+
+    // `DownerError::FfmpegFailed` embeds the stderr tail, so the terminal error
+    // is the same leak by another route.
+    let error = terminal["error"]
+        .as_str()
+        .expect("failure carries an error");
+    assert!(
+        error.contains("https://cdn.example.test/hls/seg42.ts?…"),
+        "error text: {error}"
+    );
+}
+
+/// Locate a real FFmpeg, or explain the skip and return `None`.
+fn real_ffmpeg(test: &str) -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("DOWNER_FFMPEG") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    let found = std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|directory| directory.join("ffmpeg"))
+        .find(|candidate| candidate.is_file());
+    if found.is_none() {
+        eprintln!(
+            "SKIP: {test} needs a real FFmpeg. Install one, or point DOWNER_FFMPEG at it, \
+             and re-run: cargo test --test native_host -- --nocapture"
+        );
+    }
+    found
+}
+
+/// KEI-55, end to end through the real host process and a real FFmpeg.
+///
+/// `no_host_event_carries_a_url_query` above feeds the host a stderr line that
+/// *resembles* FFmpeg's, which proves the host redacts what it is given but not
+/// that FFmpeg says anything of the kind. This closes that gap: a real FFmpeg
+/// fetches a real URL carrying a token in its query, from a real socket, and
+/// the host's events are searched for it.
+///
+/// The **direct-file** path is used rather than HLS on purpose.
+/// `src/ffmpeg.rs` passes `-allowed_segment_extensions` and `-extension_picky`
+/// for an `.m3u8` input, and those exist only from FFmpeg 7.1 — the minimum
+/// `README.md` documents. On an older FFmpeg the run would fail on the argument
+/// list before making a single request, and the test would pass while proving
+/// nothing. The direct path carries no version-specific options, so this test
+/// says something real on any FFmpeg. `tests/log_redaction.rs` covers the HLS
+/// demuxer's per-segment line against a real FFmpeg separately.
+///
+/// A sentinel, never a real token: `AGENTS.md` forbids one in a test.
+#[test]
+fn no_host_event_carries_a_url_query_from_a_real_ffmpeg() {
+    const SENTINEL: &str = "KEI55-not-a-real-signed-token";
+
+    let Some(ffmpeg) = real_ffmpeg("no_host_event_carries_a_url_query_from_a_real_ffmpeg") else {
+        return;
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let origin = support::HeaderRecorder::start("127.0.0.1");
+    origin.route(
+        "/v.mp4",
+        support::Reply::text("video/mp4", "not real media"),
+    );
+    let url = format!("{}?token={SENTINEL}&e=1790000000", origin.url("/v.mp4"));
+
+    let output_dir = temp.path().join("downloads");
+    let mut host = NativeHost::start(&ffmpeg);
+    let mut request = download_request(&url, &output_dir);
+    request["job_id"] = json!("job-real-ffmpeg");
+    host.send(&request);
+
+    let (terminal, earlier) = host.wait_for_state("failed");
+    assert_envelope(&terminal, "terminal");
+
+    // The premise: FFmpeg really fetched the URL, so anything it logged about it
+    // is a statement about a real request.
+    assert!(
+        !origin.requests_for("/v.mp4").is_empty(),
+        "FFmpeg never fetched the media, so this says nothing about redaction"
+    );
+
+    // The property: nothing the host emitted carries the token.
+    for event in earlier.iter().chain(std::iter::once(&terminal)) {
+        let rendered = serde_json::to_string(event).expect("event serializes");
+        assert!(
+            !rendered.contains(SENTINEL),
+            "a host event carried a signed token from real FFmpeg output: {}",
+            event["type"]
+        );
+    }
+
+    // And the host did report the failure usefully rather than by saying nothing:
+    // the redacted URL is in the terminal error FFmpeg's stderr tail produced.
+    let error = terminal["error"]
+        .as_str()
+        .expect("failure carries an error");
+    eprintln!("real FFmpeg, through the host: {error}");
+    assert!(
+        error.contains(&format!("http://{}/v.mp4?…", origin.authority())),
+        "the host reported a failure with no usable URL in it: {error}"
     );
 }

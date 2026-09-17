@@ -82,8 +82,43 @@ The Rust package and the Firefox extension share one product version; see
   probe reporting which spellings of `-cookies` FFmpeg honours. The tests that
   need a real FFmpeg skip when none is present, as in CI.
 
+- A shared URL redaction rule, implemented once in `src/redact.rs` for the
+  native host and once in `extension/redact.js` for the extension, pinned by the
+  case table in `tests/fixtures/redaction.json` that both test suites read.
+- A signed HLS playlist at `/media/signed.m3u8` in the `make fixture-site`
+  origin, whose segment URLs carry a token in their query string, so redaction
+  can be checked end to end through a real browser and a real FFmpeg. Its
+  request log prints paths with the query replaced, never the token.
+
+### Changed
+
+- Per-download FFmpeg logs are stored under their own `downloadLogs:<jobId>`
+  key instead of inside each job record, and storage writes are coalesced in a
+  300 ms window, immediately on a terminal state. Saving job state no longer
+  rewrites every log line of every job. Records written before this change are
+  migrated on the next start: their logs are redacted, moved to the new key, and
+  removed from the job record.
+- FFmpeg log lines reach the Settings page as their own `download-log` message
+  carrying a batch, rather than as a full job-state broadcast per line, so the
+  popup is no longer re-rendered once per line of FFmpeg output.
+- Persisted logs are bounded by total bytes as well as by the 500-line limit,
+  so one very long line cannot fill `storage.local`.
+
 ### Fixed
 
+- A signed token in a URL that FFmpeg echoes through its own stderr is no longer
+  persisted. FFmpeg's HLS demuxer logs one `Opening '<url>' for reading` line per
+  segment, and those URLs routinely carry one; the line was forwarded as a log
+  event and kept in `storage.local` until "Clear logs" was pressed. URLs in log
+  lines and error messages now keep their scheme, host, port and path, with the
+  query replaced by `?…`, a fragment by `#…`, and any `user:password@` by `…@` —
+  applied by the host before the event is sent and again by the extension before
+  anything is stored or displayed. Tokens persisted by an earlier build are
+  scrubbed when the extension next starts. Verified against FFmpeg 6.1.1 driven
+  at a loopback server, including end to end through the native host: the
+  per-segment `Opening '<url>' for reading` line is emitted at `-loglevel info`,
+  which is the level the download path uses, and two further lines carry the same
+  URL.
 - A forwarded cookie is no longer sent to every host FFmpeg contacts for an
   input. It was rendered as a `Cookie:` line in the `-headers` block, which
   FFmpeg applies to every request, so a redirect target and — for HLS — a
@@ -156,6 +191,12 @@ The Rust package and the Firefox extension share one product version; see
   Cloudflare or other session protections can prevent metadata access even
   when a browser player can load the media.
 - Completed HLS segment counts are estimated from FFmpeg output duration.
+- URL redaction covers query strings and fragments. A site that signs URLs
+  inside a path segment (`/hls/<token>/seg.ts`) is not covered, because nothing
+  distinguishes such a segment from an ordinary one without knowing the site.
+- A job's own media URL is stored whole, including its query: the popup matches
+  persisted jobs to page media by exact URL and a re-download needs it. The
+  Settings page redacts it at display.
 - Batch downloads, authentication automation, provider-specific scraping,
   robust resume, and live playlist scheduling are not implemented.
 - AES-128/SAMPLE-AES, byte ranges, discontinuities, and alternate HLS tracks

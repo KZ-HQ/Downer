@@ -193,41 +193,193 @@ async function loadPopup({ candidates = [], sourceUrl = "https://example.test/fi
 }
 
 /**
+ * Load `options.html` with the real `redact.js`, `job-logs.js` and `options.js`,
+ * wired to a stubbed background. Returns readers for what the Settings page
+ * shows and a `receive` driver for the messages the background script sends it.
+ */
+async function loadOptions({ jobs = [], logs = {}, settings = {} } = {}) {
+  const dom = new JSDOM(extensionSource("options.html"), {
+    url: "moz-extension://downer-test/options.html",
+    runScripts: "outside-only",
+    resources: undefined,
+    virtualConsole: strictConsole()
+  });
+
+  const sent = [];
+  const listeners = [];
+  dom.window.browser = {
+    storage: {
+      local: {
+        get: async (defaults) => ({ ...defaults, ...settings }),
+        set: async () => undefined
+      }
+    },
+    runtime: {
+      lastError: null,
+      onMessage: { addListener: (listener) => listeners.push(listener) },
+      sendMessage: async (message) => {
+        sent.push(plain(message));
+        if (message?.type === "get-download-statuses") return { jobs, sessionJobIds: [] };
+        if (message?.type === "get-download-logs") return { logs };
+        if (message?.type === "clear-download-logs") return { ok: true };
+        return undefined;
+      }
+    }
+  };
+
+  // Loaded in options.html order.
+  for (const file of ["redact.js", "job-logs.js", "options.js"]) {
+    dom.window.eval(extensionSource(file));
+  }
+  await settle();
+
+  const document = dom.window.document;
+  const filter = document.getElementById("job-filter");
+  return {
+    dom,
+    sent,
+    settle,
+    /** The text of the log pane, exactly as the user reads it. */
+    logText: () => document.getElementById("logs").textContent,
+    /** The per-download filter's options, as `value: label` pairs. */
+    filterOptions: () => [...filter.options].map((option) => `${option.value}: ${option.textContent}`),
+    /** Choose a download in the filter, as the user would. */
+    selectJob(jobId) {
+      filter.value = jobId;
+      filter.dispatchEvent(new dom.window.Event("change"));
+    },
+    /** Press "Clear logs". */
+    clearLogs() {
+      document.getElementById("clear-logs").dispatchEvent(new dom.window.Event("click"));
+      return settle();
+    },
+    /** Deliver a message as the background script would broadcast it. */
+    async receive(message) {
+      for (const listener of listeners) await listener(message);
+      await settle();
+    }
+  };
+}
+
+/**
+ * A stand-in for a native messaging port, so a test can drive the real
+ * `NativeTaskChannel` without a host process. It answers the `hello` handshake
+ * exactly as `docs/protocol.md` specifies and then hands the test `emit`, which
+ * delivers any event the host could send.
+ */
+function nativePortStub({ protocolVersion = 1 } = {}) {
+  const messageListeners = [];
+  const disconnectListeners = [];
+  const posted = [];
+  const emit = (event) => {
+    for (const listener of [...messageListeners]) listener(event);
+  };
+  const port = {
+    onMessage: { addListener: (listener) => messageListeners.push(listener) },
+    onDisconnect: { addListener: (listener) => disconnectListeners.push(listener) },
+    postMessage: (message) => {
+      posted.push(message);
+      if (message?.command === "hello") {
+        queueMicrotask(() =>
+          emit({
+            protocol_version: protocolVersion,
+            type: "hello",
+            ok: true,
+            state: "ready",
+            request_id: message.request_id,
+            host_version: "test",
+            capabilities: { pause_resume: true, hls_info: true }
+          })
+        );
+      }
+    },
+    disconnect: () => {
+      for (const listener of [...disconnectListeners]) listener();
+    }
+  };
+  return { port, posted, emit };
+}
+
+/**
  * Load the real background script with a stubbed `browser`, simulating a browser
  * start: `storage.local` already holds `downloadJobs` from a previous session.
  *
  * Returns the storage the script sees, so a test can assert what was persisted
  * back, plus a driver for the `runtime.onMessage` handler the popup talks to.
+ * `storage` is the whole of `storage.local`, not just `downloadJobs`, because
+ * logs live under their own `downloadLogs:<jobId>` keys (KEI-55); `writes()`
+ * counts `set` calls, which is what the batching test asserts a bound on.
  */
-async function loadBackground({ downloadJobs = [] } = {}) {
+async function loadBackground({ downloadJobs = [], storage: initialStorage = {}, native = false } = {}) {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
     url: "moz-extension://downer-test/background.html",
     runScripts: "outside-only",
     virtualConsole: strictConsole()
   });
 
-  const storage = { downloadJobs: JSON.parse(JSON.stringify(downloadJobs)) };
+  const storage = JSON.parse(JSON.stringify({ downloadJobs, ...initialStorage }));
   const listeners = [];
   const warnings = [];
+  const broadcasts = [];
+  const ports = [];
+  let writes = 0;
   dom.window.console.warn = (...args) => warnings.push(args.join(" "));
   dom.window.browser = {
     storage: {
       local: {
-        get: async (defaults) => ({ ...defaults, ...storage }),
-        set: async (values) => Object.assign(storage, JSON.parse(JSON.stringify(values)))
+        // Firefox's `get` takes a defaults object, a key, an array of keys, or
+        // null for everything. The background script asks for everything on
+        // start, so it can find log keys left by jobs that have since fallen
+        // off the end of the history.
+        get: async (query) => {
+          if (query === null || query === undefined) return JSON.parse(JSON.stringify(storage));
+          if (typeof query === "string") return { [query]: storage[query] };
+          if (Array.isArray(query)) {
+            return Object.fromEntries(
+              query.filter((key) => key in storage).map((key) => [key, storage[key]])
+            );
+          }
+          return { ...query, ...storage };
+        },
+        set: async (values) => {
+          writes += 1;
+          Object.assign(storage, JSON.parse(JSON.stringify(values)));
+        },
+        remove: async (keys) => {
+          for (const key of [].concat(keys)) delete storage[key];
+        }
       }
     },
     runtime: {
       lastError: null,
       onMessage: { addListener: (listener) => listeners.push(listener) },
-      sendMessage: async () => undefined
+      sendMessage: async (message) => {
+        broadcasts.push(plain(message));
+        return undefined;
+      },
+      ...(native
+        ? {
+            connectNative: () => {
+              const stub = nativePortStub();
+              ports.push(stub);
+              return stub.port;
+            }
+          }
+        : {})
     },
     cookies: { getAll: async () => [] },
     notifications: { create: async () => undefined }
   };
 
   // Loaded in manifest order.
-  for (const file of ["job-state.js", "task-protocol.js", "hls.js", "background.js"]) {
+  for (const file of [
+    "job-state.js",
+    "redact.js",
+    "job-logs.js",
+    "task-protocol.js",
+    "hls.js",
+    "background.js"
+  ]) {
     dom.window.eval(extensionSource(file));
   }
   await settle();
@@ -235,8 +387,21 @@ async function loadBackground({ downloadJobs = [] } = {}) {
   return {
     dom,
     warnings,
+    broadcasts,
+    settle,
     /** What the background script has persisted back to storage.local. */
     stored: () => plain(storage.downloadJobs),
+    /** The whole of storage.local, including the `downloadLogs:` keys. */
+    storage: () => plain(storage),
+    /** How many `storage.local.set` calls the script has made. */
+    writes: () => writes,
+    /** The most recent native port the script opened. */
+    nativePort: () => ports[ports.length - 1],
+    /** Wait out the background script's write-coalescing window. */
+    async flush(ms = 500) {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await settle();
+    },
     /** Send a message as the popup would, and get the reply. */
     async send(message) {
       for (const listener of listeners) {
@@ -250,6 +415,8 @@ async function loadBackground({ downloadJobs = [] } = {}) {
 
 module.exports = {
   loadContentScript,
+  loadOptions,
+  nativePortStub,
   loadPopup,
   loadBackground,
   pageFixture,

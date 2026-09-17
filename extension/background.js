@@ -1,7 +1,21 @@
 const NATIVE_HOST = "com.downer.native";
 const MAX_SAVED_JOBS = 20;
-const MAX_LOG_LINES = 500;
+
+/**
+ * How long storage writes and log broadcasts are coalesced for.
+ *
+ * FFmpeg's HLS demuxer logs one line per segment at `-loglevel info`, so a
+ * 2,000-segment stream used to cause thousands of full-state `storage.local`
+ * writes and as many popup re-renders, one per line (KEI-55). Everything within
+ * a window is now written and broadcast once. Terminal states bypass the window
+ * entirely, so a finished job is durable immediately and the popup never waits
+ * to hear that a download has ended.
+ */
+const SAVE_DEBOUNCE_MS = 300;
+
 const jobs = new Map();
+/** Log entries per job, persisted under their own key rather than in the job. */
+const logsByJob = new Map();
 const nativeTasks = new Map();
 /**
  * Jobs begun since this background script loaded. Persisted jobs restored from
@@ -11,7 +25,20 @@ const nativeTasks = new Map();
 const sessionJobs = new Set();
 let storageWrite = Promise.resolve();
 
+/** Coalescing state: what the next flush has to write and broadcast. */
+let flushTimer = null;
+let jobsDirty = false;
+const dirtyLogJobs = new Set();
+let pendingLogBroadcasts = new Map();
+
 const { canTransition, isTerminal, reconcileRestoredJobs } = DownerJobState;
+
+const { redactText, redactFields } = DownerRedact;
+
+const { trimLogEntries, logStorageKey, jobIdFromLogKey } = DownerJobLogs;
+
+/** The job fields that can carry a URL, and so must be redacted before storage. */
+const REDACTED_JOB_FIELDS = ["error", "controlError", "metadataError"];
 
 const {
   matchingVariant,
@@ -28,11 +55,52 @@ const {
  * answer "Download task is no longer active." Reconciliation is persisted, so a
  * record is only ever reconciled once.
  */
-const jobsReady = browser.storage.local.get({ downloadJobs: [] }).then((stored) => {
-  const restored = reconcileRestoredJobs(stored.downloadJobs);
-  for (const job of restored) jobs.set(job.id, job);
-  const changed = restored.some((job, index) => job !== (stored.downloadJobs || [])[index]);
-  if (changed) void saveJobs();
+const jobsReady = browser.storage.local.get(null).then((stored) => {
+  const previous = stored?.downloadJobs || [];
+  const restored = reconcileRestoredJobs(stored?.downloadJobs);
+  let changed = restored.some((job, index) => job !== previous[index]);
+
+  const migrated = new Map();
+  for (const job of restored) {
+    // KEI-55 moved logs out of the job record. A record written before that
+    // still carries them inline, so they are lifted into this session's log
+    // store and redacted on the way — which also scrubs lines persisted before
+    // redaction existed, rather than leaving them until "Clear logs" is
+    // pressed. Both halves of the move are written back below, so it is a
+    // one-time migration and not a re-read on every start.
+    const { logs, ...record } = job;
+    const redacted = redactFields(record, REDACTED_JOB_FIELDS);
+    jobs.set(record.id, redacted);
+    if (redacted !== record) changed = true;
+    if (Array.isArray(logs)) {
+      changed = true;
+      if (logs.length) {
+        migrated.set(record.id, trimLogEntries(logs.map(redactLogEntry)));
+      }
+    }
+  }
+
+  // Logs already under their own key, plus any key left behind by a job that
+  // has since fallen off the end of the 20-job history.
+  const orphanKeys = [];
+  for (const [key, value] of Object.entries(stored || {})) {
+    const jobId = jobIdFromLogKey(key);
+    if (jobId === null) continue;
+    if (!jobs.has(jobId)) {
+      orphanKeys.push(key);
+    } else if (!migrated.has(jobId) && Array.isArray(value)) {
+      logsByJob.set(jobId, trimLogEntries(value));
+    }
+  }
+
+  for (const [jobId, entries] of migrated) {
+    logsByJob.set(jobId, entries);
+    dirtyLogJobs.add(jobId);
+  }
+  if (changed) jobsDirty = true;
+  const removal = orphanKeys.length ? removeStorageKeys(orphanKeys) : null;
+  const write = changed || dirtyLogJobs.size ? flush() : null;
+  return Promise.all([removal, write]).then(() => undefined);
 });
 
 async function cookieHeader(url) {
@@ -137,6 +205,12 @@ async function nativeDownload(request, jobId) {
 function handleNativeEvent(jobId, response) {
   if (typeof response?.log === "string" && response.log.trim()) {
     appendJobLog(jobId, response.log);
+    // A `log` event carries `state: "downloading"` (docs/protocol.md) and
+    // nothing else, so falling through would broadcast a job-state change per
+    // line — which is what re-rendered the popup thousands of times on a long
+    // HLS download. The job is already `downloading` by the time logs start:
+    // the host sends a `progress` event with that state before it runs FFmpeg.
+    return;
   }
   const progress = {};
   if (response?.completed_segments !== undefined) {
@@ -168,11 +242,28 @@ function handleNativeEvent(jobId, response) {
   }
 }
 
+/** Redact one entry's text, whatever shape the entry arrived in. */
+function redactLogEntry(entry) {
+  return { at: entry?.at || Date.now(), text: redactText(entry?.text ?? "") };
+}
+
+/**
+ * Record one line of FFmpeg stderr against a job.
+ *
+ * This no longer goes through `updateJob`: a log line is not a job-state change,
+ * and routing it through one meant every line broadcast a full job record to the
+ * popup and scheduled a write of all jobs. The line is redacted here as well as
+ * on the host (see `extension/redact.js`), then queued for the next flush.
+ */
 function appendJobLog(jobId, line) {
-  const job = jobs.get(jobId);
-  if (!job) return;
-  const logs = [...(job.logs || []), { at: Date.now(), text: line }].slice(-MAX_LOG_LINES);
-  updateJob(jobId, { logs });
+  if (!jobs.has(jobId)) return;
+  const entry = redactLogEntry({ at: Date.now(), text: line });
+  logsByJob.set(jobId, trimLogEntries([...(logsByJob.get(jobId) || []), entry]));
+  dirtyLogJobs.add(jobId);
+  const pending = pendingLogBroadcasts.get(jobId) || [];
+  pending.push(entry);
+  pendingLogBroadcasts.set(jobId, pending);
+  scheduleFlush();
 }
 
 async function controlDownload(jobId, command) {
@@ -186,17 +277,92 @@ async function controlDownload(jobId, command) {
   return channel.request(command);
 }
 
-function saveJobs() {
-  storageWrite = storageWrite
-    .catch(() => undefined)
-    .then(() => browser.storage.local.set({
-      downloadJobs: Array.from(jobs.values()).slice(-MAX_SAVED_JOBS)
-    }));
+/** The job records that are persisted, newest `MAX_SAVED_JOBS` only. */
+function savedJobs() {
+  return Array.from(jobs.values()).slice(-MAX_SAVED_JOBS);
+}
+
+/** Serialise storage work, so a later write cannot overtake an earlier one. */
+function writeStorage(work) {
+  storageWrite = storageWrite.catch(() => undefined).then(work);
   return storageWrite;
+}
+
+function removeStorageKeys(keys) {
+  return writeStorage(() => browser.storage.local.remove(keys)).catch(() => undefined);
+}
+
+/**
+ * Ask for a flush. Within a window every caller joins the same one, so a burst
+ * of log lines and progress updates costs a single `storage.local.set`.
+ * `immediate` is for terminal states, where durability must not wait.
+ */
+function scheduleFlush({ immediate = false } = {}) {
+  if (immediate) {
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
+    }
+    return flush();
+  }
+  if (flushTimer) return storageWrite;
+  flushTimer = setTimeout(() => {
+    flushTimer = null;
+    void flush();
+  }, SAVE_DEBOUNCE_MS);
+  return storageWrite;
+}
+
+/**
+ * Write everything that changed since the last flush, in one `set`, and send the
+ * coalesced log broadcasts.
+ *
+ * Jobs and logs are separate keys, so a progress update writes `downloadJobs`
+ * alone and a run of log lines writes only the key of the job they belong to.
+ */
+function flush() {
+  const values = {};
+  let dropped = [];
+  if (jobsDirty) {
+    jobsDirty = false;
+    const saved = savedJobs();
+    values.downloadJobs = saved;
+    // A job that has fallen off the end of the history takes its log key with
+    // it; otherwise the split keys would grow without bound.
+    const savedIds = new Set(saved.map((job) => job.id));
+    dropped = [...logsByJob.keys()].filter((jobId) => !savedIds.has(jobId));
+    for (const jobId of dropped) {
+      logsByJob.delete(jobId);
+      dirtyLogJobs.delete(jobId);
+      pendingLogBroadcasts.delete(jobId);
+    }
+  }
+  for (const jobId of dirtyLogJobs) values[logStorageKey(jobId)] = logsByJob.get(jobId) || [];
+  dirtyLogJobs.clear();
+
+  const batches = pendingLogBroadcasts;
+  pendingLogBroadcasts = new Map();
+  for (const [jobId, entries] of batches) broadcastLogs(jobId, entries);
+
+  if (dropped.length) void removeStorageKeys(dropped.map(logStorageKey));
+  if (!Object.keys(values).length) return storageWrite;
+  return writeStorage(() => browser.storage.local.set(values));
 }
 
 function broadcast(job) {
   browser.runtime.sendMessage({ type: "download-status", job }).catch(() => undefined);
+}
+
+/**
+ * Log lines go out as their own message, carrying a batch rather than a job.
+ * The Settings page re-renders once per batch instead of once per line, and the
+ * popup — which listens only for `download-status` — is not woken at all.
+ */
+function broadcastLogs(jobId, entries) {
+  if (!entries.length) return;
+  browser.runtime
+    .sendMessage({ type: "download-log", jobId, entries })
+    .catch(() => undefined);
 }
 
 /**
@@ -215,10 +381,13 @@ function updateJob(jobId, changes) {
     if (!Object.keys(rest).length) return current;
     changes = rest;
   }
-  const job = { ...current, ...changes, id: jobId };
+  const job = redactFields({ ...current, ...changes, id: jobId }, REDACTED_JOB_FIELDS);
   jobs.set(jobId, job);
+  // State changes are rare and the popup must see them at once, so they are
+  // broadcast immediately. Only the storage write is coalesced.
   broadcast(job);
-  void saveJobs();
+  jobsDirty = true;
+  void scheduleFlush({ immediate: isTerminal(job.state) });
   return job;
 }
 
@@ -320,13 +489,14 @@ function beginDownload(message) {
     state: "starting",
     path: null,
     error: null,
-    logs: [],
     startedAt: Date.now()
   };
   jobs.set(jobId, job);
+  logsByJob.set(jobId, []);
   sessionJobs.add(jobId);
   broadcast(job);
-  void saveJobs();
+  jobsDirty = true;
+  void scheduleFlush();
   void runDownload(message, jobId);
   return { ok: true, jobId, state: job.state, path: null, error: null };
 }
@@ -344,9 +514,24 @@ browser.runtime.onMessage.addListener((message) => {
   if (message?.type === "control-download") {
     return controlDownload(message.jobId, message.command);
   }
+  if (message?.type === "get-download-logs") {
+    return jobsReady.then(() => ({
+      logs: Object.fromEntries(
+        savedJobs().map((job) => [job.id, logsByJob.get(job.id) || []])
+      )
+    }));
+  }
   if (message?.type === "clear-download-logs") {
-    for (const job of jobs.values()) updateJob(job.id, { logs: [] });
-    return Promise.resolve({ ok: true });
+    return jobsReady.then(async () => {
+      const keys = [...logsByJob.keys()].map(logStorageKey);
+      logsByJob.clear();
+      dirtyLogJobs.clear();
+      pendingLogBroadcasts = new Map();
+      for (const job of jobs.values()) logsByJob.set(job.id, []);
+      if (keys.length) await removeStorageKeys(keys);
+      browser.runtime.sendMessage({ type: "download-logs-cleared" }).catch(() => undefined);
+      return { ok: true };
+    });
   }
   return undefined;
 });
