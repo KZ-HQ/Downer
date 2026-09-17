@@ -114,8 +114,11 @@ The Rust package and the Firefox extension share one product version; see
   query replaced by `?…`, a fragment by `#…`, and any `user:password@` by `…@` —
   applied by the host before the event is sent and again by the extension before
   anything is stored or displayed. Tokens persisted by an earlier build are
-  scrubbed when the extension next starts. Not yet verified against a real
-  FFmpeg: both test suites use fake FFmpeg executables.
+  scrubbed when the extension next starts. Verified against FFmpeg 6.1.1 driven
+  at a loopback server, including end to end through the native host: the
+  per-segment `Opening '<url>' for reading` line is emitted at `-loglevel info`,
+  which is the level the download path uses, and two further lines carry the same
+  URL.
 - A forwarded cookie is no longer sent to every host FFmpeg contacts for an
   input. It was rendered as a `Cookie:` line in the `-headers` block, which
   FFmpeg applies to every request, so a redirect target and — for HLS — a

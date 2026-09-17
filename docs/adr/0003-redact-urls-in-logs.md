@@ -150,12 +150,51 @@ redaction existed is exactly the leak this ADR is about, and leaving it until
   runtime messages between extension pages, not the native messaging protocol.
 * A token in a *path* segment still persists. If a real site is found that signs
   that way, it needs its own issue and probably its own rule.
-* **Nothing here has been run against a real FFmpeg.** FFmpeg is deliberately not
-  installed in CI and is unavailable in the environment this was implemented in
-  (AGENTS.md); both suites use fake FFmpeg scripts, and
-  `tests/native_host.rs::no_host_event_carries_a_url_query` feeds the host a
-  stderr line that *resembles* FFmpeg's, rather than one FFmpeg produced. The
-  end-to-end check is manual: `tests/fixtures/protected_site.py` now serves
-  `/media/signed.m3u8`, whose segment URLs carry a token, so a download through a
-  real browser and a real FFmpeg can be inspected in Settings. Until someone runs
-  that, the exact shape of FFmpeg's real log lines is an assumption.
+## Verified: FFmpeg 6.1.1, Ubuntu/x86_64, 2026-09-17
+
+The rule was checked against FFmpeg's own output, not only against the
+hand-written table. `tests/log_redaction.rs` drives a real FFmpeg at a loopback
+server whose segment URL carries a token, at `-loglevel info` — the level
+`src/ffmpeg.rs` uses for a download with progress — and redacts what comes back:
+
+```text
+[hls @ 0x…] Opening 'http://127.0.0.1:PORT/seg0.ts?…' for reading
+Error opening input file http://127.0.0.1:PORT/v.mp4?….
+```
+
+`tests/native_host.rs::no_host_event_carries_a_url_query_from_a_real_ffmpeg`
+then runs the whole path — the real host binary, a real FFmpeg, a real socket —
+and finds no token in any event the host emits.
+
+Two things the hand-written table had not anticipated, both now covered:
+
+* **`Opening '<url>' for reading` is emitted at `info`, not only at `verbose`.**
+  So the leak is reachable on the real download path. Had it been `verbose`-only,
+  this issue would have been largely theoretical.
+* **It is not the only token-bearing line.** `Error when loading first segment
+  '<url>'` carries the same URL, and the direct-file path leaks through
+  `Error opening input file <url>.` — with a trailing full stop that must not be
+  absorbed into the placeholder. All three also reach the terminal `error`,
+  because `DownerError::FfmpegFailed` embeds the stderr tail; that is why the
+  terminal error is redacted too and not just the `log` field.
+
+## Consequences (verification)
+
+* The HLS path was verified by invoking FFmpeg directly, **not** through
+  `src/ffmpeg.rs`. `README.md` sets the minimum supported FFmpeg at 7.1 and the
+  download path passes `-allowed_segment_extensions` and `-extension_picky`,
+  which exist only from 7.1; the FFmpeg available here is 6.1.1, which rejects
+  the argument list outright. The end-to-end host test therefore uses the
+  direct-file path, which carries no version-specific options. What is under
+  test — the shape of FFmpeg's log lines — those options do not affect, but an
+  end-to-end HLS download through the host on a 7.1+ FFmpeg has still not been
+  observed here.
+* **No browser has been in the loop.** The extension's half is covered by the
+  jsdom harness, which is not Firefox: no real `storage.local`, no real native
+  port. `tests/fixtures/protected_site.py` serves `/media/signed.m3u8` for that
+  manual pass.
+* Line shapes are FFmpeg 6.1.1's. They are long-standing and the redaction rule
+  keys off URL grammar rather than off any message text, so a newer FFmpeg
+  phrasing the sentence differently would still be redacted — but a newer FFmpeg
+  logging a URL in a form this rule does not match would not be caught by these
+  tests.

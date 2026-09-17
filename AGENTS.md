@@ -175,7 +175,11 @@ run locally — `make check`, then `cargo build --release --locked` and
 `dist/downer-firefox.zip` as run artifacts. A separate `msrv` job builds
 against the `rust-version` declared in `Cargo.toml`, so the declared minimum
 stays honest. FFmpeg is deliberately not installed in CI; tests generate fake
-FFmpeg executables instead.
+FFmpeg executables instead. The tests that need a real one —
+`tests/cookie_scope.rs`, `tests/log_redaction.rs`, and the real-FFmpeg tests at
+the end of `tests/native_host.rs` — skip loudly when none is present, printing a
+line beginning `SKIP:`. A green CI run is therefore not evidence for those; run
+them locally with `-- --nocapture` and record the result.
 
 **CI must be green before an issue moves to In Review.** If a change needs a
 new check, add it to `make check` rather than to the workflow, so local runs
