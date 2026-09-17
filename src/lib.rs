@@ -153,17 +153,17 @@ fn download_resolved_with_executor(
         println!("Destination: {}", destination.display());
     }
 
-    let headers = scraper::ffmpeg_headers(
-        media.referer.as_ref(),
-        &options.user_agent,
-        options.cookie.as_deref(),
-    );
+    let headers = scraper::ffmpeg_headers(media.referer.as_ref(), &options.user_agent);
+    // Scoped to this URL's host, so a redirect target or a cross-host HLS
+    // segment server never receives the media host's session.
+    let cookies = scraper::ffmpeg_cookies(url, options.cookie.as_deref());
     let command = FfmpegCommand::new_with_headers_and_threads(
         options.ffmpeg.clone(),
         url.as_str(),
         destination,
         options.overwrite,
         headers.as_deref(),
+        cookies.as_deref(),
         options.threads,
     );
     let destination = execute(&command)?;

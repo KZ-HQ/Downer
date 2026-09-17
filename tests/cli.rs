@@ -159,14 +159,33 @@ fn recorded_args(directory: &Path) -> Vec<String> {
         .collect()
 }
 
+/// The value of `option` the fake FFmpeg was given, if any.
+#[cfg(unix)]
+fn recorded_option(directory: &Path, option: &str) -> Option<String> {
+    let args = recorded_args(directory);
+    args.iter()
+        .position(|argument| argument == option)
+        .map(|index| args[index + 1].clone())
+}
+
 /// The `-headers` block the fake FFmpeg was given, if any.
 #[cfg(unix)]
 fn recorded_headers(directory: &Path) -> Option<String> {
-    let args = recorded_args(directory);
-    args.iter()
-        .position(|argument| argument == "-headers")
-        .map(|index| args[index + 1].clone())
+    recorded_option(directory, "-headers")
 }
+
+/// The `-cookies` value the fake FFmpeg was given, if any. Cookies live here
+/// rather than in `-headers` so FFmpeg scopes them to the media host; see
+/// `docs/adr/0002-cookie-scoping-and-argv-exposure.md`.
+#[cfg(unix)]
+fn recorded_cookies(directory: &Path) -> Option<String> {
+    recorded_option(directory, "-cookies")
+}
+
+/// What `--dir` downloads render as a `domain=`: the URL's authority. The test
+/// URL states no port, so no `:443` appears.
+#[cfg(unix)]
+const SCOPED: &str = "; path=/; domain=example.test";
 
 // ---------------------------------------------------------------------------
 // Cookie sources (KEI-54)
@@ -223,15 +242,17 @@ fn cookie_file_is_read_and_forwarded_to_ffmpeg() {
         .assert()
         .success();
 
-    let headers = recorded_headers(temp.path()).expect("headers were rendered");
+    let cookies = recorded_cookies(temp.path()).expect("cookies were rendered");
     assert_eq!(
-        headers.matches("Cookie: ").count(),
-        1,
-        "one Cookie line: {headers:?}"
+        cookies,
+        format!("{SENTINEL}{SCOPED}"),
+        "the trailing newline is trimmed, not forwarded"
     );
     assert!(
-        headers.contains(&format!("Cookie: {SENTINEL}\r\n")),
-        "the trailing newline is trimmed, not forwarded: {headers:?}"
+        !recorded_headers(temp.path())
+            .unwrap_or_default()
+            .contains("Cookie"),
+        "the cookie is scoped through -cookies, never the -headers block"
     );
 }
 
@@ -246,8 +267,10 @@ fn cookie_environment_variable_is_used_when_no_argument_is_given() {
         .assert()
         .success();
 
-    let headers = recorded_headers(temp.path()).expect("headers were rendered");
-    assert!(headers.contains(&format!("Cookie: {SENTINEL}\r\n")));
+    assert_eq!(
+        recorded_cookies(temp.path()).expect("cookies were rendered"),
+        format!("{SENTINEL}{SCOPED}")
+    );
 }
 
 #[cfg(unix)]
@@ -262,9 +285,9 @@ fn cookie_argument_takes_precedence_over_the_environment_variable() {
         .assert()
         .success();
 
-    let headers = recorded_headers(temp.path()).expect("headers were rendered");
-    assert!(headers.contains(&format!("Cookie: {SENTINEL}\r\n")));
-    assert!(!headers.contains("from-the-environment"));
+    let cookies = recorded_cookies(temp.path()).expect("cookies were rendered");
+    assert_eq!(cookies, format!("{SENTINEL}{SCOPED}"));
+    assert!(!cookies.contains("from-the-environment"));
 }
 
 #[cfg(unix)]
@@ -282,9 +305,9 @@ fn cookie_file_takes_precedence_over_the_environment_variable() {
         .assert()
         .success();
 
-    let headers = recorded_headers(temp.path()).expect("headers were rendered");
-    assert!(headers.contains(&format!("Cookie: {SENTINEL}\r\n")));
-    assert!(!headers.contains("from-the-environment"));
+    let cookies = recorded_cookies(temp.path()).expect("cookies were rendered");
+    assert_eq!(cookies, format!("{SENTINEL}{SCOPED}"));
+    assert!(!cookies.contains("from-the-environment"));
 }
 
 #[cfg(unix)]
@@ -301,11 +324,13 @@ fn a_blank_cookie_source_sends_no_cookie_header() {
         .assert()
         .success();
 
-    let headers = recorded_headers(temp.path()).expect("headers were rendered");
     assert!(
-        !headers.contains("Cookie:"),
-        "a whitespace-only file is no cookie, not an empty one: {headers:?}"
+        recorded_cookies(temp.path()).is_none(),
+        "a whitespace-only file is no cookie, so no -cookies argument at all"
     );
+    assert!(!recorded_headers(temp.path())
+        .unwrap_or_default()
+        .contains("Cookie"));
 }
 
 #[test]
@@ -324,17 +349,21 @@ fn an_unreadable_cookie_file_is_an_input_error() {
         .stderr(predicate::str::contains("nothing-here.txt"));
 }
 
-/// A cookie carrying CRLF would otherwise append headers of its own choosing to
-/// the `-headers` block, which is assembled by concatenation.
+/// A cookie must not be able to widen its own scope.
+///
+/// `-cookies` entries are newline-delimited and each carries `; domain=...`, so
+/// a value smuggling a newline or a `;` could otherwise open an entry aimed at a
+/// host of its choosing — the exact leak this scoping exists to close. The
+/// `-headers` block is still checked too, since it is built by concatenation.
 #[cfg(unix)]
 #[test]
-fn a_cookie_cannot_inject_extra_headers() {
+fn a_cookie_cannot_widen_its_own_scope() {
     let temp = tempfile::tempdir().unwrap();
     let fake = fake_ffmpeg(temp.path(), false);
     let cookie_file = temp.path().join("cookies.txt");
     fs::write(
         &cookie_file,
-        format!("{SENTINEL}\r\nX-Injected: yes\r\nCookie: downer_sentinel=second"),
+        format!("{SENTINEL}\r\nevil=1; domain=attacker.test\r\nX-Injected: yes"),
     )
     .unwrap();
 
@@ -344,25 +373,30 @@ fn a_cookie_cannot_inject_extra_headers() {
         .assert()
         .success();
 
-    // The CRLFs are what matter: the injected text survives as part of the
-    // cookie's *value*, which is inert, but it must not become a header of its
-    // own. FFmpeg splits the block on CRLF, so counting lines is the real test.
+    let cookies = recorded_cookies(temp.path()).expect("cookies were rendered");
+    assert!(
+        !cookies.contains("attacker.test"),
+        "a cookie chose its own domain: {cookies:?}"
+    );
+    assert_eq!(
+        cookies.lines().count(),
+        1,
+        "one entry, so no smuggled second scope: {cookies:?}"
+    );
+    assert_eq!(
+        cookies.matches("domain=").count(),
+        1,
+        "one domain= per entry, so the scope cannot be overridden: {cookies:?}"
+    );
+    assert!(cookies.ends_with(SCOPED), "{cookies:?}");
+
     let headers = recorded_headers(temp.path()).expect("headers were rendered");
     let lines: Vec<&str> = headers
         .split("\r\n")
         .filter(|line| !line.is_empty())
         .collect();
-    assert_eq!(
-        lines.len(),
-        2,
-        "only User-Agent and Cookie reach FFmpeg: {lines:?}"
-    );
+    assert_eq!(lines.len(), 1, "only User-Agent reaches FFmpeg: {lines:?}");
     assert!(lines[0].starts_with("User-Agent: "), "{lines:?}");
-    assert!(lines[1].starts_with("Cookie: "), "{lines:?}");
-    assert!(
-        !lines.iter().any(|line| line.starts_with("X-Injected:")),
-        "injected header line survived: {lines:?}"
-    );
 }
 
 /// Acceptance criterion: no cookie value in any log or error message. The

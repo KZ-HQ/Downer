@@ -170,15 +170,20 @@ impl FfmpegCommand {
         overwrite: bool,
         headers: Option<&str>,
     ) -> Self {
-        Self::new_with_headers_and_threads(program, url, output, overwrite, headers, None)
+        Self::new_with_headers_and_threads(program, url, output, overwrite, headers, None, None)
     }
 
+    /// `cookies` is the newline-delimited Set-Cookie syntax FFmpeg takes as
+    /// `-cookies`, built by `scraper::ffmpeg_cookies`. It is passed separately
+    /// from `headers` because FFmpeg scopes `-cookies` per request host while
+    /// applying `-headers` to every request for the input.
     pub fn new_with_headers_and_threads(
         program: PathBuf,
         url: &str,
         output: PathBuf,
         overwrite: bool,
         headers: Option<&str>,
+        cookies: Option<&str>,
         threads: Option<u16>,
     ) -> Self {
         let mut args = vec![
@@ -196,6 +201,10 @@ impl FfmpegCommand {
         if let Some(headers) = headers {
             args.push(OsString::from("-headers"));
             args.push(OsString::from(headers));
+        }
+        if let Some(cookies) = cookies {
+            args.push(OsString::from("-cookies"));
+            args.push(OsString::from(cookies));
         }
         args.extend([
             OsString::from("-i"),
@@ -497,6 +506,7 @@ mod tests {
             PathBuf::from("video.mp4"),
             false,
             None,
+            None,
             Some(4),
         );
         let threaded_args: Vec<String> = threaded
@@ -528,6 +538,37 @@ mod tests {
             .args
             .iter()
             .any(|arg| arg == "Referer: https://example.test/page\r\n"));
+        assert!(
+            !with_headers.args.iter().any(|arg| arg == "-cookies"),
+            "no -cookies argument when there are no cookies"
+        );
+
+        let with_cookies = FfmpegCommand::new_with_headers_and_threads(
+            PathBuf::from("ffmpeg"),
+            "https://example.test/video.mp4",
+            PathBuf::from("video.mp4"),
+            false,
+            None,
+            Some("sid=downer-sentinel; path=/; domain=example.test"),
+            None,
+        );
+        let cookie_args: Vec<String> = with_cookies
+            .args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let index = cookie_args
+            .iter()
+            .position(|arg| arg == "-cookies")
+            .expect("-cookies is passed");
+        assert_eq!(
+            cookie_args[index + 1],
+            "sid=downer-sentinel; path=/; domain=example.test"
+        );
+        assert!(
+            index < cookie_args.iter().position(|arg| arg == "-i").unwrap(),
+            "-cookies is an input option: {cookie_args:?}"
+        );
 
         let hls = FfmpegCommand::new(
             PathBuf::from("ffmpeg"),

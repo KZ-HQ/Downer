@@ -132,10 +132,12 @@ and `DOWNER_COOKIE` is used when neither option is given. Both keep the value
 out of shell history, which is why they are preferred over `--cookie`. Passing
 `--cookie` and `--cookie-file` together is an error (exit status `2`).
 
+Cookies are scoped to the media URL's host, so a server FFmpeg is redirected to
+and, for HLS, a cross-host segment server receive nothing.
+
 The value is still visible in FFmpeg's process arguments while a download runs:
-FFmpeg has no file-based input for headers or cookies. Cookies are also sent to
-any host FFmpeg is redirected to and, for HLS, to cross-host segment servers.
-Both limitations are recorded in
+FFmpeg has no file-based input for headers or cookies. That limitation is
+recorded in
 [`docs/adr/0002-cookie-scoping-and-argv-exposure.md`](docs/adr/0002-cookie-scoping-and-argv-exposure.md).
 
 The scraper sends a browser-like User-Agent and forwards the source page as the

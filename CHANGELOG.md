@@ -84,6 +84,13 @@ The Rust package and the Firefox extension share one product version; see
 
 ### Fixed
 
+- A forwarded cookie is no longer sent to every host FFmpeg contacts for an
+  input. It was rendered as a `Cookie:` line in the `-headers` block, which
+  FFmpeg applies to every request, so a redirect target and — for HLS — a
+  cross-host segment or key server received the media host's session. Cookies
+  now reach FFmpeg as `-cookies` entries scoped to the media URL's host, which
+  FFmpeg matches per request. Verified against FFmpeg 9.0.1: a scoped cookie
+  stays off both a redirect target and a cross-host HLS segment server.
 - A cookie or User-Agent containing CRLF can no longer append headers of its
   own choosing to the block passed to FFmpeg as `-headers`. The block is
   assembled by concatenation, so any ASCII control character is now removed
@@ -142,12 +149,6 @@ The Rust package and the Firefox extension share one product version; see
 
 - `--threads` controls FFmpeg processing, not concurrent HLS segment HTTP
   requests.
-- A forwarded cookie is sent to every host FFmpeg contacts for an input, not
-  only the media host: `-headers` applies to redirect targets and, for HLS, to
-  cross-host segment and key servers. Scoping cookies with FFmpeg's `-cookies`
-  is the fix, and it is verified against FFmpeg 9.0.1 — a scoped cookie stays
-  off both a redirect target and a cross-host HLS segment server — but it is
-  not yet adopted. See `docs/adr/0002-cookie-scoping-and-argv-exposure.md`.
 - A cookie supplied to the CLI or forwarded by the extension is visible in
   FFmpeg's process arguments to other processes on the same machine for the
   duration of a download.

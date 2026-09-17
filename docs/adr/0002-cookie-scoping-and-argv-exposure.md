@@ -2,7 +2,8 @@
 
 * Status: Accepted
 * Date: 2026-09-17
-* Issue: [KEI-54](https://linear.app/kzhq/issue/KEI-54)
+* Issue: [KEI-54](https://linear.app/kzhq/issue/KEI-54),
+  [KEI-78](https://linear.app/kzhq/issue/KEI-78) (rendering adopted)
 
 ## Context
 
@@ -151,26 +152,69 @@ with no warning even at `-loglevel verbose`. Getting this wrong in production
 therefore breaks protected downloads with no diagnostic, which is the single
 sharpest edge in adopting `-cookies`.
 
-One residual: every run used an explicit, non-default port, because the fixture
-server binds an ephemeral one. That the rule also holds for an implicit `:443`
-is read off the source above, not observed.
+This was verified in both directions on 2026-09-17, with the fixture server
+bound to port 80 so the URL states no port:
 
-KEI-78 should therefore emit **both** spellings as two newline-delimited
-entries — `domain=host` and `domain=host:port`. `domain=` is matched against one
-authority string, so at most one can ever match and the other is skipped, which
-makes the form immune both to the default-port question and to a future FFmpeg
-changing which string it builds. That form is **confirmed** by the same probe
-run: FFmpeg accepts newline-delimited entries, and carrying a non-matching one
-alongside does not stop the matching one being sent.
+```text
+default-port/headers: cookie arrived = true
+default-port/cookies (downer's rendering): cookie arrived = true
+default-port/cookies with an explicit :80: cookie arrived = false
+```
+
+The converse row is what makes the rule "the authority as written" rather than
+"the authority, port optional" — without it, a pass would also be consistent
+with FFmpeg simply being lenient about ports.
+
+One residual, smaller than it was: the observed default port is 80 over http.
+That `:443` over https behaves the same follows from `ff_url_join` running
+before either default is applied, which is a single code path, but it has not
+been observed separately.
+
+A belt-and-braces form was considered and **not** adopted: emit both spellings
+as two newline-delimited entries, `domain=host` and `domain=host:port`, so that
+one matches whichever string FFmpeg builds. The probe confirms it arrives — but
+only with the matching entry listed *last*, which is the fixture's arrangement,
+not production's. With an implicit port the matching entry is `domain=host` and
+comes *first*, and if FFmpeg kept only the last entry of a given cookie name the
+form would send nothing, silently, in exactly the case it was meant to protect.
+It trades a source-reading risk for an ordering risk in the same scenario rather
+than removing one, so KEI-78 implements the precise rule instead. The probe's
+`matching one FIRST` row settles whether the fallback is order-safe, should the
+precise rule ever need replacing.
+
+The default-port case is reachable directly:
+`tests/cookie_scope.rs::ffmpeg_cookie_scope_on_a_default_port` binds the fixture
+server to port 80, so the URL states no port exactly as a production one does,
+and checks that what `ffmpeg_cookies` renders for it arrives. It also checks the
+converse — that an explicit `domain=host:80` does *not* match such a URL — which
+is what makes the rule "the authority as written" rather than "the authority,
+port optional". Binding a privileged port needs `sudo`, so it is opt-in and
+skips loudly:
+
+```sh
+sudo DOWNER_COOKIE_PORT80=1 cargo test --test cookie_scope \
+    ffmpeg_cookie_scope_on_a_default_port -- --nocapture
+```
+
+That is still a fixture. The end-to-end gate remains the acceptance criterion
+KEI-78 carries anyway: a protected download from a real site, which nothing here
+stands in for.
 
 ## Consequences
 
 * A cookie can be supplied without entering shell history, and cannot inject a
   second header line. Neither property depended on FFmpeg semantics, so both
   ship now.
-* Cookies still reach redirect targets and cross-host HLS segments. The fix is
-  now verified rather than merely proposed, but it is KEI-78 that applies it;
-  this ADR changed no cookie rendering.
+* Cookies no longer reach redirect targets or cross-host HLS segments.
+  `scraper::ffmpeg_headers` renders User-Agent and Referer only, and
+  `scraper::ffmpeg_cookies` renders the cookie as `-cookies` entries scoped to
+  the media URL's authority (KEI-78).
+* One entry is rendered per cookie, and pairs named after a Set-Cookie
+  attribute — `domain`, `path`, `secure` and the rest — are dropped. Entries are
+  newline-delimited and each carries its own `; domain=`, so a cookie value
+  containing a newline or a `;` could otherwise open an entry scoped to a host
+  of its choosing. RFC 6265 forbids both characters in a cookie value and no
+  browser emits one, but `--cookie` takes an arbitrary string.
 * `tests/cookie_scope.rs` passes in CI without proving anything about FFmpeg,
   because it skips there. A green CI run is not evidence; only a local run is,
   and the result of one is recorded above.

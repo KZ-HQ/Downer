@@ -85,7 +85,16 @@ impl HeaderRecorder {
     /// Bind to `host` (`"localhost"` or `"127.0.0.1"`) on a free port and serve
     /// until dropped.
     pub fn start(host: &'static str) -> Self {
-        let listener = TcpListener::bind((host, 0)).expect("loopback listener binds");
+        Self::try_start_on(host, 0).expect("loopback listener binds on a free port")
+    }
+
+    /// Bind to `host` on exactly `port`, or return the reason it could not.
+    ///
+    /// `port` 0 picks a free one. A fixed port can fail for reasons a test
+    /// should report rather than panic on: binding below 1024 needs privileges,
+    /// and the port may already be held by something else on the machine.
+    pub fn try_start_on(host: &'static str, port: u16) -> Result<Self, std::io::Error> {
+        let listener = TcpListener::bind((host, port))?;
         let port = listener
             .local_addr()
             .expect("listener has an address")
@@ -122,7 +131,7 @@ impl HeaderRecorder {
             }
         });
 
-        server
+        Ok(server)
     }
 
     /// Answer `path` (for example `/video.mp4`) with `reply`.
@@ -150,6 +159,19 @@ impl HeaderRecorder {
     /// `host:port`, as it appears in the request's `Host` header.
     pub fn authority(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+
+    /// Forget every request recorded so far.
+    ///
+    /// Lets one server serve several phases of a test. That matters for a
+    /// privileged port, which cannot simply be rebound between phases: dropping
+    /// the server only signals its thread to stop, so an immediate rebind of the
+    /// same port can still fail with `AddrInUse`.
+    pub fn clear(&self) {
+        self.received
+            .lock()
+            .expect("received log is not poisoned")
+            .clear();
     }
 
     pub fn requests(&self) -> Vec<RecordedRequest> {
