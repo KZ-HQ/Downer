@@ -37,12 +37,24 @@ as it would on a real page.
 `localhost` and `127.0.0.1` are one network but two host *strings*, which is
 what cookie matching compares — so this needs no DNS and no `/etc/hosts` entry.
 
+It also serves a *signed* playlist, whose segment URLs carry a token in their
+query string, the way a real CDN's do. That is what makes KEI-55's redaction
+checkable end to end: FFmpeg echoes `Opening '<url>' for reading` per segment at
+`-loglevel info`, the host forwards each line, and the extension persists it — so
+after downloading `/media/signed.m3u8`, the Settings page must show `?…` and
+never the token. Nothing automated can make that check, because it needs a real
+FFmpeg and a real browser.
+
 Secrets
 -------
 
-The request log records whether a `Cookie` header arrived, never its value.
-AGENTS.md forbids logging cookie values, and a server whose whole purpose is
-handling them is the easiest place to get that wrong.
+The request log records whether a `Cookie` header arrived, never its value, and
+prints request paths with their query string replaced by `?…` — the same rule
+`src/redact.rs` and `extension/redact.js` apply. AGENTS.md forbids logging
+cookie values, and a server whose whole purpose is handling them is the easiest
+place to get that wrong. The signed token below is a sentinel with no secrecy to
+lose, but logging it would still teach the wrong habit in the one file where it
+matters most.
 
 Dependencies
 ------------
@@ -68,6 +80,11 @@ from urllib.parse import urlsplit
 # it; that is the point of choosing a value with no secrecy to lose.
 COOKIE_NAME = "downer_fixture_session"
 COOKIE_VALUE = "not-a-real-session"
+
+# The query-string token the signed playlist carries. A sentinel, like the cookie
+# value above: this exists to be looked for in logs, not to be kept out of them.
+SIGNED_TOKEN = "fixture-signed-token-not-a-real-secret"
+SIGNED_EXPIRY = "1790000000"
 
 SEGMENT_COUNT = 4
 SEGMENT_SECONDS = 2
@@ -195,6 +212,16 @@ def landing_page(site: Site) -> bytes:
 
   <h2>Same-host HLS</h2>
   <p><a href="/media/same-host.m3u8">same-host.m3u8</a></p>
+
+  <h2>Signed HLS</h2>
+  <p>
+    The segments in this playlist carry a token in their query string, as a real
+    CDN's would. Download it, then open Downer's Settings page: every logged
+    <code>Opening &hellip; for reading</code> line must end in
+    <code>?&hellip;</code>, with no token anywhere. That is KEI-55's redaction,
+    end to end — FFmpeg's real output, a real native port, and a real browser.
+  </p>
+  <p><a href="/media/signed.m3u8">signed.m3u8</a></p>
 {peer_section}
   <h2>Redirect</h2>
   <p>
@@ -216,6 +243,16 @@ def playlist(urls: list[str]) -> bytes:
     return ("\n".join(lines) + "\n").encode()
 
 
+def redact_path(path: str) -> str:
+    """A request path with its query replaced, for the log.
+
+    The same rule as `src/redact.rs` and `extension/redact.js`: keep the path,
+    mark that there was a query, print none of it.
+    """
+    split = urlsplit(path)
+    return f"{split.path}?…" if split.query else split.path
+
+
 class Handler(BaseHTTPRequestHandler):
     site: Site  # set on the subclass created in serve()
 
@@ -231,7 +268,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_request_outcome(self, status: int) -> None:
         cookie = "cookie" if self.has_cookie() else "NO COOKIE"
         print(
-            f"{self.site.host}:{self.site.port}  {self.command} {self.path}"
+            f"{self.site.host}:{self.site.port}  {self.command} {redact_path(self.path)}"
             f"  -> {status}  [{cookie}]",
             flush=True,
         )
@@ -264,6 +301,17 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD" and body:
             self.wfile.write(body)
         self.log_request_outcome(status)
+
+    def has_signed_token(self, query: str) -> bool:
+        """Is the signed playlist's token present? Compared, never logged."""
+        return any(pair == f"token={SIGNED_TOKEN}" for pair in query.split("&"))
+
+    def deny_token(self) -> None:
+        self.respond(
+            HTTPStatus.FORBIDDEN,
+            b"403: this segment requires the signed token from /media/signed.m3u8.\n",
+            "text/plain; charset=utf-8",
+        )
 
     def deny(self) -> None:
         self.respond(
@@ -349,9 +397,33 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if path == "/media/signed.m3u8":
+            # Segment URLs with a token in the query, the way a real CDN signs
+            # them. Downloading this is what makes KEI-55's redaction checkable
+            # end to end: FFmpeg logs each of these URLs, so the Settings page
+            # must end up showing `?…` and never the token.
+            self.respond(
+                HTTPStatus.OK,
+                playlist([
+                    f"{site.origin}/media/segment{i}.ts"
+                    f"?token={SIGNED_TOKEN}&e={SIGNED_EXPIRY}"
+                    for i in range(SEGMENT_COUNT)
+                ]),
+                "application/vnd.apple.mpegurl",
+            )
+            return
+
         if path.startswith("/media/segment") and path.endswith(".ts"):
             index = path[len("/media/segment"):-len(".ts")]
             if index.isdigit():
+                # A segment reached through the signed playlist must present the
+                # token, so the query is load-bearing rather than decorative: a
+                # redaction that removed it from the URL FFmpeg *requests*, and
+                # not merely from the line it logs, would fail the download here.
+                query = urlsplit(self.path).query
+                if query and not self.has_signed_token(query):
+                    self.deny_token()
+                    return
                 self.send_file(site.media.segment(int(index)), "video/mp2t")
                 return
 

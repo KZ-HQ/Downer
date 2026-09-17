@@ -331,7 +331,12 @@ fn start_download(
                 Err(error) => NativeResponse {
                     event_type: EVENT_TERMINAL,
                     ok: false,
-                    error: Some(error.to_string()),
+                    // `DownerError::FfmpegFailed` embeds FFmpeg's stderr tail,
+                    // which is exactly the text the `log` events are redacted
+                    // for. The terminal error takes the same treatment, or a
+                    // token would simply move from the log to the failure
+                    // message the popup shows and persists.
+                    error: Some(crate::redact::redact_text(&error.to_string())),
                     error_code: Some(ERROR_DOWNLOAD_FAILED),
                     job_id: Some(worker_job_id.clone()),
                     state: Some("failed".to_string()),
@@ -643,7 +648,11 @@ fn download(
                 ok: true,
                 job_id: log_job_id.clone(),
                 state: "downloading".to_string(),
-                log: line,
+                // Redacted here, on the host, so a signed segment URL never
+                // crosses the native messaging port. The extension redacts
+                // again before it persists or displays the line; see
+                // docs/adr/0003-redact-urls-in-logs.md for why both.
+                log: crate::redact::redact_text(&line),
             },
         );
     };

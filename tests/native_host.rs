@@ -972,9 +972,9 @@ fn closing_stdin_cancels_active_downloads_and_exits_cleanly() {
 ///
 /// A sentinel, never a real cookie: `AGENTS.md` forbids one in a test.
 ///
-/// This covers what the host controls. It does not cover FFmpeg echoing a
-/// token-bearing URL back through its own stderr; redacting *that* before
-/// persistence is KEI-55, and ADR-0002 records it as the remaining gap.
+/// This covers what the host controls. FFmpeg echoing a token-bearing URL back
+/// through its own stderr was the remaining gap ADR-0002 named; it is closed by
+/// `no_host_event_carries_a_url_query` below (KEI-55, ADR-0003).
 #[test]
 fn no_host_event_carries_the_cookie_value() {
     const SENTINEL: &str = "downer_sentinel=KEI54-not-a-real-session";
@@ -1014,5 +1014,77 @@ fn no_host_event_carries_the_cookie_value() {
     assert!(
         args.iter().any(|argument| argument.contains(SENTINEL)),
         "the cookie still reaches FFmpeg: {args:?}"
+    );
+}
+
+/// KEI-55 acceptance criterion, host side: FFmpeg's own stderr must not carry a
+/// URL query out of this process.
+///
+/// This is the gap ADR-0002 left open. `no_host_event_carries_the_cookie_value`
+/// above proves the host never *originates* a secret; this proves it does not
+/// relay one either. FFmpeg's HLS demuxer logs one `Opening '<url>' for reading`
+/// line per segment at `-loglevel info`, and those URLs routinely carry a signed
+/// token — which the host used to forward verbatim as a `log` event, and the
+/// extension used to persist until "Clear logs" was pressed.
+///
+/// The extension redacts again on its side (`extension/redact.js`); the two
+/// layers and the reason for both are in ADR-0003.
+///
+/// A sentinel, never a real token: `AGENTS.md` forbids one in a test. The fake
+/// FFmpeg echoes its stderr line inside single quotes, so the line here uses
+/// none — the quoting FFmpeg really puts around the URL is covered by
+/// `tests/fixtures/redaction.json`, which `src/redact.rs` is tested against.
+#[test]
+fn no_host_event_carries_a_url_query() {
+    const SENTINEL: &str = "KEI55-not-a-real-signed-token";
+    const LINE: &str = "Opening https://cdn.example.test/hls/seg42.ts?token=KEI55-not-a-real-signed-token&e=1790000000 for reading";
+
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg {
+        content: "partial media",
+        stderr_line: Some(LINE),
+        exit_code: 17,
+        ..FakeFfmpeg::default()
+    }
+    .install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    let mut host = NativeHost::start(&ffmpeg);
+
+    let mut request = download_request("https://example.test/video.mp4", &output_dir);
+    request["job_id"] = json!("job-token");
+    host.send(&request);
+
+    let (terminal, earlier) = host.wait_for_state("failed");
+    assert_envelope(&terminal, "terminal");
+
+    for event in earlier.iter().chain(std::iter::once(&terminal)) {
+        let rendered = serde_json::to_string(event).expect("event serializes");
+        assert!(
+            !rendered.contains(SENTINEL),
+            "a host event carried a signed token: {}",
+            event["type"]
+        );
+    }
+
+    // The line is still a useful log line: scheme, host and path survive, and
+    // only the query is replaced. A log event that redacted the whole URL would
+    // pass the assertion above while making the logs worthless.
+    let log_event = earlier
+        .iter()
+        .find(|event| event["type"] == json!("log"))
+        .unwrap_or_else(|| panic!("expected a log event, saw {earlier:#?}"));
+    assert_eq!(
+        log_event["log"],
+        json!("Opening https://cdn.example.test/hls/seg42.ts?… for reading")
+    );
+
+    // `DownerError::FfmpegFailed` embeds the stderr tail, so the terminal error
+    // is the same leak by another route.
+    let error = terminal["error"]
+        .as_str()
+        .expect("failure carries an error");
+    assert!(
+        error.contains("https://cdn.example.test/hls/seg42.ts?…"),
+        "error text: {error}"
     );
 }

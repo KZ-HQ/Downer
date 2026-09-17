@@ -89,10 +89,26 @@ to be present.
 | `hello` | `ready` | Handshake answer. Adds `host_version` and `capabilities`. |
 | `ack` | `paused`, `downloading`, `cancelling` | A control command was applied. Echoes `request_id`. |
 | `progress` | `starting`, `downloading`, `paused` | Job progress. May carry `completed_segments`, `total_segments`, `percent`. |
-| `log` | `downloading` | One line of FFmpeg stderr, in `log`. |
+| `log` | `downloading` | One line of FFmpeg stderr, in `log`, redacted (see below). |
 | `terminal` | `completed`, `failed`, `cancelled` | The job ended. `completed` carries `path`; the others carry `error` and `error_code`. |
 | `rejected` | `rejected` | The host refused the request. Carries `error`, `error_code`, and the `request_id` being refused. **Never terminal.** |
 | `control-error` | `control-error` | The host understood a control command but could not apply it. Carries `error`, `error_code`, `job_id`, `request_id`. **Never terminal.** |
+
+### Redaction
+
+The `log` field and a `terminal` event's `error` are **redacted** before they are
+sent: in every URL they contain, the scheme, host, port and path are kept and the
+query becomes `?…`, a fragment becomes `#…`, and `user:password@` becomes `…@`.
+Only `http` and `https` URLs are matched, and a line is truncated to 2,000
+characters after redaction.
+
+This is not a versioned part of the vocabulary — no field is added, removed or
+renamed by it, and `protocol_version` stays at 1 — but it is a contract: a client
+must not assume `log` reproduces FFmpeg's stderr byte for byte. The extension
+applies the same rule again on its side before persisting or displaying anything,
+so an older host is safe to talk to. The rule is implemented by `src/redact.rs`
+and `extension/redact.js`, pinned by `tests/fixtures/redaction.json`, and the
+reasoning is in `docs/adr/0003-redact-urls-in-logs.md`.
 
 `capabilities` on the `hello` response:
 
@@ -150,7 +166,9 @@ starting ──► downloading ⇄ paused        │
 * `starting` precedes every other event for a job.
 * Exactly one terminal event per job, and it is the last event for that job.
 * `progress` and `log` events for a job may interleave in any order; log lines
-  for one job preserve FFmpeg's own order.
+  for one job preserve FFmpeg's own order. A `log` event's `state` is always
+  `downloading` and reports nothing the job did not already know, so a client
+  must not treat one as a state change.
 * A response echoing `request_id` may arrive after unrelated `progress` or
   `log` events. Correlate by `request_id`, never by arrival order.
 * Progress is monotonic in intent but not guaranteed: `completed_segments` is

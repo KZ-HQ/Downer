@@ -3,6 +3,7 @@ pub mod error;
 pub mod ffmpeg;
 pub mod native;
 pub mod output;
+pub mod redact;
 pub mod scraper;
 
 use std::path::Path;

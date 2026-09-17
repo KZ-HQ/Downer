@@ -70,8 +70,9 @@ The minimum supported FFmpeg version is documented in `README.md`.
 
 Architectural decisions are recorded as ADRs under `docs/adr/`, numbered
 `NNNN-short-title.md`. ADR-0001 records the native messaging protocol
-contract; KEI-63 backfills the decisions already embodied in the code and adds
-the rest of the documentation set.
+contract, ADR-0002 cookie scoping and argv exposure, and ADR-0003 where URL
+redaction happens; KEI-63 backfills the decisions already embodied in the code
+and adds the rest of the documentation set.
 
 Any change to the native messaging protocol, the host process model, the
 FFmpeg command layer, discovery ownership, or control semantics requires an
@@ -102,14 +103,19 @@ ADR.
   `tests/fixtures/hls/`, HTML pages in `tests/fixtures/pages/`, and
   `tests/fixtures/protocol.json`, the native messaging protocol's wire
   vocabulary, which both test suites read so the Rust and JavaScript sides
-  cannot rename a protocol term unilaterally.
+  cannot rename a protocol term unilaterally, and
+  `tests/fixtures/redaction.json`, the URL redaction case table, read by both
+  suites for the same reason — the rule is implemented once per language.
   `tests/fixtures/protected_site.py` is a standard-library HTTP server that
   gates media on a session cookie, run with `make fixture-site` and
   `make fixture-site-peer`. It exists for the checks no automated test can
   make: whether a cookie survives the whole path from Firefox's cookie jar
   through the native port to FFmpeg, and whether it stops at the media host.
   Two instances on `localhost` and `127.0.0.1` give two host strings on one
-  network. It logs whether a `Cookie` header arrived, never its value.
+  network. It logs whether a `Cookie` header arrived, never its value, and
+  prints request paths with the query replaced. It also serves a signed playlist
+  whose segment URLs carry a token, which is how log redaction is checked end to
+  end.
 - `dist/`: build artifact directory for the packaged Firefox extension. It is
   produced by `make extension-package` (and by CI/release tooling) and is not
   tracked in git.
@@ -126,7 +132,10 @@ ADR.
    media listed on the page being viewed, and only jobs begun in the current
    browser session may set the headline status.
 3. `extension/background.js` owns persistent jobs, cookies, playlist metadata,
-   native task channels, progress state, and log history. It reconciles jobs
+   native task channels, progress state, and log history. Logs are kept under
+   one `downloadLogs:<jobId>` key each rather than inside the job records, and
+   storage writes and log broadcasts are coalesced, so a long HLS download does
+   not rewrite all state per line of FFmpeg output. It reconciles jobs
    that were still active when the browser closed, since native ports do not
    survive a restart.
 4. `extension/job-state.js` defines the job state machine once: states, legal
@@ -220,7 +229,12 @@ stale release binary is the most common cause of "it worked before" reports.
 - Preserve cookies and Referer handling for protected media, but do not log
   cookie values or other secrets.
 - Bound persistent histories and logs. The current per-download log limit is
-  500 lines.
+  500 lines and 128 KiB, over at most 20 persisted jobs.
+- Redact URLs in anything that is logged, persisted, or displayed: keep scheme,
+  host, port and path, and replace the query, a fragment, and any userinfo. The
+  rule is `src/redact.rs` and `extension/redact.js`, pinned by
+  `tests/fixtures/redaction.json`, which both test suites read. FFmpeg's own
+  stderr is the reason it exists; see ADR-0003.
 - Treat HLS segment counts as playlist-derived totals. Completed segment counts
   are estimates based on FFmpeg output timestamps unless a future scheduler can
   report exact segment completions.

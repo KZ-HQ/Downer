@@ -1,0 +1,101 @@
+{
+  "comment": "Single source of truth for URL redaction, decided in docs/adr/0003-redact-urls-in-logs.md (KEI-55). Redaction runs twice on the same line — once in src/redact.rs before the host emits a log event, once in extension/redact.js before the extension persists, broadcasts, or displays it — so both implementations must agree exactly. src/redact.rs's unit tests and tests/extension/redact.test.js both read this file, the way tests/fixtures/protocol.json pins the wire vocabulary. Every token here is a sentinel: nothing in this file is a real secret, and the tests grep for the sentinels to prove they do not survive.",
+  "query_placeholder": "?…",
+  "fragment_placeholder": "#…",
+  "userinfo_placeholder": "…@",
+  "max_line_chars": 2000,
+  "sentinels": [
+    "SENTINEL-SIGNED-TOKEN-MUST-NOT-PERSIST",
+    "SENTINEL-SESSION-SECRET-MUST-NOT-PERSIST"
+  ],
+  "cases": [
+    {
+      "name": "a plain URL with no query is left alone",
+      "input": "[hls @ 0x7f] Opening 'https://cdn.example.test/hls/seg00042.ts' for reading",
+      "expected": "[hls @ 0x7f] Opening 'https://cdn.example.test/hls/seg00042.ts' for reading"
+    },
+    {
+      "name": "the query of an FFmpeg segment line is replaced",
+      "input": "[hls @ 0x7f] Opening 'https://cdn.example.test/hls/seg00042.ts?token=SENTINEL-SIGNED-TOKEN-MUST-NOT-PERSIST&e=1790000000' for reading",
+      "expected": "[hls @ 0x7f] Opening 'https://cdn.example.test/hls/seg00042.ts?…' for reading"
+    },
+    {
+      "name": "a bare query, unquoted and at end of line",
+      "input": "https://cdn.example.test/v.m3u8?sig=SENTINEL-SIGNED-TOKEN-MUST-NOT-PERSIST",
+      "expected": "https://cdn.example.test/v.m3u8?…"
+    },
+    {
+      "name": "several URLs on one line are each redacted",
+      "input": "redirect https://a.example.test/v.m3u8?k=SENTINEL-SIGNED-TOKEN-MUST-NOT-PERSIST -> https://b.example.test/v.m3u8?k=SENTINEL-SESSION-SECRET-MUST-NOT-PERSIST",
+      "expected": "redirect https://a.example.test/v.m3u8?… -> https://b.example.test/v.m3u8?…"
+    },
+    {
+      "name": "a fragment is redacted too, because it can carry the same token",
+      "input": "Opening 'https://cdn.example.test/v.m3u8#SENTINEL-SIGNED-TOKEN-MUST-NOT-PERSIST' for reading",
+      "expected": "Opening 'https://cdn.example.test/v.m3u8#…' for reading"
+    },
+    {
+      "name": "query and fragment together",
+      "input": "https://cdn.example.test/v.m3u8?token=SENTINEL-SIGNED-TOKEN-MUST-NOT-PERSIST#SENTINEL-SESSION-SECRET-MUST-NOT-PERSIST",
+      "expected": "https://cdn.example.test/v.m3u8?…#…"
+    },
+    {
+      "name": "userinfo credentials are replaced, host and path kept",
+      "input": "https://someone:SENTINEL-SESSION-SECRET-MUST-NOT-PERSIST@cdn.example.test/v.mp4",
+      "expected": "https://…@cdn.example.test/v.mp4"
+    },
+    {
+      "name": "a port in the authority survives, because it is not a secret",
+      "input": "http://localhost:60254/v.mp4?token=SENTINEL-SIGNED-TOKEN-MUST-NOT-PERSIST",
+      "expected": "http://localhost:60254/v.mp4?…"
+    },
+    {
+      "name": "http and HTTPS are both matched, whatever the case of the scheme",
+      "input": "HTTPS://CDN.example.test/v.mp4?t=SENTINEL-SIGNED-TOKEN-MUST-NOT-PERSIST and http://cdn.example.test/w.mp4?t=SENTINEL-SIGNED-TOKEN-MUST-NOT-PERSIST",
+      "expected": "HTTPS://CDN.example.test/v.mp4?… and http://cdn.example.test/w.mp4?…"
+    },
+    {
+      "name": "trailing sentence punctuation is not swallowed into the URL",
+      "input": "Could not open https://cdn.example.test/v.m3u8?sig=SENTINEL-SIGNED-TOKEN-MUST-NOT-PERSIST.",
+      "expected": "Could not open https://cdn.example.test/v.m3u8?….",
+      "note": "The trailing full stop belongs to the sentence. It is trimmed off the match and restored, so the placeholder does not absorb it."
+    },
+    {
+      "name": "a URL inside parentheses",
+      "input": "failed (https://cdn.example.test/v.m3u8?sig=SENTINEL-SIGNED-TOKEN-MUST-NOT-PERSIST)",
+      "expected": "failed (https://cdn.example.test/v.m3u8?…)"
+    },
+    {
+      "name": "a URL in double quotes",
+      "input": "url=\"https://cdn.example.test/v.m3u8?sig=SENTINEL-SIGNED-TOKEN-MUST-NOT-PERSIST\"",
+      "expected": "url=\"https://cdn.example.test/v.m3u8?…\""
+    },
+    {
+      "name": "an empty query still loses its marker's contents",
+      "input": "https://cdn.example.test/v.mp4?",
+      "expected": "https://cdn.example.test/v.mp4?…"
+    },
+    {
+      "name": "a scheme this product never downloads is left alone",
+      "input": "ftp://cdn.example.test/v.mp4?token=SENTINEL-SIGNED-TOKEN-MUST-NOT-PERSIST",
+      "expected": "ftp://cdn.example.test/v.mp4?token=SENTINEL-SIGNED-TOKEN-MUST-NOT-PERSIST",
+      "note": "Only http and https are accepted by output.rs, so only those are matched. A query string elsewhere in the line is not assumed to be a URL."
+    },
+    {
+      "name": "text with no URL at all passes through unchanged",
+      "input": "frame= 1234 fps= 60 q=-1.0 size=  12345kB time=00:01:23.45 bitrate=1234.5kbits/s",
+      "expected": "frame= 1234 fps= 60 q=-1.0 size=  12345kB time=00:01:23.45 bitrate=1234.5kbits/s",
+      "note": "FFmpeg's own progress vocabulary uses q= and size= freely. Redaction keys off the URL grammar, not off the presence of an equals sign."
+    },
+    {
+      "name": "an error message, not a log line",
+      "input": "HTTP error 403 Forbidden for https://cdn.example.test/hls/key.bin?token=SENTINEL-SIGNED-TOKEN-MUST-NOT-PERSIST",
+      "expected": "HTTP error 403 Forbidden for https://cdn.example.test/hls/key.bin?…"
+    },
+    {
+      "name": "the scheme alone is not a URL",
+      "input": "supported schemes are https:// and http://",
+      "expected": "supported schemes are https:// and http://"
+    }
+  ]
+}
