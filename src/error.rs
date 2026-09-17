@@ -12,6 +12,9 @@ pub enum DownerError {
         message: String,
     },
     MediaNotFound(String),
+    /// A cookie could not be read from the requested source. The message names
+    /// the source, never the value.
+    CookieSource(String),
     NativeIo(io::Error),
     FfmpegUnavailable(PathBuf),
     FfmpegFailed {
@@ -47,6 +50,7 @@ impl fmt::Display for DownerError {
                 f,
                 "no supported m3u8 or video media URL was found in source page: {source}"
             ),
+            Self::CookieSource(message) => write!(f, "could not read cookie: {message}"),
             Self::NativeIo(error) => write!(f, "native messaging I/O error: {error}"),
             Self::FfmpegUnavailable(path) => write!(
                 f,

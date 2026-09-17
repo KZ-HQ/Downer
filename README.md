@@ -117,12 +117,26 @@ outputs. Existing files are never replaced unless `--overwrite` is present.
 Partial files are retained if FFmpeg fails for diagnostics. Resuming failed
 downloads is not promised in v1.
 
-For a source page that requires an existing browser session, pass the copied
-cookie header to both the page scraper and FFmpeg:
+For a source page that requires an existing browser session, supply the copied
+cookie header; it is used for both the page scraper and FFmpeg. There are three
+sources, in order of precedence:
 
 ```sh
+downer 'https://example.com/watch/video' --cookie-file ~/.config/downer/cookie
+DOWNER_COOKIE='session=...' downer 'https://example.com/watch/video'
 downer 'https://example.com/watch/video' --cookie 'session=...'
 ```
+
+`--cookie-file` reads the header from a file, ignoring surrounding whitespace,
+and `DOWNER_COOKIE` is used when neither option is given. Both keep the value
+out of shell history, which is why they are preferred over `--cookie`. Passing
+`--cookie` and `--cookie-file` together is an error (exit status `2`).
+
+The value is still visible in FFmpeg's process arguments while a download runs:
+FFmpeg has no file-based input for headers or cookies. Cookies are also sent to
+any host FFmpeg is redirected to and, for HLS, to cross-host segment servers.
+Both limitations are recorded in
+[`docs/adr/0002-cookie-scoping-and-argv-exposure.md`](docs/adr/0002-cookie-scoping-and-argv-exposure.md).
 
 The scraper sends a browser-like User-Agent and forwards the source page as the
 FFmpeg Referer. It reports Cloudflare challenge responses explicitly; it does
