@@ -558,3 +558,110 @@ fn ffmpeg_cookies_option_spelling_matrix() {
         );
     }
 }
+
+/// Does `domain=<host>` — with no port — match a URL that states no port?
+///
+/// Every other test here uses the fixture server's ephemeral port, so the URL
+/// always carries an explicit one and `domain=` always carries it too. A
+/// production media URL is `https://cdn.example.test/video.m3u8`, whose port is
+/// implicit, and `scraper::cookie_domain` therefore emits a bare host. That case
+/// is read off FFmpeg's source — `ff_url_join(hoststr, ..., port, NULL)` runs
+/// before the `port < 0` defaulting — but has never been observed, and getting
+/// it wrong is silent: FFmpeg makes the request and just leaves the cookie off.
+///
+/// Binding port 80 makes the case reachable locally. It needs privileges, so it
+/// is opt-in twice over and skips loudly otherwise:
+///
+/// ```sh
+/// sudo DOWNER_COOKIE_PORT80=1 cargo test --test cookie_scope \
+///     ffmpeg_cookie_scope_on_a_default_port -- --nocapture
+/// ```
+///
+/// `sudo` runs the already-built test binary, so build first with a plain
+/// `cargo test --no-run` if the sudo environment lacks cargo.
+#[test]
+fn ffmpeg_cookie_scope_on_a_default_port() {
+    if std::env::var_os("DOWNER_COOKIE_PORT80").is_none() {
+        eprintln!(
+            "SKIP: ffmpeg_cookie_scope_on_a_default_port needs to bind port 80, which needs \
+             privileges. Run: sudo DOWNER_COOKIE_PORT80=1 cargo test --test cookie_scope \
+             ffmpeg_cookie_scope_on_a_default_port -- --nocapture"
+        );
+        return;
+    }
+    let Some(ffmpeg) = real_ffmpeg("ffmpeg_cookie_scope_on_a_default_port") else {
+        return;
+    };
+
+    let server = match HeaderRecorder::try_start_on("localhost", 80) {
+        Ok(server) => server,
+        Err(error) => {
+            eprintln!(
+                "SKIP: could not bind localhost:80 ({}): {error}. Permission denied means this \
+                 needs sudo; address in use means something else on this machine is serving \
+                 port 80 and must be stopped first.",
+                error.kind()
+            );
+            return;
+        }
+    };
+    assert_eq!(server.port(), 80, "the test is meaningless on another port");
+    server.route("/video.mp4", Reply::text("video/mp4", "not real media"));
+
+    // No port in the URL: this is the shape a production media URL has.
+    let media_url = format!("http://{}/video.mp4", server.host());
+    let temp = tempfile::tempdir().unwrap();
+
+    let arrived = |label: &str, args: Vec<String>| -> bool {
+        server.clear();
+        run_ffmpeg(
+            &ffmpeg,
+            &as_args(&args),
+            &media_url,
+            &temp.path().join(format!("port80-{label}.mp4")),
+        );
+        let requests = server.requests_for("/video.mp4");
+        assert!(
+            !requests.is_empty(),
+            "[{label}] FFmpeg never reached the server, so this says nothing about cookies"
+        );
+        let arrived = requests.iter().any(|request| request.cookie().is_some());
+        eprintln!("default-port/{label}: cookie arrived = {arrived}");
+        arrived
+    };
+
+    assert!(
+        arrived("headers", headers_args(SENTINEL)),
+        "[headers] the control did not arrive, so the fixture is broken, not the cookie rule"
+    );
+
+    // What downer actually renders for this URL.
+    let rendered = cookies_args(SENTINEL, &media_url);
+    assert!(
+        rendered[1].ends_with(&format!("domain={}", server.host())),
+        "downer must render a bare host for a URL with no port: {:?}",
+        rendered[1]
+    );
+    assert!(
+        arrived("cookies (downer's rendering)", rendered),
+        "domain=<host> did not match a URL that states no port. The rule in \
+         scraper::cookie_domain is WRONG for production URLs, where the port is implicit: \
+         every protected download would silently lose its cookie. ADR-0002 and KEI-78 both \
+         need correcting."
+    );
+
+    // The converse, which makes the rule "the authority as written" rather than
+    // "the authority, port optional".
+    assert!(
+        !arrived(
+            "cookies with an explicit :80",
+            vec![
+                "-cookies".to_string(),
+                format!("{SENTINEL}; path=/; domain={}:80", server.host()),
+            ],
+        ),
+        "domain=<host>:80 matched a URL that states no port. Harmless in itself, but it means \
+         FFmpeg's match string is not the authority as written, so re-read http.c before \
+         trusting scraper::cookie_domain."
+    );
+}

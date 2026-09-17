@@ -168,9 +168,23 @@ than removing one, so KEI-78 implements the precise rule instead. The probe's
 `matching one FIRST` row settles whether the fallback is order-safe, should the
 precise rule ever need replacing.
 
-The real gate on the default-port case is the acceptance criterion KEI-78
-carries anyway: a protected download from a real site, which no fixture can
-stand in for.
+The default-port case is instead reachable directly:
+`tests/cookie_scope.rs::ffmpeg_cookie_scope_on_a_default_port` binds the fixture
+server to port 80, so the URL states no port exactly as a production one does,
+and checks that what `ffmpeg_cookies` renders for it arrives. It also checks the
+converse — that an explicit `domain=host:80` does *not* match such a URL — which
+is what makes the rule "the authority as written" rather than "the authority,
+port optional". Binding a privileged port needs `sudo`, so it is opt-in and
+skips loudly:
+
+```sh
+sudo DOWNER_COOKIE_PORT80=1 cargo test --test cookie_scope \
+    ffmpeg_cookie_scope_on_a_default_port -- --nocapture
+```
+
+That is still a fixture. The end-to-end gate remains the acceptance criterion
+KEI-78 carries anyway: a protected download from a real site, which nothing here
+stands in for.
 
 ## Consequences
 
