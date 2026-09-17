@@ -64,9 +64,29 @@ The Rust package and the Firefox extension share one product version; see
   packaging on macOS and Linux, a job that builds against the declared MSRV,
   and a `make version-check` target enforcing that the Cargo package and the
   extension manifest share one version.
+- Two further ways to supply a session cookie to the CLI, both of which keep
+  the value out of shell history: `--cookie-file PATH` reads the header from a
+  file, and the `DOWNER_COOKIE` environment variable is used when neither
+  cookie option is given. Precedence is `--cookie`, then `--cookie-file`, then
+  `DOWNER_COOKIE`. Supplying `--cookie` and `--cookie-file` together is an
+  error with exit status `2`.
+- `docs/adr/0002-cookie-scoping-and-argv-exposure.md`, recording that cookie
+  values remain visible in FFmpeg's process arguments — FFmpeg has no
+  file-based header or cookie input — and that the eventual fix is the native
+  HLS scheduler, where the host fetches segments itself and FFmpeg is never
+  given a cookie.
+- A dependency-free loopback HTTP server in `tests/support/` that records the
+  headers it receives, and `tests/cookie_scope.rs`, which drives a real FFmpeg
+  against two of them through a redirect and a cross-host HLS segment to
+  establish which requests a forwarded cookie actually reaches. The tests that
+  need a real FFmpeg skip when none is present, as in CI.
 
 ### Fixed
 
+- A cookie or User-Agent containing CRLF can no longer append headers of its
+  own choosing to the block passed to FFmpeg as `-headers`. The block is
+  assembled by concatenation, so any ASCII control character is now removed
+  from a value before it is placed in a header line.
 - A download that was still running when Firefox closed is no longer stuck
   forever. Native ports do not survive a restart, so such a job had no process
   behind it, yet it was restored from storage as `downloading`: the popup showed
@@ -121,6 +141,15 @@ The Rust package and the Firefox extension share one product version; see
 
 - `--threads` controls FFmpeg processing, not concurrent HLS segment HTTP
   requests.
+- A forwarded cookie is sent to every host FFmpeg contacts for an input, not
+  only the media host: `-headers` applies to redirect targets and, for HLS, to
+  cross-host segment and key servers. Scoping cookies with FFmpeg's `-cookies`
+  is the proposed fix and is not yet adopted, because its behaviour across
+  redirects and inside the HLS demuxer has not been verified against a real
+  FFmpeg. See `docs/adr/0002-cookie-scoping-and-argv-exposure.md`.
+- A cookie supplied to the CLI or forwarded by the extension is visible in
+  FFmpeg's process arguments to other processes on the same machine for the
+  duration of a download.
 - HLS progress totals depend on successfully reading a VOD playlist;
   Cloudflare or other session protections can prevent metadata access even
   when a browser player can load the media.

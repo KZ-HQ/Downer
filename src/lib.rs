@@ -16,6 +16,10 @@ use ffmpeg::{
 use output::{check_output_path, resolve_output_path};
 use scraper::ResolvedMedia;
 
+/// Environment variable holding a cookie header, used when neither `--cookie`
+/// nor `--cookie-file` is supplied.
+pub const COOKIE_ENV: &str = "DOWNER_COOKIE";
+
 pub const INVALID_INPUT_EXIT: i32 = 2;
 pub const OUTPUT_EXIT: i32 = 3;
 pub const FFMPEG_UNAVAILABLE_EXIT: i32 = 4;
@@ -33,16 +37,52 @@ pub struct DownloadOptions {
     pub quiet: bool,
 }
 
+/// Resolve the cookie header from the three accepted sources, in order of
+/// precedence: `--cookie`, then `--cookie-file`, then the `DOWNER_COOKIE`
+/// environment variable.
+///
+/// `--cookie` and `--cookie-file` together is rejected by the argument parser
+/// before this runs, so at most one of them is ever set.
+///
+/// Errors name the source, never the value: a cookie must not reach a log, an
+/// error message, or a terminal. An empty or whitespace-only source is treated
+/// as "no cookie" rather than as an empty header.
+pub fn resolve_cookie(cli: &Cli) -> DownerResult<Option<String>> {
+    if let Some(cookie) = &cli.cookie {
+        return Ok(normalize_cookie(cookie));
+    }
+    if let Some(path) = &cli.cookie_file {
+        let contents = std::fs::read_to_string(path)
+            .map_err(|error| DownerError::CookieSource(format!("{}: {error}", path.display())))?;
+        return Ok(normalize_cookie(&contents));
+    }
+    match std::env::var(COOKIE_ENV) {
+        Ok(value) => Ok(normalize_cookie(&value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(DownerError::CookieSource(format!("{COOKIE_ENV}: {error}"))),
+    }
+}
+
+/// Trim the surrounding whitespace a file or a shell inevitably adds, and treat
+/// a blank source as absent. Control characters are removed by
+/// [`scraper::ffmpeg_headers`] when the header block is built, so a cookie can
+/// never inject a second header line.
+fn normalize_cookie(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 /// Run one download and return an error that the binary can map to a stable exit code.
 pub fn run(cli: Cli) -> DownerResult<()> {
-    let media = scraper::resolve_media(&cli.url, &cli.user_agent, cli.cookie.as_deref())?;
+    let cookie = resolve_cookie(&cli)?;
+    let media = scraper::resolve_media(&cli.url, &cli.user_agent, cookie.as_deref())?;
     let options = DownloadOptions {
         output: cli.output,
         dir: cli.dir,
         overwrite: cli.overwrite,
         ffmpeg: cli.ffmpeg,
         user_agent: cli.user_agent,
-        cookie: cli.cookie,
+        cookie,
         threads: cli.threads,
         quiet: false,
     };
@@ -135,7 +175,7 @@ fn download_resolved_with_executor(
 
 pub fn exit_code(error: &DownerError) -> i32 {
     match error {
-        DownerError::InvalidUrl(_) => INVALID_INPUT_EXIT,
+        DownerError::InvalidUrl(_) | DownerError::CookieSource(_) => INVALID_INPUT_EXIT,
         DownerError::OutputExists(_)
         | DownerError::OutputPath(_)
         | DownerError::OutputDirectory(_) => OUTPUT_EXIT,

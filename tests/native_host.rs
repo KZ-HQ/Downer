@@ -938,3 +938,55 @@ fn closing_stdin_cancels_active_downloads_and_exits_cleanly() {
         "EOF must kill the running FFmpeg"
     );
 }
+
+/// KEI-54 acceptance criterion: a cookie value must not appear in anything the
+/// host emits — no progress event, no log event, no terminal error, and nothing
+/// on stderr. The extension persists those events verbatim into `downloadJobs`,
+/// so an event carrying the cookie would put it in `storage.local` too.
+///
+/// A sentinel, never a real cookie: `AGENTS.md` forbids one in a test.
+///
+/// This covers what the host controls. It does not cover FFmpeg echoing a
+/// token-bearing URL back through its own stderr; redacting *that* before
+/// persistence is KEI-55, and ADR-0002 records it as the remaining gap.
+#[test]
+fn no_host_event_carries_the_cookie_value() {
+    const SENTINEL: &str = "downer_sentinel=KEI54-not-a-real-session";
+
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg {
+        content: "partial media",
+        stderr_line: Some("Server returned 403 Forbidden"),
+        exit_code: 17,
+        ..FakeFfmpeg::default()
+    }
+    .install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    let mut host = NativeHost::start(&ffmpeg);
+
+    let mut request = download_request("https://example.test/video.mp4", &output_dir);
+    request["job_id"] = json!("job-secrets");
+    request["cookie"] = json!(SENTINEL);
+    host.send(&request);
+
+    let (terminal, earlier) = host.wait_for_state("failed");
+    assert_envelope(&terminal, "terminal");
+
+    // Everything the host said, including the events seen on the way here.
+    for event in earlier.iter().chain(std::iter::once(&terminal)) {
+        let rendered = serde_json::to_string(event).expect("event serializes");
+        assert!(
+            !rendered.contains(SENTINEL),
+            "a host event carried the cookie value: {}",
+            event["type"]
+        );
+    }
+
+    // The cookie did reach FFmpeg, so this is a statement about what the host
+    // reports, not about the cookie having been dropped on the floor.
+    let args = recorded_args(temp.path());
+    assert!(
+        args.iter().any(|argument| argument.contains(SENTINEL)),
+        "the cookie still reaches FFmpeg: {args:?}"
+    );
+}

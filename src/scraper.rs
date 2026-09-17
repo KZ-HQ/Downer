@@ -279,19 +279,36 @@ pub fn extract_media_urls(html: &str, base: &Url) -> Vec<Url> {
     urls
 }
 
+/// Build the CRLF-delimited header block FFmpeg takes as `-headers`.
+///
+/// Every value is passed through [`header_value`] first. The block is assembled
+/// by concatenation, so a value carrying its own CRLF would otherwise append
+/// headers of the caller's choosing — a cookie or User-Agent arriving from a
+/// page, from `DOWNER_COOKIE`, or over the native messaging port must not be
+/// able to do that.
 pub fn ffmpeg_headers(
     referer: Option<&Url>,
     user_agent: &str,
     cookie: Option<&str>,
 ) -> Option<String> {
-    let mut headers = format!("User-Agent: {user_agent}\r\n");
+    let mut headers = format!("User-Agent: {}\r\n", header_value(user_agent));
     if let Some(referer) = referer {
-        headers.push_str(&format!("Referer: {referer}\r\n"));
+        headers.push_str(&format!("Referer: {}\r\n", header_value(referer.as_str())));
     }
     if let Some(cookie) = cookie {
-        headers.push_str(&format!("Cookie: {cookie}\r\n"));
+        headers.push_str(&format!("Cookie: {}\r\n", header_value(cookie)));
     }
     Some(headers)
+}
+
+/// Strip the ASCII control characters that would end a header line early, so a
+/// value can only ever occupy the header it was placed in. Nothing is logged:
+/// the rejected characters never belong in a real header value, and the value
+/// itself may be a secret.
+fn header_value(raw: &str) -> String {
+    raw.chars()
+        .filter(|character| !character.is_ascii_control())
+        .collect()
 }
 
 fn resolve_candidate(raw: &str, base: &Url) -> Option<Url> {
@@ -349,6 +366,35 @@ mod tests {
         assert!(headers.contains("User-Agent: Test Agent\r\n"));
         assert!(headers.contains("Referer: https://example.test/watch/123\r\n"));
         assert!(headers.contains("Cookie: session=abc\r\n"));
+    }
+
+    /// The header block is concatenated, so a value carrying CRLF would append
+    /// headers chosen by whoever supplied it. Sentinel values only: a real
+    /// cookie must never appear in a test.
+    #[test]
+    fn header_values_cannot_inject_extra_header_lines() {
+        let headers = ffmpeg_headers(
+            None,
+            "Agent\r\nX-Injected-By-Agent: yes",
+            Some("sid=downer-sentinel\r\nX-Injected-By-Cookie: yes"),
+        )
+        .unwrap();
+        // FFmpeg splits the block on CRLF, so the line count is the property
+        // that matters. The injected text survives inside the value it was
+        // smuggled in, which is inert; it just never becomes a header of its own.
+        let lines: Vec<&str> = headers
+            .split("\r\n")
+            .filter(|line| !line.is_empty())
+            .collect();
+        assert_eq!(lines.len(), 2, "one line per supplied header: {lines:?}");
+        assert_eq!(
+            lines[0], "User-Agent: AgentX-Injected-By-Agent: yes",
+            "{lines:?}"
+        );
+        assert_eq!(
+            lines[1], "Cookie: sid=downer-sentinelX-Injected-By-Cookie: yes",
+            "{lines:?}"
+        );
     }
 
     #[test]

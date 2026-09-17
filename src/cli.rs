@@ -38,9 +38,20 @@ pub struct Cli {
     )]
     pub user_agent: String,
 
-    /// Optional browser cookie header for pages or media requiring a session.
-    #[arg(long, value_name = "COOKIE")]
+    /// Browser cookie header for pages or media requiring a session.
+    ///
+    /// The value becomes an argument of this process and of FFmpeg, so it is
+    /// visible to other local processes and is recorded in shell history.
+    /// Prefer `--cookie-file` or `DOWNER_COOKIE`.
+    #[arg(long, value_name = "COOKIE", conflicts_with = "cookie_file")]
     pub cookie: Option<String>,
+
+    /// Read the cookie header from this file instead of the command line.
+    ///
+    /// The file holds one `name=value; name=value` header line. Leading and
+    /// trailing whitespace is ignored. Cannot be combined with `--cookie`.
+    #[arg(long, value_name = "PATH")]
+    pub cookie_file: Option<PathBuf>,
 
     /// Number of FFmpeg processing threads; omit to let FFmpeg choose.
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
