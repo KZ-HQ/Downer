@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Downer Media Downloader",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Find media loaded by the current page and download it with FFmpeg.",
   "browser_specific_settings": {
     "gecko": {

@@ -22,5 +22,7 @@
     "download_failed",
     "cancelled"
   ],
-  "capabilities": ["pause_resume", "hls_info"]
+  "capabilities": ["pause_resume", "hls_info"],
+  "on_conflict_policies": ["fail", "rename", "overwrite"],
+  "default_on_conflict": "rename"
 }

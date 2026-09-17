@@ -300,6 +300,186 @@ fn download_request(url: &str, output_dir: &Path) -> Value {
     })
 }
 
+/// The page title reaches the host as `title` and names the file, so two pages
+/// whose playlists are both `index.m3u8` no longer collide. This is KEI-60's
+/// acceptance criterion, exercised over the real wire.
+#[test]
+fn a_page_title_names_a_generically_named_stream() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg::default().install(temp.path());
+    let output_dir = temp.path().join("downloads");
+
+    for (job, title, expected) in [
+        (
+            "job-title-a",
+            "Lecture 3 — Topology",
+            "Lecture 3 — Topology.mp4",
+        ),
+        (
+            "job-title-b",
+            "Lecture 4 — Homology",
+            "Lecture 4 — Homology.mp4",
+        ),
+    ] {
+        let mut host = NativeHost::start(&ffmpeg);
+        let mut request = download_request("https://example.test/hls/index.m3u8", &output_dir);
+        request["job_id"] = json!(job);
+        request["title"] = json!(title);
+        host.send(&request);
+
+        let (completed, _) = host.wait_for_state("completed");
+        assert_envelope(&completed, "terminal");
+        assert_eq!(
+            PathBuf::from(
+                completed["path"]
+                    .as_str()
+                    .expect("completed carries a path")
+            ),
+            output_dir.join(expected)
+        );
+    }
+}
+
+/// With no `title` the host still must not fail the second download: the
+/// vocabulary's `default_on_conflict` is `rename`, so the same page downloaded
+/// twice lands beside itself.
+#[test]
+fn a_repeated_download_renames_instead_of_failing() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg::default().install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    assert_eq!(
+        protocol()["default_on_conflict"],
+        json!("rename"),
+        "tests/fixtures/protocol.json pins the default collision policy"
+    );
+
+    let mut produced = Vec::new();
+    for job in ["job-rename-a", "job-rename-b"] {
+        let mut host = NativeHost::start(&ffmpeg);
+        let mut request = download_request("https://example.test/hls/index.m3u8", &output_dir);
+        request["job_id"] = json!(job);
+        request["title"] = json!("Same Page");
+        host.send(&request);
+        let (completed, _) = host.wait_for_state("completed");
+        assert_envelope(&completed, "terminal");
+        produced.push(PathBuf::from(
+            completed["path"]
+                .as_str()
+                .expect("completed carries a path"),
+        ));
+    }
+
+    assert_eq!(produced[0], output_dir.join("Same Page.mp4"));
+    assert_eq!(produced[1], output_dir.join("Same Page (2).mp4"));
+}
+
+/// `on_conflict: "fail"` restores the strict behaviour, and every policy name
+/// the shared vocabulary lists is accepted.
+#[test]
+fn on_conflict_fail_is_honoured_and_every_listed_policy_is_accepted() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg::default().install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    fs::create_dir_all(&output_dir).unwrap();
+    fs::write(output_dir.join("Same Page.mp4"), "already here").unwrap();
+
+    let mut host = NativeHost::start(&ffmpeg);
+    let mut request = download_request("https://example.test/hls/index.m3u8", &output_dir);
+    request["job_id"] = json!("job-conflict-fail");
+    request["title"] = json!("Same Page");
+    request["on_conflict"] = json!("fail");
+    host.send(&request);
+
+    let (failed, _) = host.wait_for_state("failed");
+    assert_envelope(&failed, "terminal");
+    assert_eq!(failed["error_code"], json!("download_failed"));
+    assert_eq!(
+        fs::read_to_string(output_dir.join("Same Page.mp4")).unwrap(),
+        "already here",
+        "fail must leave the existing file alone"
+    );
+    assert!(!output_dir.join("Same Page (2).mp4").exists());
+
+    for policy in protocol_strings("/on_conflict_policies") {
+        let mut host = NativeHost::start(&ffmpeg);
+        let mut request = download_request("https://example.test/hls/index.m3u8", &output_dir);
+        request["job_id"] = json!(format!("job-policy-{policy}"));
+        request["on_conflict"] = json!(policy);
+        host.send(&request);
+        let event = host.next_event();
+        assert_eq!(
+            event["type"],
+            json!("progress"),
+            "{policy} is a listed policy and must be accepted: {event:#?}"
+        );
+    }
+}
+
+/// A policy the host does not understand fails the frame rather than being
+/// ignored. Silently falling back would be the one outcome that can cost a
+/// user a file.
+#[test]
+fn an_unknown_conflict_policy_is_rejected_rather_than_ignored() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg::default().install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    let mut host = NativeHost::start(&ffmpeg);
+
+    let mut request = download_request("https://example.test/hls/index.m3u8", &output_dir);
+    request["job_id"] = json!("job-bad-policy");
+    request["on_conflict"] = json!("clobber");
+    host.send(&request);
+
+    let rejected = host.next_event();
+    assert_envelope(&rejected, "rejected");
+    assert_eq!(rejected["ok"], json!(false));
+    assert_eq!(rejected["error_code"], json!("invalid_request"));
+    assert!(
+        !output_dir.exists(),
+        "no file is written for a refused frame"
+    );
+}
+
+/// A title is naming material, not diagnostics. It must not appear in any event
+/// the host emits — the filename in the `terminal` path is the only place a
+/// title-derived string legitimately shows up.
+#[test]
+fn no_host_event_echoes_the_title_except_in_the_output_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg {
+        stderr_line: Some("network failure"),
+        exit_code: 17,
+        ..FakeFfmpeg::default()
+    }
+    .install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    let mut host = NativeHost::start(&ffmpeg);
+
+    const TITLE_SENTINEL: &str = "downer-title-sentinel";
+    let mut request = download_request("https://example.test/hls/index.m3u8", &output_dir);
+    request["job_id"] = json!("job-title-sentinel");
+    request["title"] = json!(TITLE_SENTINEL);
+    host.send(&request);
+
+    let (failed, skipped) = host.wait_for_state("failed");
+    // The title did reach the host and did name the file, so the scan below is
+    // testing silence rather than passing because nothing happened.
+    assert!(
+        output_dir.join(format!("{TITLE_SENTINEL}.mp4")).exists(),
+        "the title should have named the output file"
+    );
+    for event in skipped.iter().chain(std::iter::once(&failed)) {
+        let mut scanned = event.clone();
+        // The output path is allowed to carry it: that is the whole point.
+        scanned.as_object_mut().map(|object| object.remove("path"));
+        assert!(
+            !scanned.to_string().contains(TITLE_SENTINEL),
+            "the title must not be echoed back: {event:#?}"
+        );
+    }
+}
+
 fn recorded_args(directory: &Path) -> Vec<String> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -326,7 +506,9 @@ fn successful_download_reports_starting_progress_and_completed() {
     let output_dir = temp.path().join("downloads");
     let mut host = NativeHost::start(&ffmpeg);
 
-    let mut request = download_request("https://example.test/video.mp4", &output_dir);
+    // A distinctive stem, so this test stays about the event sequence: naming
+    // from a generic stem is covered by the naming tests below.
+    let mut request = download_request("https://example.test/lecture.mp4", &output_dir);
     request["job_id"] = json!("job-success");
     host.send(&request);
 
@@ -350,7 +532,7 @@ fn successful_download_reports_starting_progress_and_completed() {
             .as_str()
             .expect("completed carries a path"),
     );
-    assert_eq!(path, output_dir.join("video.mp4"));
+    assert_eq!(path, output_dir.join("lecture.mp4"));
     assert_eq!(fs::read_to_string(path).unwrap(), "fake media");
 }
 
@@ -432,7 +614,7 @@ fn failing_ffmpeg_reports_failed_state_and_keeps_the_partial_file() {
     let output_dir = temp.path().join("downloads");
     let mut host = NativeHost::start(&ffmpeg);
 
-    let mut request = download_request("https://example.test/video.mp4", &output_dir);
+    let mut request = download_request("https://example.test/lecture.mp4", &output_dir);
     request["job_id"] = json!("job-failure");
     host.send(&request);
 
@@ -456,7 +638,7 @@ fn failing_ffmpeg_reports_failed_state_and_keeps_the_partial_file() {
         .unwrap_or_else(|| panic!("expected a log event, saw {skipped:#?}"));
     assert_envelope(log_event, "log");
     assert_eq!(
-        fs::read_to_string(output_dir.join("video.mp4")).unwrap(),
+        fs::read_to_string(output_dir.join("lecture.mp4")).unwrap(),
         "partial media"
     );
 }

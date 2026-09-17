@@ -19,7 +19,7 @@ fn help_and_version_are_available() {
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("downer 0.3.0"));
+        .stdout(predicate::str::contains("downer 0.4.0"));
 }
 
 #[test]
@@ -127,6 +127,149 @@ fn fake_ffmpeg_failure_is_nonzero_and_preserves_partial_file() {
         .stderr(predicate::str::contains("network failure"));
 
     assert_eq!(fs::read_to_string(output).unwrap(), "partial media");
+}
+
+/// The default for an inferred filename is `rename`: a second download of the
+/// same stream lands beside the first instead of failing, which is the defect
+/// KEI-60 exists to fix.
+#[cfg(unix)]
+#[test]
+fn an_inferred_filename_renames_rather_than_failing() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake = fake_ffmpeg(temp.path(), false);
+    let output_dir = temp.path().join("downloads");
+    let url = "https://example.test/hls/index.m3u8";
+
+    for _ in 0..2 {
+        Command::cargo_bin("downer")
+            .unwrap()
+            .args([url, "--dir"])
+            .arg(&output_dir)
+            .arg("--ffmpeg")
+            .arg(&fake)
+            .arg("--name")
+            .arg("Lecture 3")
+            .assert()
+            .success();
+    }
+
+    assert_eq!(
+        fs::read_to_string(output_dir.join("Lecture 3.mp4")).unwrap(),
+        "fake media"
+    );
+    assert_eq!(
+        fs::read_to_string(output_dir.join("Lecture 3 (2).mp4")).unwrap(),
+        "fake media"
+    );
+}
+
+/// `--on-conflict fail` restores the old behaviour for an inferred name, and
+/// `--on-conflict overwrite` replaces in place without a second file appearing.
+#[cfg(unix)]
+#[test]
+fn on_conflict_overrides_the_inferred_default() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake = fake_ffmpeg(temp.path(), false);
+    let output_dir = temp.path().join("downloads");
+    let url = "https://example.test/hls/index.m3u8";
+    fs::create_dir_all(&output_dir).unwrap();
+    fs::write(output_dir.join("Lecture 3.mp4"), "already here").unwrap();
+
+    let attempt = |policy: &str| {
+        Command::cargo_bin("downer")
+            .unwrap()
+            .args([url, "--dir"])
+            .arg(&output_dir)
+            .arg("--ffmpeg")
+            .arg(&fake)
+            .arg("--name")
+            .arg("Lecture 3")
+            .args(["--on-conflict", policy])
+            .assert()
+    };
+
+    attempt("fail")
+        .code(3)
+        .stderr(predicate::str::contains("already exists"));
+    assert_eq!(
+        fs::read_to_string(output_dir.join("Lecture 3.mp4")).unwrap(),
+        "already here",
+        "fail must not touch the existing file"
+    );
+    assert!(!output_dir.join("Lecture 3 (2).mp4").exists());
+
+    attempt("overwrite").success();
+    assert_eq!(
+        fs::read_to_string(output_dir.join("Lecture 3.mp4")).unwrap(),
+        "fake media"
+    );
+    assert!(
+        !output_dir.join("Lecture 3 (2).mp4").exists(),
+        "overwrite replaces in place rather than renaming"
+    );
+}
+
+/// An exact path is a place the user named, so a collision there stays an
+/// error. `--on-conflict` can still override it, deliberately.
+#[cfg(unix)]
+#[test]
+fn an_exact_output_path_still_fails_on_collision_by_default() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake = fake_ffmpeg(temp.path(), false);
+    let output = temp.path().join("exact.mp4");
+    fs::write(&output, "already here").unwrap();
+
+    Command::cargo_bin("downer")
+        .unwrap()
+        .args(["https://example.test/hls/index.m3u8", "--output"])
+        .arg(&output)
+        .arg("--ffmpeg")
+        .arg(&fake)
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("already exists"));
+    assert_eq!(fs::read_to_string(&output).unwrap(), "already here");
+    assert!(!temp.path().join("exact (2).mp4").exists());
+
+    Command::cargo_bin("downer")
+        .unwrap()
+        .args(["https://example.test/hls/index.m3u8", "--output"])
+        .arg(&output)
+        .arg("--ffmpeg")
+        .arg(&fake)
+        .args(["--on-conflict", "rename"])
+        .assert()
+        .success();
+    assert_eq!(fs::read_to_string(&output).unwrap(), "already here");
+    assert_eq!(
+        fs::read_to_string(temp.path().join("exact (2).mp4")).unwrap(),
+        "fake media"
+    );
+}
+
+#[test]
+fn overwrite_and_on_conflict_cannot_be_used_together() {
+    Command::cargo_bin("downer")
+        .unwrap()
+        .args([
+            "https://example.test/video.mp4",
+            "--overwrite",
+            "--on-conflict",
+            "rename",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn an_unknown_conflict_policy_is_an_input_error() {
+    Command::cargo_bin("downer")
+        .unwrap()
+        .args(["https://example.test/video.mp4", "--on-conflict", "clobber"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("invalid value"));
 }
 
 #[cfg(unix)]

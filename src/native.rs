@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     error::{DownerError, DownerResult},
     ffmpeg::{FfmpegProgress, ProcessControl},
+    output::{NamingHints, OnConflict},
     scraper::{hls_info_with_timeout, HlsInfo, ResolvedMedia},
     DownloadOptions,
 };
@@ -78,6 +79,19 @@ struct NativeRequest {
     output_dir: Option<PathBuf>,
     #[serde(default)]
     overwrite: bool,
+    /// What to do when the inferred output path is taken. Absent means
+    /// [`OnConflict::Rename`]: the host only ever infers a name into
+    /// `output_dir`, never an exact path, so renaming beside an existing file
+    /// is the safe default even for a client that predates this field. An
+    /// unrecognised value fails the frame rather than being ignored — silently
+    /// misreading a collision policy could cost a user a file.
+    #[serde(default)]
+    on_conflict: Option<OnConflict>,
+    /// The source page's title, used for naming only when the URL-derived stem
+    /// is generic. Bounded and sanitised by `output::sanitize_title`; never
+    /// logged or echoed in any event.
+    #[serde(default)]
+    title: Option<String>,
     #[serde(default)]
     cookie: Option<String>,
     #[serde(default)]
@@ -587,6 +601,11 @@ fn download(
     let user_agent = request
         .user_agent
         .unwrap_or_else(|| "Mozilla/5.0 (Firefox; downer native host)".to_string());
+    let source_host = referer
+        .as_ref()
+        .unwrap_or(&url)
+        .host_str()
+        .map(str::to_string);
     let media = ResolvedMedia {
         url,
         referer,
@@ -601,6 +620,8 @@ fn download(
                 .unwrap_or_else(|| PathBuf::from(".")),
         ),
         overwrite: request.overwrite,
+        on_conflict: request.on_conflict,
+        naming: NamingHints::new(request.title, source_host),
         ffmpeg: ffmpeg_path(),
         user_agent,
         cookie: request.cookie,

@@ -5,6 +5,7 @@ const { trimLogEntries } = DownerJobLogs;
 
 const outputElement = document.getElementById("output-dir");
 const threadsElement = document.getElementById("ffmpeg-threads");
+const conflictElement = document.getElementById("on-conflict");
 const statusElement = document.getElementById("status");
 const filterElement = document.getElementById("job-filter");
 const logsElement = document.getElementById("logs");
@@ -67,9 +68,23 @@ function appendLogs(jobId, entries) {
   renderLogs();
 }
 
-browser.storage.local.get({ outputDir: "", ffmpegThreads: null }).then((settings) => {
+/** Kept identical to `default_on_conflict` in `tests/fixtures/protocol.json`. */
+const DEFAULT_ON_CONFLICT = "rename";
+
+browser.storage.local.get({
+  outputDir: "",
+  ffmpegThreads: null,
+  onConflict: DEFAULT_ON_CONFLICT
+}).then((settings) => {
   outputElement.value = settings.outputDir;
   threadsElement.value = Number.isInteger(settings.ffmpegThreads) ? settings.ffmpegThreads : "";
+  // An unknown stored value falls back rather than being offered: the host
+  // refuses a policy it does not understand.
+  conflictElement.value = Array.from(conflictElement.options).some(
+    (option) => option.value === settings.onConflict
+  )
+    ? settings.onConflict
+    : DEFAULT_ON_CONFLICT;
 });
 
 document.getElementById("save").addEventListener("click", async () => {
@@ -79,7 +94,11 @@ document.getElementById("save").addEventListener("click", async () => {
     statusElement.textContent = "Threads must be a positive whole number or blank.";
     return;
   }
-  await browser.storage.local.set({ outputDir: outputElement.value.trim(), ffmpegThreads });
+  await browser.storage.local.set({
+    outputDir: outputElement.value.trim(),
+    ffmpegThreads,
+    onConflict: conflictElement.value
+  });
   statusElement.textContent = "Saved.";
 });
 

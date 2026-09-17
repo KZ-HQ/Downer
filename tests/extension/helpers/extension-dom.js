@@ -132,7 +132,7 @@ function loadContentScript(fixtureName, {
  * Load `popup.html` with the real `job-view.js` and `popup.js`, wired to a
  * stubbed background. Returns the window plus readers for what the user sees.
  */
-async function loadPopup({ candidates = [], sourceUrl = "https://example.test/files/index.html", jobs = [], sessionJobIds = [], tabUrl = sourceUrl } = {}) {
+async function loadPopup({ candidates = [], sourceUrl = "https://example.test/files/index.html", pageTitle = "fixture", jobs = [], sessionJobIds = [], tabUrl = sourceUrl } = {}) {
   const dom = new JSDOM(extensionSource("popup.html"), {
     url: "moz-extension://downer-test/popup.html",
     runScripts: "outside-only",
@@ -150,7 +150,7 @@ async function loadPopup({ candidates = [], sourceUrl = "https://example.test/fi
     tabs: {
       active: { id: 1, url: tabUrl },
       onMessage: (message) =>
-        message?.type === "scan-media" ? { sourceUrl, title: "fixture", candidates } : undefined
+        message?.type === "scan-media" ? { sourceUrl, title: pageTitle, candidates } : undefined
     }
   });
   dom.window.browser = stub.api;
@@ -188,6 +188,12 @@ async function loadPopup({ candidates = [], sourceUrl = "https://example.test/fi
           cancel: { hidden: cancel.hidden, disabled: cancel.disabled }
         };
       }),
+    /** Press the Download button on the nth listed candidate. */
+    async download(index = 0) {
+      const item = [...document.querySelectorAll("#media-list li")][index];
+      item.querySelector("button").dispatchEvent(new dom.window.Event("click"));
+      await settle();
+    },
     settle
   };
 }
@@ -207,11 +213,14 @@ async function loadOptions({ jobs = [], logs = {}, settings = {} } = {}) {
 
   const sent = [];
   const listeners = [];
+  const saved = [];
   dom.window.browser = {
     storage: {
       local: {
         get: async (defaults) => ({ ...defaults, ...settings }),
-        set: async () => undefined
+        set: async (values) => {
+          saved.push(plain(values));
+        }
       }
     },
     runtime: {
@@ -239,6 +248,15 @@ async function loadOptions({ jobs = [], logs = {}, settings = {} } = {}) {
     dom,
     sent,
     settle,
+    /** Everything the Settings page has written to storage.local. */
+    saved: () => saved,
+    /** A form control on the Settings page, by element id. */
+    field: (id) => document.getElementById(id),
+    /** Press "Save". */
+    save() {
+      document.getElementById("save").dispatchEvent(new dom.window.Event("click"));
+      return settle();
+    },
     /** The text of the log pane, exactly as the user reads it. */
     logText: () => document.getElementById("logs").textContent,
     /** The per-download filter's options, as `value: label` pairs. */

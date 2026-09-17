@@ -1,12 +1,78 @@
 use std::{
-    fs, io,
+    fs,
+    io::{self, ErrorKind},
     path::{Path, PathBuf},
 };
 
 use percent_encoding::percent_decode_str;
+use serde::Deserialize;
 use url::Url;
 
 use crate::error::{DownerError, DownerResult};
+
+/// The longest a page title may contribute to a filename.
+///
+/// Titles are user data that reaches the disk, so the contribution is bounded
+/// rather than trusted: a title is only ever consulted when the URL says
+/// nothing useful, and never contributes more than this many characters.
+const MAX_TITLE_CHARS: usize = 80;
+
+/// How many ` (n)` candidates [`OnConflict::Rename`] tries before giving up.
+/// A directory holding this many same-named downloads is a user problem, not a
+/// loop to run forever.
+const MAX_RENAME_ATTEMPTS: u32 = 1_000;
+
+/// Stems that identify the stream rather than the content. A URL ending in one
+/// of these says nothing a user would recognise, so naming falls back to the
+/// caller's hints. Numeric-only stems (`1080.m3u8`, `42.mp4`) count too.
+const GENERIC_STEMS: [&str; 6] = ["index", "playlist", "master", "download", "video", "media"];
+
+/// What to do when the resolved output path is already taken.
+///
+/// See `docs/adr/0004-output-naming-and-collision-policy.md`. The default is
+/// [`OnConflict::Rename`] for an inferred name and [`OnConflict::Fail`] for an
+/// exact `--output` path; the caller decides which, this type only says what
+/// each one does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum OnConflict {
+    /// Refuse to touch an existing file.
+    Fail,
+    /// Write beside it as `name (2).ext`, `name (3).ext`, and so on.
+    #[default]
+    Rename,
+    /// Replace it.
+    Overwrite,
+}
+
+/// Naming material the caller knows and the URL does not.
+///
+/// The extension supplies the page title and the page's host; the CLI supplies
+/// `--name` and the source page host. Both are advisory: they are consulted
+/// only when the URL-derived stem is generic, and never widen what may be
+/// written — see [`sanitize_title`].
+#[derive(Debug, Clone, Default)]
+pub struct NamingHints {
+    pub title: Option<String>,
+    pub source_host: Option<String>,
+}
+
+impl NamingHints {
+    pub fn new(title: Option<String>, source_host: Option<String>) -> Self {
+        Self { title, source_host }
+    }
+}
+
+/// An output path that has been resolved against the collision policy.
+///
+/// `overwrite` is what FFmpeg is told. Under [`OnConflict::Rename`] the path
+/// was reserved by this process (see [`resolve_conflict`]), so replacing that
+/// reservation is both safe and required.
+#[derive(Debug, Clone)]
+pub struct OutputTarget {
+    pub path: PathBuf,
+    pub overwrite: bool,
+}
 
 /// Accept only network media URLs that FFmpeg can open directly.
 pub fn validate_url(raw: &str) -> DownerResult<Url> {
@@ -36,6 +102,7 @@ pub fn resolve_output_path(
     output: Option<&Path>,
     dir: Option<&Path>,
     current_dir: &Path,
+    hints: &NamingHints,
 ) -> DownerResult<PathBuf> {
     if let Some(path) = output {
         if path.as_os_str().is_empty() {
@@ -54,7 +121,7 @@ pub fn resolve_output_path(
     if directory.as_os_str().is_empty() {
         return Err(DownerError::OutputPath("directory is empty".to_string()));
     }
-    let filename = infer_filename(url);
+    let filename = infer_filename_with_hints(url, hints);
     if let Err(error) = fs::create_dir_all(directory) {
         return Err(DownerError::OutputIo(error));
     }
@@ -71,6 +138,135 @@ pub fn check_output_path(path: &Path, overwrite: bool) -> DownerResult<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(DownerError::OutputIo(error)),
     }
+}
+
+/// Resolve `path` against `policy`, returning the path to write and whether
+/// FFmpeg may replace what is there.
+///
+/// [`OnConflict::Rename`] reserves its choice by creating the file exclusively.
+/// Probing with `metadata` and then handing the free name to FFmpeg would let
+/// two hosts started at once — one download per process is the model — pick the
+/// same ` (2)` and have one silently clobber the other. The reservation closes
+/// that window at the cost of a zero-byte file if the download then fails
+/// before FFmpeg writes anything, which the "preserve partial output" rule says
+/// to leave in place anyway.
+pub fn resolve_conflict(path: PathBuf, policy: OnConflict) -> DownerResult<OutputTarget> {
+    if path.is_dir() {
+        return Err(DownerError::OutputDirectory(path));
+    }
+    match policy {
+        OnConflict::Overwrite => Ok(OutputTarget {
+            path,
+            overwrite: true,
+        }),
+        OnConflict::Fail => {
+            check_output_path(&path, false)?;
+            Ok(OutputTarget {
+                path,
+                overwrite: false,
+            })
+        }
+        OnConflict::Rename => reserve_unused_path(path),
+    }
+}
+
+fn reserve_unused_path(path: PathBuf) -> DownerResult<OutputTarget> {
+    for attempt in 1..=MAX_RENAME_ATTEMPTS {
+        let candidate = if attempt == 1 {
+            path.clone()
+        } else {
+            numbered_variant(&path, attempt)
+        };
+        if candidate.is_dir() {
+            continue;
+        }
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(_) => {
+                return Ok(OutputTarget {
+                    // The name is ours, so FFmpeg is told it may replace the
+                    // empty file this reservation just created.
+                    path: candidate,
+                    overwrite: true,
+                });
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(DownerError::OutputIo(error)),
+        }
+    }
+    Err(DownerError::OutputExists(path))
+}
+
+/// `video.mp4` and 2 become `video (2).mp4`; the suffix goes before the
+/// extension so the file still opens in the application that handles it.
+fn numbered_variant(path: &Path, attempt: u32) -> PathBuf {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return path.to_path_buf();
+    };
+    let numbered = match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => {
+            format!("{stem} ({attempt}).{extension}")
+        }
+        _ => format!("{name} ({attempt})"),
+    };
+    path.with_file_name(numbered)
+}
+
+/// Infer a filename, falling back to the caller's hints when the URL-derived
+/// stem is generic.
+///
+/// The URL always wins when it says something: a distinctive path segment is a
+/// better name than a page title, and it keeps today's behaviour for
+/// direct-file downloads untouched. The extension only reaches the hints for
+/// the `index.m3u8` / `playlist.m3u8` case this exists to fix.
+pub fn infer_filename_with_hints(url: &Url, hints: &NamingHints) -> String {
+    let inferred = infer_filename(url);
+    let (stem, extension) = match inferred.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => (stem, extension),
+        _ => return inferred,
+    };
+    if !is_generic_stem(stem) {
+        return inferred;
+    }
+    let replacement = hints
+        .title
+        .as_deref()
+        .and_then(sanitize_title)
+        .or_else(|| hints.source_host.as_deref().and_then(sanitize_title));
+    match replacement {
+        Some(replacement) => format!("{replacement}.{extension}"),
+        None => inferred,
+    }
+}
+
+/// Whether a stem names the stream rather than its content.
+pub fn is_generic_stem(stem: &str) -> bool {
+    let stem = stem.trim().to_ascii_lowercase();
+    if stem.is_empty() {
+        return true;
+    }
+    GENERIC_STEMS.contains(&stem.as_str())
+        || stem.chars().all(|character| character.is_ascii_digit())
+}
+
+/// Reduce a page title to something safe and bounded to put on disk.
+///
+/// A title is user data — it can name an account or a document — and a filename
+/// is a place that data reaches the disk and the extension's persisted job
+/// records. So the contribution is bounded, not trusted: whitespace (including
+/// the newlines a title can carry) collapses to single spaces, the same
+/// `sanitize_filename` rules that guard URL-derived names apply unchanged, and
+/// the result is cut to `MAX_TITLE_CHARS` characters on a character boundary.
+/// Returns `None` when nothing usable survives, which sends the caller back to
+/// the URL-derived name.
+pub fn sanitize_title(candidate: &str) -> Option<String> {
+    let collapsed = candidate.split_whitespace().collect::<Vec<_>>().join(" ");
+    let bounded: String = collapsed.chars().take(MAX_TITLE_CHARS).collect();
+    let sanitized = sanitize_filename(&bounded);
+    (!sanitized.is_empty()).then_some(sanitized)
 }
 
 /// Infer a filename without allowing URL path syntax to escape the destination directory.
@@ -212,6 +408,175 @@ mod tests {
             infer_filename(&Url::parse("https://example.test/evil%2Fname.mp4").unwrap()),
             "evil_name.mp4"
         );
+    }
+
+    fn hints(title: Option<&str>, host: Option<&str>) -> NamingHints {
+        NamingHints::new(title.map(str::to_string), host.map(str::to_string))
+    }
+
+    #[test]
+    fn detects_generic_stems() {
+        for stem in ["index", "playlist", "master", "download", "video", "media"] {
+            assert!(is_generic_stem(stem), "{stem} should be generic");
+            assert!(
+                is_generic_stem(&stem.to_ascii_uppercase()),
+                "{stem} should be generic regardless of case"
+            );
+        }
+        // Numeric-only stems name a rendition or a shard, not the content.
+        assert!(is_generic_stem("1080"));
+        assert!(is_generic_stem("42"));
+        assert!(is_generic_stem(""));
+
+        assert!(!is_generic_stem("lecture"));
+        assert!(!is_generic_stem("indexing"));
+        assert!(!is_generic_stem("master class"));
+        assert!(!is_generic_stem("1080p"));
+        assert!(!is_generic_stem("episode-2"));
+    }
+
+    #[test]
+    fn uses_the_title_only_when_the_url_stem_is_generic() {
+        let generic = Url::parse("https://example.test/hls/index.m3u8").unwrap();
+        assert_eq!(
+            infer_filename_with_hints(&generic, &hints(Some("Lecture 3"), Some("example.test"))),
+            "Lecture 3.mp4"
+        );
+
+        // A distinctive URL segment beats a page title, so direct-file
+        // downloads keep naming themselves exactly as they do today.
+        let distinctive = Url::parse("https://example.test/lecture-three.mp4").unwrap();
+        assert_eq!(
+            infer_filename_with_hints(
+                &distinctive,
+                &hints(Some("Some Unrelated Page Title"), Some("example.test"))
+            ),
+            "lecture-three.mp4"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_the_source_host_then_to_the_url_name() {
+        let url = Url::parse("https://example.test/playlist.m3u8").unwrap();
+        assert_eq!(
+            infer_filename_with_hints(&url, &hints(None, Some("example.test"))),
+            "example.test.mp4"
+        );
+        // A title that sanitises away is the same as no title at all.
+        assert_eq!(
+            infer_filename_with_hints(&url, &hints(Some("   ...   "), Some("example.test"))),
+            "example.test.mp4"
+        );
+        assert_eq!(
+            infer_filename_with_hints(&url, &hints(None, None)),
+            "playlist.mp4"
+        );
+    }
+
+    #[test]
+    fn sanitizes_and_bounds_a_title() {
+        // Path syntax cannot escape the destination directory.
+        assert_eq!(
+            sanitize_title("evil/../name").as_deref(),
+            Some("evil_.._name")
+        );
+        // Newlines and runs of whitespace collapse rather than becoming
+        // underscores, so a multi-line title still reads as a sentence.
+        assert_eq!(
+            sanitize_title("My\n\tGreat   Video").as_deref(),
+            Some("My Great Video")
+        );
+        assert_eq!(
+            sanitize_title("Report: Q3 <final>").as_deref(),
+            Some("Report_ Q3 _final_")
+        );
+
+        // A title is user data reaching the disk, so its contribution is bounded.
+        let long = "a".repeat(500);
+        let bounded = sanitize_title(&long).expect("a long title still yields a name");
+        assert_eq!(bounded.chars().count(), MAX_TITLE_CHARS);
+
+        // Truncation lands on a character boundary, never inside a code point.
+        let wide = "\u{1f3ac}".repeat(200);
+        let bounded = sanitize_title(&wide).expect("a wide title still yields a name");
+        assert_eq!(bounded.chars().count(), MAX_TITLE_CHARS);
+
+        assert_eq!(sanitize_title(""), None);
+        assert_eq!(sanitize_title("   "), None);
+        assert_eq!(sanitize_title(".."), None);
+        assert_eq!(sanitize_title("CON"), None);
+    }
+
+    #[test]
+    fn rename_walks_the_numbered_sequence_and_reserves_its_choice() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().join("Lecture 3.mp4");
+
+        let first = resolve_conflict(base.clone(), OnConflict::Rename).unwrap();
+        assert_eq!(first.path, base);
+        // The reservation exists, so the next caller cannot pick the same name.
+        assert!(first.path.exists());
+        assert!(first.overwrite);
+
+        let second = resolve_conflict(base.clone(), OnConflict::Rename).unwrap();
+        assert_eq!(second.path, directory.path().join("Lecture 3 (2).mp4"));
+
+        let third = resolve_conflict(base.clone(), OnConflict::Rename).unwrap();
+        assert_eq!(third.path, directory.path().join("Lecture 3 (3).mp4"));
+
+        // A gap is filled rather than skipped: the lowest free number wins.
+        fs::remove_file(directory.path().join("Lecture 3 (2).mp4")).unwrap();
+        let fourth = resolve_conflict(base, OnConflict::Rename).unwrap();
+        assert_eq!(fourth.path, directory.path().join("Lecture 3 (2).mp4"));
+    }
+
+    #[test]
+    fn rename_keeps_the_extension_last() {
+        let directory = tempfile::tempdir().unwrap();
+        let dotless = directory.path().join("noextension");
+        fs::write(&dotless, b"old").unwrap();
+        let target = resolve_conflict(dotless, OnConflict::Rename).unwrap();
+        assert_eq!(target.path, directory.path().join("noextension (2)"));
+
+        let dotfile = directory.path().join(".hidden");
+        fs::write(&dotfile, b"old").unwrap();
+        let target = resolve_conflict(dotfile, OnConflict::Rename).unwrap();
+        assert_eq!(target.path, directory.path().join(".hidden (2)"));
+    }
+
+    #[test]
+    fn fail_and_overwrite_policies_leave_the_file_alone_or_replace_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("existing.mp4");
+        fs::write(&path, b"keep me").unwrap();
+
+        assert!(matches!(
+            resolve_conflict(path.clone(), OnConflict::Fail),
+            Err(DownerError::OutputExists(_))
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "keep me");
+
+        let target = resolve_conflict(path.clone(), OnConflict::Overwrite).unwrap();
+        assert_eq!(target.path, path);
+        assert!(target.overwrite);
+        // Deciding the policy must not itself touch the file; only FFmpeg writes.
+        assert_eq!(fs::read_to_string(&path).unwrap(), "keep me");
+    }
+
+    #[test]
+    fn no_policy_writes_over_a_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let occupied = directory.path().join("taken");
+        fs::create_dir(&occupied).unwrap();
+        for policy in [OnConflict::Fail, OnConflict::Rename, OnConflict::Overwrite] {
+            assert!(
+                matches!(
+                    resolve_conflict(occupied.clone(), policy),
+                    Err(DownerError::OutputDirectory(_))
+                ),
+                "{policy:?} must refuse a directory"
+            );
+        }
     }
 
     #[test]

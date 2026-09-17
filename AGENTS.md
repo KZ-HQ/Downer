@@ -70,9 +70,10 @@ The minimum supported FFmpeg version is documented in `README.md`.
 
 Architectural decisions are recorded as ADRs under `docs/adr/`, numbered
 `NNNN-short-title.md`. ADR-0001 records the native messaging protocol
-contract, ADR-0002 cookie scoping and argv exposure, and ADR-0003 where URL
-redaction happens; KEI-63 backfills the decisions already embodied in the code
-and adds the rest of the documentation set.
+contract, ADR-0002 cookie scoping and argv exposure, ADR-0003 where URL
+redaction happens, and ADR-0004 the output naming and collision policy; KEI-63
+backfills the decisions already embodied in the code and adds the rest of the
+documentation set.
 
 Any change to the native messaging protocol, the host process model, the
 FFmpeg command layer, discovery ownership, or control semantics requires an
@@ -149,8 +150,8 @@ ADR.
 7. `src/ffmpeg.rs` invokes FFmpeg without a shell, parses `-progress` output,
    captures stderr, and supports Unix pause/resume signals.
 8. `src/scraper.rs` resolves source-page media URLs and parses HLS metadata.
-9. `src/output.rs` validates URLs, infers and sanitizes filenames, and
-   enforces the output collision rule.
+9. `src/output.rs` validates URLs, infers and sanitizes filenames from the URL
+   and the caller's `NamingHints`, and applies the `OnConflict` policy.
 
 ## Required workflow
 
@@ -224,7 +225,22 @@ stale release binary is the most common cause of "it worked before" reports.
 - Accept only `http://` and `https://` URLs.
 - Pass URLs and paths to child processes as arguments; never use shell
   interpolation.
-- Refuse output collisions unless `--overwrite` is explicitly supplied.
+- Name a download after the media URL's own filename when it has one. When that
+  stem is generic (`index`, `playlist`, `master`, `download`, `video`, `media`,
+  or digits only) name it after the page title instead, falling back to the
+  source host. A title is user data reaching the disk: sanitize it with the same
+  rules as a URL-derived name, bound its length, and never let it into a log, an
+  error, or any event but the output path.
+- Resolve an output collision by **renaming** — ` (2)`, ` (3)`, … before the
+  extension — whenever *we* inferred the filename, which is every extension
+  download and every CLI run without `--output`. Refuse the collision only when
+  the user named an exact path with `--output`. `--on-conflict
+  fail|rename|overwrite` and the matching Settings option make the choice
+  explicit, and `--overwrite` remains shorthand for `overwrite`. Renaming takes
+  its name by creating the file exclusively, so two hosts racing for one
+  directory cannot pick the same name. This rule replaces the earlier "refuse
+  output collisions unless `--overwrite` is explicitly supplied"; the reasoning
+  is in ADR-0004.
 - Preserve partial output and diagnostic files after download failures.
 - Keep one URL per invocation; batch downloading and authentication workflows
   are out of scope unless explicitly requested.

@@ -61,7 +61,7 @@ extension correlates acknowledgements. The extension generates request IDs as
 | Command | Required fields | Optional fields |
 | --- | --- | --- |
 | `hello` | — | `request_id` |
-| `download` | `url` | `job_id`, `request_id`, `source_url`, `output_dir`, `overwrite`, `cookie`, `user_agent`, `threads`, `total_segments`, `total_duration_ms` |
+| `download` | `url` | `job_id`, `request_id`, `source_url`, `output_dir`, `title`, `on_conflict`, `overwrite`, `cookie`, `user_agent`, `threads`, `total_segments`, `total_duration_ms` |
 | `pause` | `job_id` | `request_id` |
 | `resume` | `job_id` | `request_id` |
 | `cancel` | `job_id` | `request_id` |
@@ -77,6 +77,26 @@ Notes:
   values are never logged, by either side.
 * `total_segments` / `total_duration_ms` on `download` seed HLS progress before
   FFmpeg starts; `hls-info` supplies them later for an already-running job.
+* `title` is the source page's title, used to name the output file when the
+  media URL's own filename stem is generic (`index`, `playlist`, `master`,
+  `download`, `video`, `media`, or digits only). It is naming material, not
+  diagnostics: the host sanitises and bounds it, and never echoes it in a `log`,
+  a `progress` or an `error` — the `path` of a `terminal` event is the only
+  response it can reach. See
+  [ADR-0004](adr/0004-output-naming-and-collision-policy.md).
+* `on_conflict` is `"fail"`, `"rename"` or `"overwrite"` and decides what
+  happens when the inferred output path is already taken. **Absent means
+  `"rename"`**: the host only ever infers a filename into `output_dir`, never an
+  exact path, so renaming to `name (2).ext` is the right default for every
+  request it can receive — including one from an extension built before this
+  field existed. A value that is none of the three is refused with
+  `invalid_request` rather than ignored, because a misread collision policy is
+  the one misunderstanding that can destroy a file.
+* `overwrite` is **superseded by `on_conflict`** and kept for older clients.
+  `on_conflict` wins when both are present; `overwrite: true` on its own still
+  means overwrite. The extension sends `on_conflict` and leaves `overwrite`
+  `false`, so a host too old to understand `on_conflict` keeps refusing rather
+  than replacing a file.
 
 ## Responses (host → extension)
 
@@ -196,9 +216,17 @@ may change wording.
 
 A client must tolerate any documented optional field being absent, and must
 ignore fields it does not recognise — that is how this protocol adds
-non-breaking fields without a version bump. Absent is not the same as zero:
-`total_segments` absent means "unknown", while `0` would mean an empty
-playlist.
+non-breaking fields without a version bump. `title` and `on_conflict` were added
+this way; ADR-0004 records why they did not bump the version. Absent is not the
+same as zero: `total_segments` absent means "unknown", while `0` would mean an
+empty playlist.
+
+Ignoring an unrecognised *field* is not the same as tolerating an unrecognised
+*value* in a field the host does know. `on_conflict` is the case where that
+distinction matters: its value decides whether an existing file survives, so a
+value outside the documented set is refused rather than guessed at. The
+documented set, like the rest of the vocabulary, is listed in
+`tests/fixtures/protocol.json` (`on_conflict_policies`, `default_on_conflict`).
 
 ## Testing
 

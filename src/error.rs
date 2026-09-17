@@ -31,7 +31,7 @@ impl fmt::Display for DownerError {
             Self::InvalidUrl(message) => write!(f, "invalid URL: {message}"),
             Self::OutputExists(path) => write!(
                 f,
-                "output already exists: {} (use --overwrite to replace it)",
+                "output already exists: {} (use --on-conflict rename to write beside it, or --overwrite to replace it)",
                 path.display()
             ),
             Self::OutputPath(message) => write!(f, "invalid output path: {message}"),
