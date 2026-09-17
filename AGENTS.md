@@ -165,8 +165,19 @@ itself ships without dependencies, and `node_modules/` is not tracked.
 `node:test` suites in `tests/extension/`, and both run as part of
 `make check`. Pure extension helpers belong in an importable file with the
 `module.exports` guard used by `extension/task-protocol.js` and
-`extension/hls.js`, so they can be tested from Node; files that touch the
-`browser` global at load time cannot be imported.
+`extension/hls.js`, so they can be tested from Node.
+
+Files that touch the `browser` global or the DOM at load — `content.js` and
+`popup.js` — cannot be `require()`d, but they are still tested: 
+`tests/extension/helpers/extension-dom.js` evaluates the real, shipped files in
+a `jsdom` window with a stubbed `browser` API, and
+`tests/extension/content-dom.test.js` and `tests/extension/popup-dom.test.js`
+assert on the resulting DOM. That harness is not Firefox: it does not cover real
+WebExtension APIs, content-script injection, or native messaging over a real
+port, so a change to those still wants a manual pass in the browser.
+
+`jsdom` is development-only tooling, like `web-ext`; the extension itself still
+ships with no dependencies.
 
 For a complete local extension setup on macOS or Linux:
 
