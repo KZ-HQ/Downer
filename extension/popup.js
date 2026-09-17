@@ -1,6 +1,15 @@
-/* global DownerJobView */
+/* global DownerJobView, DownerJobState */
 
 const { RENDER_STALE, renderableJobs } = DownerJobView;
+// One definition of what each state means for the UI; see extension/job-state.js.
+const {
+  showsProgress,
+  isBusy,
+  canPause,
+  canResume,
+  canCancel,
+  INTERRUPTED_ERROR
+} = DownerJobState;
 
 const statusElement = document.getElementById("status");
 const listElement = document.getElementById("media-list");
@@ -18,14 +27,39 @@ function showStatus(message) {
  * user is looking at, so it renders nothing at all — in particular it does not
  * set the headline status, which is the defect this guard closes.
  */
-function renderDownloadStatus(job) {
-  const row = rowsByJobId.get(job.id) || rowsByUrl.get(job.url);
-  if (!row) return;
+/**
+ * The row a job should render into, or nothing if the job is not about media on
+ * this page. A row is claimed by one job at a time: two jobs for the same URL no
+ * longer fight over it, and an older job can never take a row back from a newer
+ * one, which is how a stale job used to overwrite a live download's row.
+ */
+function rowFor(job) {
+  const claimed = rowsByJobId.get(job.id);
+  if (claimed) return claimed;
+  const row = rowsByUrl.get(job.url);
+  if (!row) return undefined;
+  const ownerStartedAt = row.jobStartedAt;
+  const startedAt = job.startedAt || 0;
+  if (row.jobId && row.jobId !== job.id && startedAt < (ownerStartedAt || 0)) {
+    return undefined;
+  }
+  return row;
+}
+
+function claimRow(row, job) {
+  if (row.jobId && row.jobId !== job.id) rowsByJobId.delete(row.jobId);
+  row.jobId = job.id;
+  row.jobStartedAt = job.startedAt || 0;
   rowsByJobId.set(job.id, row);
+}
+
+function renderDownloadStatus(job) {
+  const row = rowFor(job);
+  if (!row) return;
+  claimRow(row, job);
   const button = row.download;
   button.dataset.jobId = job.id;
-  const showProgress = ["starting", "preparing", "downloading", "paused", "cancelling", "completed"].includes(job.state);
-  row.progress.hidden = !showProgress;
+  row.progress.hidden = !showsProgress(job.state);
   if (job.totalSegments) {
     const completed = job.state === "completed"
       ? job.totalSegments
@@ -45,6 +79,9 @@ function renderDownloadStatus(job) {
   } else if (job.state === "failed") {
     row.count.textContent = "Failed";
     row.progress.removeAttribute("value");
+  } else if (job.state === "interrupted") {
+    row.count.textContent = "Interrupted — not running";
+    row.progress.removeAttribute("value");
   } else {
     row.count.textContent = job.metadataError
       ? "Waiting for playlist metadata…"
@@ -58,6 +95,9 @@ function renderDownloadStatus(job) {
     button.disabled = false;
     button.textContent = "Retry";
   } else if (job.state === "cancelled") {
+    button.disabled = false;
+    button.textContent = "Download again";
+  } else if (job.state === "interrupted") {
     button.disabled = false;
     button.textContent = "Download again";
   } else if (job.state === "preparing") {
@@ -74,13 +114,13 @@ function renderDownloadStatus(job) {
     button.textContent = "Downloading…";
   }
 
-  const active = ["starting", "preparing", "downloading", "paused", "cancelling"].includes(job.state);
-  row.pause.hidden = !active || !["starting", "preparing", "downloading"].includes(job.state);
-  row.resume.hidden = !active || job.state !== "paused";
-  row.cancel.hidden = !active || job.state === "cancelling";
-  row.pause.disabled = !["starting", "preparing", "downloading"].includes(job.state);
-  row.resume.disabled = job.state !== "paused";
-  row.cancel.disabled = !["starting", "preparing", "downloading", "paused"].includes(job.state);
+  const busy = isBusy(job.state);
+  row.pause.hidden = !busy || !canPause(job.state);
+  row.resume.hidden = !busy || !canResume(job.state);
+  row.cancel.hidden = !busy || !canCancel(job.state);
+  row.pause.disabled = !canPause(job.state);
+  row.resume.disabled = !canResume(job.state);
+  row.cancel.disabled = !canCancel(job.state);
 
   if (job.state === "completed") {
     showStatus(`Download complete: ${job.path}`);
@@ -97,6 +137,9 @@ function renderDownloadStatus(job) {
   } else if (job.state === "cancelling") {
     showStatus("Cancelling download…");
     downloadStatusElement.textContent = "FFmpeg is stopping; please wait.";
+  } else if (job.state === "interrupted") {
+    showStatus(job.error || INTERRUPTED_ERROR);
+    downloadStatusElement.textContent = "Start it again to download the rest.";
   } else {
     showStatus("Download started. FFmpeg is working…");
     downloadStatusElement.textContent = job.metadataError
@@ -134,7 +177,16 @@ function addMediaRow(candidate, sourceUrl, tabId) {
   resume.textContent = "Resume";
   const cancel = document.createElement("button");
   cancel.textContent = "Cancel";
-  const row = { download: button, pause, resume, cancel, count, progress };
+  const row = {
+    download: button,
+    pause,
+    resume,
+    cancel,
+    count,
+    progress,
+    jobId: null,
+    jobStartedAt: 0
+  };
   rowsByUrl.set(candidate.url, row);
   controls.append(button, pause, resume, cancel);
   pause.hidden = true;
@@ -178,7 +230,7 @@ function addMediaRow(candidate, sourceUrl, tabId) {
       });
       if (response?.ok && response.jobId) {
         button.dataset.jobId = response.jobId;
-        rowsByJobId.set(response.jobId, row);
+        claimRow(row, { id: response.jobId, startedAt: Date.now() });
         renderDownloadStatus({ ...response, id: response.jobId, url: candidate.url });
       } else {
         throw new Error(response?.error || "Download failed.");
@@ -208,6 +260,12 @@ browser.runtime.onMessage.addListener((message) => {
  * active." This is a popup-local presentation, not a job state — KEI-56 owns
  * reconciling such jobs in storage.
  */
+/**
+ * A job that is not running and was never reconciled into `interrupted` — a
+ * record written before startup reconciliation existed. It renders into its row
+ * as not running, and deliberately does not touch the headline, because unlike a
+ * reconciled job it carries no trustworthy explanation to show.
+ */
 function renderInterruptedJob(job) {
   const row = rowsByUrl.get(job.url);
   if (!row) return;
@@ -217,7 +275,8 @@ function renderInterruptedJob(job) {
   row.download.disabled = false;
   row.download.textContent = "Download";
   // Deliberately leave `dataset.jobId` unset: nothing may be wired to a task
-  // that no longer exists.
+  // that no longer exists. The row is not claimed either, so a later live job
+  // for this URL takes it cleanly.
   delete row.download.dataset.jobId;
   for (const control of [row.pause, row.resume, row.cancel]) {
     control.hidden = true;
@@ -234,8 +293,14 @@ async function restoreDownloadStatuses() {
       sessionJobIds: response?.sessionJobIds || []
     });
     for (const { job, render } of decisions) {
-      if (render === RENDER_STALE) renderInterruptedJob(job);
-      else renderDownloadStatus(job);
+      // A reconciled `interrupted` job is about media on this page and carries a
+      // real explanation, so it renders in full — that is the message KEI-56
+      // requires after a restart. An unreconciled one only claims its row.
+      if (render === RENDER_STALE && job.state !== "interrupted") {
+        renderInterruptedJob(job);
+      } else {
+        renderDownloadStatus(job);
+      }
     }
   } catch (_) {
     // Status restoration is optional; a new download still works.

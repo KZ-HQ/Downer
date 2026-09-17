@@ -154,6 +154,8 @@ async function loadPopup({ candidates = [], sourceUrl = "https://example.test/fi
     }
   });
   dom.window.browser = stub.api;
+  // Loaded in popup.html order: job-state.js, job-view.js, popup.js.
+  dom.window.eval(extensionSource("job-state.js"));
   dom.window.eval(extensionSource("job-view.js"));
   dom.window.eval(extensionSource("popup.js"));
   await settle();
@@ -190,4 +192,68 @@ async function loadPopup({ candidates = [], sourceUrl = "https://example.test/fi
   };
 }
 
-module.exports = { loadContentScript, loadPopup, pageFixture, extensionSource, settle, plain };
+/**
+ * Load the real background script with a stubbed `browser`, simulating a browser
+ * start: `storage.local` already holds `downloadJobs` from a previous session.
+ *
+ * Returns the storage the script sees, so a test can assert what was persisted
+ * back, plus a driver for the `runtime.onMessage` handler the popup talks to.
+ */
+async function loadBackground({ downloadJobs = [] } = {}) {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "moz-extension://downer-test/background.html",
+    runScripts: "outside-only",
+    virtualConsole: strictConsole()
+  });
+
+  const storage = { downloadJobs: JSON.parse(JSON.stringify(downloadJobs)) };
+  const listeners = [];
+  const warnings = [];
+  dom.window.console.warn = (...args) => warnings.push(args.join(" "));
+  dom.window.browser = {
+    storage: {
+      local: {
+        get: async (defaults) => ({ ...defaults, ...storage }),
+        set: async (values) => Object.assign(storage, JSON.parse(JSON.stringify(values)))
+      }
+    },
+    runtime: {
+      lastError: null,
+      onMessage: { addListener: (listener) => listeners.push(listener) },
+      sendMessage: async () => undefined
+    },
+    cookies: { getAll: async () => [] },
+    notifications: { create: async () => undefined }
+  };
+
+  // Loaded in manifest order.
+  for (const file of ["job-state.js", "task-protocol.js", "hls.js", "background.js"]) {
+    dom.window.eval(extensionSource(file));
+  }
+  await settle();
+
+  return {
+    dom,
+    warnings,
+    /** What the background script has persisted back to storage.local. */
+    stored: () => plain(storage.downloadJobs),
+    /** Send a message as the popup would, and get the reply. */
+    async send(message) {
+      for (const listener of listeners) {
+        const reply = await listener(message);
+        if (reply !== undefined) return plain(reply);
+      }
+      return undefined;
+    }
+  };
+}
+
+module.exports = {
+  loadContentScript,
+  loadPopup,
+  loadBackground,
+  pageFixture,
+  extensionSource,
+  settle,
+  plain
+};

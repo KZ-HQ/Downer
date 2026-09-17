@@ -23,8 +23,13 @@ function classify(jobs, options = {}) {
   });
 }
 
-test("TERMINAL_STATES matches the native protocol's terminal states", () => {
-  assert.deepEqual([...TERMINAL_STATES].sort(), ["cancelled", "completed", "failed"]);
+test("TERMINAL_STATES is the extension's terminal set, from the shared state machine", () => {
+  // Wider than the protocol's on purpose: `interrupted` ends a job for the
+  // extension but never appears on the wire. See extension/job-state.js.
+  const JobState = require("../../extension/job-state.js");
+  assert.equal(TERMINAL_STATES, JobState.TERMINAL_STATES);
+  assert.deepEqual([...TERMINAL_STATES].sort(), ["cancelled", "completed", "failed", "interrupted"]);
+  assert.deepEqual([...JobState.WIRE_TERMINAL_STATE_SET].sort(), ["cancelled", "completed", "failed"]);
 });
 
 test("a terminal job from an earlier session for another page is history", () => {
@@ -52,14 +57,24 @@ test("with several stored jobs none of them can set the headline", () => {
   assert.deepEqual(renderableJobs({ jobs: stored, candidateUrls: [PAGE_MEDIA] }), []);
 });
 
-test("a job persisted mid-download is stale, not live", () => {
-  // The second failure mode from the issue: its URL *does* match a candidate, so
-  // the old code wrote "Downloading…" into the live row, disabled Download, and
-  // showed Pause/Cancel wired to a native task that no longer exists.
+test("a job reconciled to interrupted is stale, not live", () => {
+  // The second failure mode from the issue, now carrying a real state: its URL
+  // does match a candidate, so the old code wrote "Downloading…" into the live
+  // row, disabled Download, and showed Pause/Cancel wired to a native task that
+  // no longer exists.
+  const [decision] = classify([{ id: "interrupted-1", url: PAGE_MEDIA, state: "interrupted" }]);
+  assert.equal(decision.render, RENDER_STALE);
+  assert.equal(decision.reason, "interrupted");
+});
+
+test("a job left non-terminal by an older version is stale too", () => {
+  // Startup reconciliation (KEI-56) turns these into `interrupted` before the
+  // popup ever sees them; this is the defensive path for a record written
+  // before reconciliation existed, which must still never present as live.
   for (const state of ["starting", "preparing", "downloading", "paused", "cancelling"]) {
-    const [decision] = classify([{ id: "interrupted-1", url: PAGE_MEDIA, state }]);
+    const [decision] = classify([{ id: "stale-1", url: PAGE_MEDIA, state }]);
     assert.equal(decision.render, RENDER_STALE, state);
-    assert.equal(decision.reason, "interrupted", state);
+    assert.equal(decision.reason, "unreconciled", state);
   }
 });
 
@@ -82,6 +97,8 @@ test("a job finished in this session still sets the headline", () => {
 });
 
 test("a job finished in an earlier session for this page is history", () => {
+  // `interrupted` is excluded deliberately: it is terminal, but it is about this
+  // page and carries an explanation the user should see.
   for (const state of ["completed", "failed", "cancelled"]) {
     const [decision] = classify([{ id: "old-1", url: PAGE_MEDIA, state }]);
     assert.equal(decision.render, RENDER_HISTORY, state);

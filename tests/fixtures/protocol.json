@@ -8,7 +8,7 @@
   "job_states": {
     "active": ["starting", "downloading", "paused", "cancelling"],
     "terminal": ["completed", "failed", "cancelled"],
-    "extension_only": ["preparing"]
+    "extension_only": ["preparing", "interrupted"]
   },
   "connection_states": ["ready", "rejected", "control-error"],
   "error_codes": [

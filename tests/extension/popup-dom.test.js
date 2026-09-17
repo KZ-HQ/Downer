@@ -165,3 +165,65 @@ test("a page that cannot be scanned explains itself instead of throwing", async 
   const popup = await loadPopup({ candidates: [], tabUrl: "about:debugging" });
   assert.equal(popup.status(), "This page cannot be scanned.");
 });
+
+test("KEI-56: a job interrupted by a browser restart explains itself in the popup", async () => {
+  // What the user sees after reconciliation: the row is usable again and the
+  // headline says why, instead of "Downloading…" with dead controls forever.
+  const { INTERRUPTED_ERROR } = require("../../extension/job-state.js");
+  const popup = await loadPopup({
+    candidates: [{ url: FEATURE, type: "video" }],
+    jobs: [{
+      id: "interrupted-1",
+      url: FEATURE,
+      state: "interrupted",
+      error: INTERRUPTED_ERROR,
+      finishedAt: 123,
+      completedSegments: 3,
+      totalSegments: 10
+    }],
+    sessionJobIds: []
+  });
+
+  assert.equal(popup.status(), INTERRUPTED_ERROR);
+  assert.equal(popup.downloadStatus(), "Start it again to download the rest.");
+  const [row] = popup.rows();
+  assert.equal(row.download.disabled, false, "the row must be usable again");
+  assert.equal(row.download.text, "Download again");
+  assert.equal(row.pause.hidden, true);
+  assert.equal(row.resume.hidden, true);
+  assert.equal(row.cancel.hidden, true);
+});
+
+test("KEI-56: an interrupted job for another page still never sets the headline", async () => {
+  // KEI-75's rule survives the new state: relevance is decided before rendering.
+  const popup = await loadPopup({
+    candidates: [{ url: FEATURE, type: "video" }],
+    jobs: [{
+      id: "interrupted-1",
+      url: "https://other.test/yesterday.mp4",
+      state: "interrupted",
+      error: "Interrupted by browser restart; partial file kept."
+    }]
+  });
+  assert.equal(popup.status(), "1 media URL found.");
+  assert.equal(popup.downloadStatus(), "");
+});
+
+test("KEI-56: the newest job for a URL owns the row, and an older one cannot take it back", async () => {
+  // Two jobs for one URL used to share a row, so whichever rendered last won.
+  const popup = await loadPopup({
+    candidates: [{ url: FEATURE, type: "video" }],
+    // The older job is rendered LAST on purpose: without row ownership it simply
+    // overwrites the live one, which is the defect.
+    jobs: [
+      { id: "new", url: FEATURE, state: "downloading", startedAt: 200, completedSegments: 2, totalSegments: 8 },
+      { id: "old", url: FEATURE, state: "interrupted", error: "old run", startedAt: 100 }
+    ],
+    sessionJobIds: ["new"]
+  });
+
+  const [row] = popup.rows();
+  assert.equal(row.count, "2 / 8 segments", "the live job owns the row");
+  assert.equal(row.download.jobId, "new");
+  assert.equal(row.pause.hidden, false, "and its controls are live");
+});

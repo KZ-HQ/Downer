@@ -119,15 +119,21 @@ ADR.
    media listed on the page being viewed, and only jobs begun in the current
    browser session may set the headline status.
 3. `extension/background.js` owns persistent jobs, cookies, playlist metadata,
-   native task channels, progress state, and log history.
-4. `extension/task-protocol.js` correlates native control acknowledgements and
+   native task channels, progress state, and log history. It reconciles jobs
+   that were still active when the browser closed, since native ports do not
+   survive a restart.
+4. `extension/job-state.js` defines the job state machine once: states, legal
+   transitions, the terminal set, and the predicates the popup renders from.
+   The extension's terminal set is wider than the protocol's — `preparing` and
+   `interrupted` are extension-only and never appear on the wire.
+5. `extension/task-protocol.js` correlates native control acknowledgements and
    terminal responses by job/request ID.
-5. `src/native.rs` implements the Firefox native-messaging protocol, launches
+6. `src/native.rs` implements the Firefox native-messaging protocol, launches
    download workers, forwards progress/log events, and controls FFmpeg.
-6. `src/ffmpeg.rs` invokes FFmpeg without a shell, parses `-progress` output,
+7. `src/ffmpeg.rs` invokes FFmpeg without a shell, parses `-progress` output,
    captures stderr, and supports Unix pause/resume signals.
-7. `src/scraper.rs` resolves source-page media URLs and parses HLS metadata.
-8. `src/output.rs` validates URLs, infers and sanitizes filenames, and
+8. `src/scraper.rs` resolves source-page media URLs and parses HLS metadata.
+9. `src/output.rs` validates URLs, infers and sanitizes filenames, and
    enforces the output collision rule.
 
 ## Required workflow

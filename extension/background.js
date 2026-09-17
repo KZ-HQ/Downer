@@ -11,6 +11,8 @@ const nativeTasks = new Map();
 const sessionJobs = new Set();
 let storageWrite = Promise.resolve();
 
+const { canTransition, isTerminal, reconcileRestoredJobs } = DownerJobState;
+
 const {
   matchingVariant,
   highestBandwidthVariant,
@@ -18,10 +20,19 @@ const {
   parseHlsInfo
 } = DownerHls;
 
+/**
+ * Restore persisted jobs, reconciling any that were still active when the
+ * browser closed. Native ports do not survive a restart and `nativeTasks` starts
+ * empty, so such a job has no process behind it; leaving it as `downloading`
+ * left the popup showing "Downloading…" forever with controls that could only
+ * answer "Download task is no longer active." Reconciliation is persisted, so a
+ * record is only ever reconciled once.
+ */
 const jobsReady = browser.storage.local.get({ downloadJobs: [] }).then((stored) => {
-  for (const job of stored.downloadJobs || []) {
-    if (job?.id) jobs.set(job.id, job);
-  }
+  const restored = reconcileRestoredJobs(stored.downloadJobs);
+  for (const job of restored) jobs.set(job.id, job);
+  const changed = restored.some((job, index) => job !== (stored.downloadJobs || [])[index]);
+  if (changed) void saveJobs();
 });
 
 async function cookieHeader(url) {
@@ -188,8 +199,23 @@ function broadcast(job) {
   browser.runtime.sendMessage({ type: "download-status", job }).catch(() => undefined);
 }
 
+/**
+ * Apply changes to a job. A change of `state` must be a legal transition: a
+ * terminal job stays terminal, so a late or duplicated native event cannot
+ * revive a download that has already finished. Changes that carry no `state`
+ * (progress, logs, control errors) are always applied.
+ */
 function updateJob(jobId, changes) {
-  const job = { ...jobs.get(jobId), ...changes, id: jobId };
+  const current = jobs.get(jobId);
+  if (changes.state !== undefined && !canTransition(current?.state, changes.state)) {
+    console.warn(
+      `Downer: ignoring ${current?.state ?? "(new)"} -> ${changes.state} for job ${jobId}`
+    );
+    const { state: _ignored, ...rest } = changes;
+    if (!Object.keys(rest).length) return current;
+    changes = rest;
+  }
+  const job = { ...current, ...changes, id: jobId };
   jobs.set(jobId, job);
   broadcast(job);
   void saveJobs();
