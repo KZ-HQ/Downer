@@ -42,6 +42,16 @@ playlists are both `index.m3u8`. Title and host both go through the unchanged
 `sanitize_filename`, so nothing the naming policy produces can escape the
 destination directory or land on a Windows device name.
 
+`video` earns its place on that list even though, unlike the others, it is a
+plausible filename a site really chose. It was questioned and deliberately kept:
+the path that matters is the extension, which always sends a title, and there
+`…/video.mp4` becoming the page title is plainly the better name. The one case
+it costs is the CLI without `--name`, where `video.mp4` becomes
+`example.test.mp4` — a wash rather than a harm, and the minority path. If a
+manual pass ever finds real page titles to be mostly site boilerplate, the whole
+fallback order wants revisiting and this list should be reconsidered then, not
+piecemeal now.
+
 The rejected alternative was a naming *template* — `{title} - {host} - {date}`,
 configurable. It is the obvious next request and it is deliberately not here:
 KEI-60 scopes per-site templates out, and a template language is a much larger
@@ -184,5 +194,18 @@ rather than being talked into replacing a file.
   is pinned from both sides: `releasing_never_deletes_output_ffmpeg_actually_wrote`
   and `a_partially_written_download_is_still_preserved` fail if the emptiness
   check is dropped, and `releasing_never_touches_a_path_we_did_not_reserve`
-  covers a target we did not create. What is *not* covered is a file another
-  process writes into our reservation between the failure and the release.
+  covers a target we did not create.
+
+  There is no test for another process writing into our reservation between the
+  failure and the release, and that is a deliberate omission rather than a gap
+  left open. `release_reservation` reads the file's length **fresh at release
+  time**, not from when the reservation was made, so bytes written by anyone at
+  any point before that read are seen and the file is kept. Another *Downer*
+  process cannot be the writer either: it would have to choose the same path,
+  and `create_new` fails on a path that already exists, so it takes ` (2)`
+  instead. What remains is the window between that `metadata` call and
+  `remove_file` — microseconds, requiring a non-Downer process to write into a
+  path Downer created moments earlier. Covering it would mean injecting a seam
+  or a sleep into the release path: production complexity for a sequence this
+  program cannot itself produce. Read this as a bounded risk that was measured,
+  not one that was skipped.
