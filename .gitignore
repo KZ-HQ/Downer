@@ -3,3 +3,5 @@
 /node_modules/
 **/*.rs.bk
 .DS_Store
+/tests/fixtures/media/
+__pycache__/
