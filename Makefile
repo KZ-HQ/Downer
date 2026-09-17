@@ -42,8 +42,19 @@ test: ## Run unit, integration, and doc tests
 version-check: ## Verify the Cargo package and extension manifest versions agree
 	@python3 scripts/check_versions.py
 
-extension-deps: ## Install development-only extension tooling (web-ext)
-	@test -x node_modules/.bin/web-ext || $(NPM) install --no-audit --no-fund
+extension-deps: node_modules/.install-stamp ## Install development-only extension tooling
+
+# Reinstall whenever the manifest or the lockfile changes.
+#
+# Testing for one installed executable is not enough. A dependency with no
+# executable — jsdom — is invisible to such a test, so adding one left every
+# existing checkout short-circuiting the guard and failing later with
+# "Cannot find module", while CI stayed green because it always starts from an
+# empty node_modules. The stamp depends on the files that decide what should be
+# installed, so make reinstalls exactly when they change.
+node_modules/.install-stamp: package.json package-lock.json
+	$(NPM) install --no-audit --no-fund
+	@touch $@
 
 extension-lint: extension-deps ## Lint the Firefox extension with web-ext
 	@node_modules/.bin/web-ext lint --source-dir extension --warnings-as-errors
