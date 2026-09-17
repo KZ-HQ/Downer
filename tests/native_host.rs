@@ -348,7 +348,7 @@ fn successful_download_reports_starting_progress_and_completed() {
 }
 
 #[test]
-fn download_forwards_referer_user_agent_and_cookie_headers_once() {
+fn download_forwards_referer_and_user_agent_once_and_scopes_the_cookie() {
     let temp = tempfile::tempdir().unwrap();
     let ffmpeg = FakeFfmpeg::default().install(temp.path());
     let output_dir = temp.path().join("downloads");
@@ -372,7 +372,33 @@ fn download_forwards_referer_user_agent_and_cookie_headers_once() {
     let headers = &args[headers_positions[0] + 1];
     assert!(headers.contains("User-Agent: Mozilla/5.0 (native host test)"));
     assert!(headers.contains("Referer: https://example.test/watch/123"));
-    assert!(headers.contains("Cookie: session=secret-value"));
+    assert!(
+        !headers.contains("Cookie"),
+        "the cookie is no longer a -headers line: {headers:?}"
+    );
+
+    // KEI-78: the cookie now reaches FFmpeg as a `-cookies` entry scoped to the
+    // media host, so a redirect target or a cross-host HLS segment server does
+    // not receive it. `domain=` is the URL's authority as written, with no
+    // `:443`, because FFmpeg builds the string it matches against before
+    // defaulting the port. Verified against FFmpeg 9.0.1 in
+    // `tests/cookie_scope.rs`; decided in
+    // `docs/adr/0002-cookie-scoping-and-argv-exposure.md`.
+    let cookies_positions: Vec<usize> = args
+        .iter()
+        .enumerate()
+        .filter(|(_, argument)| argument.as_str() == "-cookies")
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(
+        cookies_positions.len(),
+        1,
+        "one -cookies argument: {args:?}"
+    );
+    assert_eq!(
+        args[cookies_positions[0] + 1],
+        "session=secret-value; path=/; domain=example.test"
+    );
 
     // The URL reaches FFmpeg as exactly one argv element, never through a shell.
     let canonical = url::Url::parse(url).unwrap().to_string();

@@ -125,26 +125,20 @@ fn headers_args(cookie: &str) -> Vec<String> {
     vec!["-headers".to_string(), format!("Cookie: {cookie}\r\n")]
 }
 
-/// `-cookies` in Set-Cookie syntax, scoped to one host.
+/// `-cookies` exactly as downer renders it for `media_url`.
 ///
-/// `domain` must be the URL's **authority as written**, not its hostname.
-/// FFmpeg's `get_cookies()` requires the cookie's `domain=` to be a suffix of
-/// the string `http_open_cnx_internal()` built with
-/// `ff_url_join(hoststr, ..., tmp_host, port, NULL)`, and that call happens
-/// *before* the `port < 0` defaulting — so `port` is still -1 for a URL that
-/// states no port. In practice:
+/// Built by calling `scraper::ffmpeg_cookies` rather than by hand, so these
+/// tests check the shipped rendering against a real FFmpeg. A hand-written
+/// string would only prove that *some* spelling scopes correctly, which is the
+/// weaker claim and the one that already misled this file once.
 ///
-/// * `http://localhost:60254/v.mp4` → `domain=localhost:60254`
-/// * `https://cdn.example.test/v.mp4` → `domain=cdn.example.test` (no `:443`)
-///
-/// Getting this wrong is silent: FFmpeg makes the request and simply omits the
-/// cookie, which is how the first run of these tests was misread as `-cookies`
-/// not working at all.
-fn cookies_args(cookie: &str, authority: &str) -> Vec<String> {
-    vec![
-        "-cookies".to_string(),
-        format!("{cookie}; path=/; domain={authority}"),
-    ]
+/// The rule it implements: `domain=` is the URL's authority as written, with a
+/// port only when the URL states one. See `scraper::cookie_domain`.
+fn cookies_args(cookie: &str, media_url: &str) -> Vec<String> {
+    let url = url::Url::parse(media_url).expect("fixture URLs parse");
+    let rendered = downer::scraper::ffmpeg_cookies(&url, Some(cookie))
+        .expect("downer renders a -cookies value for a media URL with a cookie");
+    vec!["-cookies".to_string(), rendered]
 }
 
 fn as_args(owned: &[String]) -> Vec<&str> {
@@ -208,7 +202,7 @@ fn ffmpeg_cookie_scope_across_a_redirect() {
         origin.route("/video.mp4", Reply::Redirect(elsewhere.url("/real.mp4")));
 
         let args = if scoped {
-            cookies_args(SENTINEL, &origin.authority())
+            cookies_args(SENTINEL, &origin.url("/video.mp4"))
         } else {
             headers_args(SENTINEL)
         };
@@ -297,7 +291,7 @@ fn ffmpeg_cookie_scope_for_a_cross_host_hls_segment() {
         );
 
         let args = if scoped {
-            cookies_args(SENTINEL, &origin.authority())
+            cookies_args(SENTINEL, &origin.url("/stream.m3u8"))
         } else {
             headers_args(SENTINEL)
         };
@@ -486,12 +480,31 @@ fn ffmpeg_cookies_option_spelling_matrix() {
         // to a future FFmpeg changing which one it uses.
         |host, port| {
             (
-                "-cookies  both domain= spellings, newline-delimited".to_string(),
+                "-cookies  both spellings, matching one LAST".to_string(),
                 vec![
                     "-cookies".to_string(),
                     format!(
                         "{SENTINEL}; path=/; domain={host}\n\
                          {SENTINEL}; path=/; domain={host}:{port}"
+                    ),
+                ],
+            )
+        },
+        // Same two entries, order swapped. This is the row that matters for
+        // the fallback: with an explicit port the matching entry is the one
+        // carrying the port, so listing it FIRST here mimics the production
+        // case, where the URL states no port and `domain=host` is the matching
+        // entry and comes first. If FFmpeg kept only the last entry of a given
+        // cookie name, the form would silently send nothing in production while
+        // looking fine in this fixture.
+        |host, port| {
+            (
+                "-cookies  both spellings, matching one FIRST".to_string(),
+                vec![
+                    "-cookies".to_string(),
+                    format!(
+                        "{SENTINEL}; path=/; domain={host}:{port}\n\
+                         {SENTINEL}; path=/; domain={host}"
                     ),
                 ],
             )

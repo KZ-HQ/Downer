@@ -281,24 +281,104 @@ pub fn extract_media_urls(html: &str, base: &Url) -> Vec<Url> {
 
 /// Build the CRLF-delimited header block FFmpeg takes as `-headers`.
 ///
+/// Cookies are deliberately **not** here; see [`ffmpeg_cookies`]. FFmpeg applies
+/// `-headers` to every request it makes for an input, so a `Cookie:` line in
+/// this block reaches redirect targets and cross-host HLS segment servers too.
+///
 /// Every value is passed through [`header_value`] first. The block is assembled
 /// by concatenation, so a value carrying its own CRLF would otherwise append
-/// headers of the caller's choosing — a cookie or User-Agent arriving from a
-/// page, from `DOWNER_COOKIE`, or over the native messaging port must not be
-/// able to do that.
-pub fn ffmpeg_headers(
-    referer: Option<&Url>,
-    user_agent: &str,
-    cookie: Option<&str>,
-) -> Option<String> {
+/// headers of the caller's choosing — a User-Agent arriving from a page or over
+/// the native messaging port must not be able to do that.
+pub fn ffmpeg_headers(referer: Option<&Url>, user_agent: &str) -> Option<String> {
     let mut headers = format!("User-Agent: {}\r\n", header_value(user_agent));
     if let Some(referer) = referer {
         headers.push_str(&format!("Referer: {}\r\n", header_value(referer.as_str())));
     }
-    if let Some(cookie) = cookie {
-        headers.push_str(&format!("Cookie: {}\r\n", header_value(cookie)));
-    }
     Some(headers)
+}
+
+/// Render a flat `name=value; name=value` cookie header as the newline-delimited
+/// Set-Cookie syntax FFmpeg takes as `-cookies`, scoped to `url`'s host.
+///
+/// Unlike `-headers`, FFmpeg matches each `-cookies` entry against the host of
+/// the request it is about to make, so a redirect target or a cross-host HLS
+/// segment server gets nothing. Verified against FFmpeg 9.0.1; see
+/// `tests/cookie_scope.rs` and ADR-0002.
+///
+/// The cookies are already correct for this host: the extension collects them
+/// with `browser.cookies.getAll({ url: media.url })`, and the CLI is given a
+/// header the user copied for this media. Scoping the lot to the media host is
+/// therefore faithful, and strictly tighter than sending them everywhere.
+pub fn ffmpeg_cookies(url: &Url, cookie: Option<&str>) -> Option<String> {
+    let domain = cookie_domain(url)?;
+    let entries: Vec<String> = cookie?
+        .split(';')
+        .map(str::trim)
+        .filter(|pair| is_cookie_pair(pair))
+        // `header_value` strips control characters, so a cookie value carrying a
+        // newline cannot open an entry of its own with a domain it chose.
+        .map(|pair| format!("{}; path=/; domain={domain}", header_value(pair)))
+        .collect();
+    (!entries.is_empty()).then(|| entries.join("\n"))
+}
+
+/// Attribute names from Set-Cookie syntax. They are meaningless in a `Cookie:`
+/// request header, which is what this function is given, so a pair named after
+/// one of them is either malformed or an injection attempt.
+const COOKIE_ATTRIBUTES: [&str; 8] = [
+    "domain",
+    "expires",
+    "httponly",
+    "max-age",
+    "partitioned",
+    "path",
+    "samesite",
+    "secure",
+];
+
+/// Is `pair` a `name=value` cookie rather than a Set-Cookie attribute?
+///
+/// Entries are built by appending `; path=/; domain=...`, so a pair that is
+/// itself named `domain` would put a second `domain=` in the entry — and a
+/// cookie *value* containing `;` is enough to smuggle one in. A cookie value
+/// may not contain `;` under RFC 6265 and no browser produces one, but the CLI
+/// takes an arbitrary string, so the pairs are filtered rather than trusted.
+fn is_cookie_pair(pair: &str) -> bool {
+    let Some((name, _)) = pair.split_once('=') else {
+        return false;
+    };
+    let name = name.trim();
+    !name.is_empty()
+        && !name
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_ascii_control())
+        && !COOKIE_ATTRIBUTES
+            .iter()
+            .any(|attribute| name.eq_ignore_ascii_case(attribute))
+}
+
+/// The `domain=` value FFmpeg will accept for requests to `url`: its authority
+/// **exactly as written**.
+///
+/// FFmpeg keeps a cookie only when its `domain=` is a suffix of the string
+/// `http_open_cnx_internal()` builds with
+/// `ff_url_join(hoststr, ..., tmp_host, port, NULL)`, and that call sits *before*
+/// the `if (port < 0) port = 443/80` defaulting. So `port` is whatever
+/// `av_url_split()` found in the URL — negative when the URL states none, for
+/// which `ff_url_join` appends nothing.
+///
+/// * `http://localhost:60254/v.mp4` → `localhost:60254`
+/// * `https://cdn.example.test/v.mp4` → `cdn.example.test`, with no `:443`
+///
+/// Hence [`Url::port`], which is `None` for a default port, and never
+/// `port_or_known_default`. Getting this wrong is silent: FFmpeg makes the
+/// request and simply omits the cookie, at any log level.
+fn cookie_domain(url: &Url) -> Option<String> {
+    let host = url.host_str()?;
+    Some(match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    })
 }
 
 /// Strip the ASCII control characters that would end a header line early, so a
@@ -362,10 +442,91 @@ mod tests {
     #[test]
     fn builds_ffmpeg_headers_for_discovered_media() {
         let referer = Url::parse("https://example.test/watch/123").unwrap();
-        let headers = ffmpeg_headers(Some(&referer), "Test Agent", Some("session=abc")).unwrap();
+        let headers = ffmpeg_headers(Some(&referer), "Test Agent").unwrap();
         assert!(headers.contains("User-Agent: Test Agent\r\n"));
         assert!(headers.contains("Referer: https://example.test/watch/123\r\n"));
-        assert!(headers.contains("Cookie: session=abc\r\n"));
+        assert!(
+            !headers.contains("Cookie"),
+            "cookies go to -cookies, never the -headers block: {headers:?}"
+        );
+    }
+
+    /// The `domain=` value is the URL's authority as written. A default port
+    /// must not appear, and a stated port must. Getting this wrong makes FFmpeg
+    /// drop the cookie silently, so it is pinned here rather than left to the
+    /// FFmpeg-dependent tests in `tests/cookie_scope.rs`, which skip in CI.
+    #[test]
+    fn scopes_cookies_to_the_url_authority_as_written() {
+        let implicit = Url::parse("https://cdn.example.test/video.m3u8").unwrap();
+        assert_eq!(
+            ffmpeg_cookies(&implicit, Some("sid=downer-sentinel")).unwrap(),
+            "sid=downer-sentinel; path=/; domain=cdn.example.test",
+            "a default port must not appear in domain="
+        );
+
+        let explicit = Url::parse("http://localhost:60254/video.mp4").unwrap();
+        assert_eq!(
+            ffmpeg_cookies(&explicit, Some("sid=downer-sentinel")).unwrap(),
+            "sid=downer-sentinel; path=/; domain=localhost:60254",
+            "a stated port must appear in domain="
+        );
+
+        // Even when it is the scheme's default, a stated port is part of the
+        // authority FFmpeg matches against.
+        let stated_default = Url::parse("https://cdn.example.test:443/video.mp4").unwrap();
+        assert!(ffmpeg_cookies(&stated_default, Some("sid=downer-sentinel"))
+            .unwrap()
+            .ends_with("domain=cdn.example.test"));
+    }
+
+    /// One entry per cookie: FFmpeg parses `-cookies` as Set-Cookie lines, so a
+    /// whole `a=1; b=2` header in one entry would make `b=2` an attribute.
+    #[test]
+    fn renders_one_cookies_entry_per_cookie() {
+        let url = Url::parse("https://cdn.example.test/video.mp4").unwrap();
+        let rendered = ffmpeg_cookies(&url, Some("a=1; b=2 ;; c=3")).unwrap();
+        assert_eq!(
+            rendered.lines().collect::<Vec<_>>(),
+            [
+                "a=1; path=/; domain=cdn.example.test",
+                "b=2; path=/; domain=cdn.example.test",
+                "c=3; path=/; domain=cdn.example.test",
+            ]
+        );
+
+        assert!(ffmpeg_cookies(&url, None).is_none());
+        assert!(
+            ffmpeg_cookies(&url, Some("   ")).is_none(),
+            "a header with no name=value pair renders no -cookies argument"
+        );
+    }
+
+    /// Entries are newline-delimited, so a cookie value carrying a newline could
+    /// otherwise open an entry of its own scoped to a domain it chose.
+    #[test]
+    fn a_cookie_value_cannot_open_an_entry_of_its_own() {
+        let url = Url::parse("https://cdn.example.test/video.mp4").unwrap();
+        let rendered = ffmpeg_cookies(
+            &url,
+            Some("sid=downer-sentinel\nevil=1; path=/; domain=attacker.test"),
+        )
+        .unwrap();
+        assert_eq!(rendered.lines().count(), 1, "{rendered:?}");
+        assert!(!rendered.contains("attacker.test"), "{rendered:?}");
+        assert!(
+            rendered.ends_with("domain=cdn.example.test"),
+            "{rendered:?}"
+        );
+        assert_eq!(rendered.matches("domain=").count(), 1, "{rendered:?}");
+
+        // The same smuggling without a newline: a `;` in a cookie value would
+        // otherwise split into pairs named after Set-Cookie attributes.
+        let semicolons =
+            ffmpeg_cookies(&url, Some("sid=x; domain=attacker.test; path=/; secure")).unwrap();
+        assert_eq!(
+            semicolons, "sid=x; path=/; domain=cdn.example.test",
+            "attribute pairs are dropped, not rendered as cookies"
+        );
     }
 
     /// The header block is concatenated, so a value carrying CRLF would append
@@ -373,12 +534,7 @@ mod tests {
     /// cookie must never appear in a test.
     #[test]
     fn header_values_cannot_inject_extra_header_lines() {
-        let headers = ffmpeg_headers(
-            None,
-            "Agent\r\nX-Injected-By-Agent: yes",
-            Some("sid=downer-sentinel\r\nX-Injected-By-Cookie: yes"),
-        )
-        .unwrap();
+        let headers = ffmpeg_headers(None, "Agent\r\nX-Injected-By-Agent: yes").unwrap();
         // FFmpeg splits the block on CRLF, so the line count is the property
         // that matters. The injected text survives inside the value it was
         // smuggled in, which is inert; it just never becomes a header of its own.
@@ -386,13 +542,9 @@ mod tests {
             .split("\r\n")
             .filter(|line| !line.is_empty())
             .collect();
-        assert_eq!(lines.len(), 2, "one line per supplied header: {lines:?}");
+        assert_eq!(lines.len(), 1, "one line per supplied header: {lines:?}");
         assert_eq!(
             lines[0], "User-Agent: AgentX-Injected-By-Agent: yes",
-            "{lines:?}"
-        );
-        assert_eq!(
-            lines[1], "Cookie: sid=downer-sentinelX-Injected-By-Cookie: yes",
             "{lines:?}"
         );
     }
