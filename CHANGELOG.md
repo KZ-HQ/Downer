@@ -33,6 +33,10 @@ The Rust package and the Firefox extension share one product version; see
 - Native messaging host (`downer --native-host`) implementing the `hello`,
   `download`, `pause`, `resume`, `cancel`, and `hls-info` commands with
   streamed progress and FFmpeg log events.
+- A single definition of the extension's download job state machine in
+  `extension/job-state.js` — states, legal transitions, the terminal set, and
+  the presentation predicates the popup uses — replacing the state-name lists
+  that were repeated across `background.js` and `popup.js`.
 - Versioned native messaging protocol (version 1), specified in
   `docs/protocol.md` and decided in
   `docs/adr/0001-native-messaging-protocol.md`. Every request and response
@@ -63,6 +67,21 @@ The Rust package and the Firefox extension share one product version; see
 
 ### Fixed
 
+- A download that was still running when Firefox closed is no longer stuck
+  forever. Native ports do not survive a restart, so such a job had no process
+  behind it, yet it was restored from storage as `downloading`: the popup showed
+  "Downloading…" with a disabled button, and Pause and Cancel could only answer
+  "Download task is no longer active." The background script now reconciles any
+  restored job that was still active into a new terminal `interrupted` state,
+  and the popup explains it and offers the download again. Records written
+  before this state existed are reconciled on load.
+- Two downloads of the same media URL no longer fight over one popup row. The
+  newest job owns the row, and an older one cannot take it back, so a finished
+  or interrupted job can no longer overwrite a live download's progress and
+  controls.
+- A late or duplicated native event can no longer revive a job that has already
+  finished: job state changes are checked against the state machine, and
+  terminal states are final.
 - A malformed, unsupported, or duplicate native messaging request can no longer
   terminate a running download. Such requests are answered with the
   non-terminal `rejected` state instead of `failed`, and the extension now

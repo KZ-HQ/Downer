@@ -5,14 +5,15 @@
  * `extension/hls.js`), because `extension/popup.js` touches the DOM and the
  * `browser` global at load and cannot be imported as-is.
  *
- * This is a **rendering** decision, not a job state. Nothing here is written
- * back to `storage.local`, and no job state is added or renamed: the extension
- * job state machine is owned by KEI-56, and this module deliberately reads the
- * existing states rather than inventing a set of its own.
+ * This is a **rendering** decision, not a job state. The state machine itself
+ * lives in `extension/job-state.js`, and this module reads it rather than
+ * defining a set of its own.
  */
 var DownerJobView = (() => {
-  /** The states in which a job has finished. Mirrors the native protocol's. */
-  const TERMINAL_STATES = new Set(["completed", "failed", "cancelled"]);
+  const JobState = typeof DownerJobState !== "undefined"
+    ? DownerJobState
+    : require("./job-state.js");
+  const { TERMINAL_STATES } = JobState;
 
   /**
    * How the popup should treat one persisted job:
@@ -49,11 +50,16 @@ var DownerJobView = (() => {
         if (thisSession.has(job.id)) {
           return { job, render: RENDER_LIVE, reason: "this-session" };
         }
-        if (!TERMINAL_STATES.has(job.state)) {
-          // Non-terminal but not running: the browser closed mid-download and
-          // `runDownload` never resumes. Showing it as live would wire Pause and
-          // Cancel to a native task that no longer exists.
+        if (job.state === "interrupted") {
+          // Reconciled at startup: it was running when the browser closed. It is
+          // terminal, but it is about media on this page, so the row says so.
           return { job, render: RENDER_STALE, reason: "interrupted" };
+        }
+        if (!TERMINAL_STATES.has(job.state)) {
+          // Non-terminal and not from this session. Startup reconciliation should
+          // have made this `interrupted`; a record written before reconciliation
+          // existed can still land here, and must not present as live either.
+          return { job, render: RENDER_STALE, reason: "unreconciled" };
         }
         return { job, render: RENDER_HISTORY, reason: "earlier-session" };
       });

@@ -135,9 +135,15 @@ starting ──► downloading ⇄ paused        │
 * `cancelling` acknowledges a `cancel`; the `cancelled` terminal event follows
   once FFmpeg has actually stopped.
 * Exactly one terminal event is emitted per job, and nothing follows it.
-* `preparing` is an **extension-only** state. The background script uses it
-  while it fetches cookies and playlist metadata before connecting. The host
-  never emits it and does not accept it.
+* `preparing` and `interrupted` are **extension-only** states. The background
+  script sets `preparing` while it fetches cookies and playlist metadata before
+  connecting, and sets `interrupted` when it restores a job that was still
+  active when the browser closed — native ports do not survive a restart, so
+  such a job has no process behind it. The host never emits or accepts either.
+  `interrupted` is terminal *for the extension*, which makes the extension's
+  terminal set wider than this protocol's: a native channel is still only ever
+  settled by `completed`, `failed`, or `cancelled`. Both states are defined in
+  `extension/job-state.js`.
 
 ## Ordering guarantees
 

@@ -1,4 +1,4 @@
-/* global browser */
+/* global browser, DownerJobState */
 
 /**
  * Client half of the native messaging contract specified in `docs/protocol.md`
@@ -9,8 +9,15 @@
 var DownerTaskProtocol = (() => {
   const PROTOCOL_VERSION = 1;
 
-  /** States that end a job. Only these settle a channel, and only for its own job. */
-  const TERMINAL_STATES = new Set(["completed", "failed", "cancelled"]);
+  /**
+   * States that end a job on the wire. Only these settle a channel, and only for
+   * its own job. Derived from `extension/job-state.js` so there is one
+   * definition, and deliberately the *wire* terminal set: the extension's own
+   * `interrupted` state never appears on this channel.
+   */
+  const TERMINAL_STATES = typeof DownerJobState !== "undefined"
+    ? DownerJobState.WIRE_TERMINAL_STATE_SET
+    : require("./job-state.js").WIRE_TERMINAL_STATE_SET;
   /**
    * Connection-level states. They describe a request, not a job, and must never
    * terminate a channel — that is what let a malformed control message end a
