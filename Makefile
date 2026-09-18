@@ -4,7 +4,7 @@ CARGO ?= cargo
 FFMPEG ?= ffmpeg
 NPM ?= npm
 
-.PHONY: help setup doctor build fmt fmt-check lint test version-check extension-deps extension-lint extension-test extension-check check run install extension extension-package extension-install fixture-site fixture-site-peer clean
+.PHONY: help setup doctor build fmt fmt-check lint test version-check extension-deps extension-lint extension-test extension-check extension-browser extension-e2e check run install extension extension-package extension-install fixture-site fixture-site-peer clean
 
 help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -61,6 +61,17 @@ extension-lint: extension-deps ## Lint the Firefox extension with web-ext
 
 extension-test: extension-deps ## Run the extension's Node unit tests
 	@node --test tests/extension/*.test.js
+
+extension-browser: ## Install the Firefox and geckodriver used by the end-to-end tests
+	./scripts/install_test_browser.sh
+
+# Deliberately not part of `check`: it needs a real browser, which a plain
+# checkout does not have. `make extension-browser` installs one; see
+# docs/e2e-firefox.md.
+extension-e2e: ## Run the end-to-end tests against a real Firefox
+	@node -e 'import("./tests/e2e/browser.mjs").then(({ browserBinaries }) => browserBinaries())' \
+		2>/dev/null || { echo "no Firefox for the end-to-end tests; run 'make extension-browser'" >&2; exit 1; }
+	@node --test tests/e2e/*.test.mjs
 
 extension-check: extension-lint extension-test ## Validate Firefox extension JSON and JavaScript
 	@python3 -m json.tool extension/manifest.json >/dev/null
