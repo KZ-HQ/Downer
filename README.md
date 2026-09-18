@@ -54,6 +54,16 @@ missing, then runs the toolchain check. On other platforms, install Rust and
 FFmpeg using the platform's package manager and use the same build/test
 targets.
 
+`make check` does not need a browser. The end-to-end tests, which install the
+extension into a real headless Firefox, are a separate step:
+
+```sh
+make extension-browser   # once: installs Firefox and geckodriver
+make extension-e2e
+```
+
+See [`docs/e2e-firefox.md`](docs/e2e-firefox.md).
+
 ## Firefox extension
 
 Build and register the native host, then load the `extension/` directory in

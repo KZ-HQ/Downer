@@ -69,6 +69,36 @@ jobs:
             target/release/downer
           if-no-files-found: error
 
+  e2e:
+    name: End-to-end (real Firefox)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # The end-to-end tests need a real browser, which `make check` cannot
+      # assume, so they run here rather than in the `check` job. See
+      # docs/e2e-firefox.md for why the browser comes from conda-forge.
+      - name: Choose a cacheable install prefix
+        run: echo "DOWNER_BROWSER_PREFIX=$HOME/.cache/downer-browser" >> "$GITHUB_ENV"
+
+      - name: Cache the test browser
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/downer-browser
+          key: downer-browser-${{ runner.os }}-v1
+
+      # A no-op when the cache hit: the script returns early if the browser is
+      # already installed.
+      - name: Install Firefox and geckodriver
+        run: make extension-browser
+
+      - name: make extension-e2e
+        run: make extension-e2e
+
   msrv:
     name: Minimum supported Rust version
     runs-on: ubuntu-latest
