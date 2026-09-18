@@ -37,6 +37,16 @@ as it would on a real page.
 `localhost` and `127.0.0.1` are one network but two host *strings*, which is
 what cookie matching compares — so this needs no DNS and no `/etc/hosts` entry.
 
+Each instance titles its landing page after its own host and port, and serves the
+same playlist twice: once as `same-host.m3u8` and once as `index.m3u8`. That
+second name is the point. `index` is on the generic-stem list in `src/output.rs`,
+so a download of it must be named from the page title rather than the URL — and
+since the two instances have different titles, the two origins produce two
+different filenames from an identically named playlist. That is KEI-60's
+acceptance criterion made reproducible; before the `index.m3u8` route existed,
+every playlist here had a distinctive stem and a manual pass could look healthy
+while never exercising title naming at all.
+
 It also serves a *signed* playlist, whose segment URLs carry a token in their
 query string, the way a real CDN's do. That is what makes KEI-55's redaction
 checkable end to end: FFmpeg echoes `Opening '<url>' for reading` per segment at
@@ -192,7 +202,7 @@ def landing_page(site: Site) -> bytes:
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Downer fixture — protected media</title>
+  <title>Downer fixture — {html.escape(site.host)}:{site.port}</title>
   <style>
     body {{ font: 16px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 44rem; }}
     code {{ background: #eee; padding: 0.1em 0.3em; border-radius: 3px; }}
@@ -200,7 +210,7 @@ def landing_page(site: Site) -> bytes:
   </style>
 </head>
 <body>
-  <h1>Downer fixture — protected media</h1>
+  <h1>Downer fixture — {html.escape(site.host)}:{site.port}</h1>
   <p>
     Loading this page set a session cookie for <code>{html.escape(site.host)}</code>.
     Everything under <code>/media/</code> answers <code>403</code> without it, so a
@@ -212,6 +222,18 @@ def landing_page(site: Site) -> bytes:
 
   <h2>Same-host HLS</h2>
   <p><a href="/media/same-host.m3u8">same-host.m3u8</a></p>
+
+  <h2>Generically named HLS</h2>
+  <p>
+    The same playlist served as <code>index.m3u8</code>, which is what most of
+    the web calls its playlists and is therefore the name <em>Downer</em> refuses
+    to take a filename from. Downloading this must produce a file named after
+    this page's title, not <code>index.mp4</code> — and because that title names
+    this instance's host and port, the two fixture origins produce two different
+    filenames from the same playlist name. That is KEI-60's acceptance criterion,
+    reproducibly, without depending on what a live site happens to serve.
+  </p>
+  <p><a href="/media/index.m3u8">index.m3u8</a></p>
 
   <h2>Signed HLS</h2>
   <p>
@@ -372,6 +394,20 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/media/video.mp4":
             self.send_file(site.media.video, "video/mp4")
+            return
+
+        if path == "/media/index.m3u8":
+            # Deliberately the same playlist as `same-host.m3u8` under a generic
+            # name. The stem is what matters: `index` is on the generic list in
+            # `src/output.rs`, so naming falls through to the page title, which
+            # is what KEI-60 exists to make happen. Serving only distinctively
+            # named playlists here would let a manual pass look healthy while
+            # never exercising that path at all.
+            self.respond(
+                HTTPStatus.OK,
+                playlist([f"{site.origin}/media/segment{i}.ts" for i in range(SEGMENT_COUNT)]),
+                "application/vnd.apple.mpegurl",
+            )
             return
 
         if path == "/media/same-host.m3u8":
