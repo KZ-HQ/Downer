@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod diagnostics;
 pub mod error;
 pub mod ffmpeg;
 pub mod host;
@@ -24,6 +25,10 @@ pub const INVALID_INPUT_EXIT: i32 = 2;
 pub const OUTPUT_EXIT: i32 = 3;
 pub const FFMPEG_UNAVAILABLE_EXIT: i32 = 4;
 pub const MEDIA_FAILURE_EXIT: i32 = 5;
+/// `downer doctor` found a failing check. Distinct from
+/// [`FFMPEG_UNAVAILABLE_EXIT`] because a setup failure is not always FFmpeg's:
+/// an unregistered host or an unwritable directory fail here too.
+pub const SETUP_EXIT: i32 = 6;
 
 #[derive(Debug, Clone)]
 pub struct DownloadOptions {
@@ -138,6 +143,7 @@ fn run_command(command: cli::Command) -> DownerResult<()> {
             print_install_report(&report);
             Ok(())
         }
+        cli::Command::Doctor(args) => run_doctor(&args),
         cli::Command::UninstallHost(args) => {
             let report = host::uninstall(&host::UninstallOptions {
                 binary: args.binary,
@@ -176,6 +182,37 @@ fn print_install_report(report: &host::InstallReport) {
     println!(
         "Verify from Firefox: open the Downer popup on a page with media and start a download."
     );
+}
+
+/// Render a diagnostics report to the terminal, and fail if anything failed.
+///
+/// The exit code is the point: a warning is not a failure (an old FFmpeg still
+/// downloads — ADR-0006), so only a failing check makes this non-zero, which is
+/// what lets the command be used in a script.
+fn run_doctor(args: &cli::DoctorArgs) -> DownerResult<()> {
+    // The CLI writes into the working directory when `--dir` is absent, so that
+    // is what gets checked — the same rule the download itself follows.
+    let directory = args.dir.clone().or_else(|| std::env::current_dir().ok());
+    let report = diagnostics::run(directory.as_deref(), args.ffmpeg.as_deref());
+
+    println!(
+        "downer {} (protocol {}), {}",
+        report.host_version, report.protocol_version, report.platform
+    );
+    println!();
+    for check in &report.checks {
+        println!("[{}] {}", check.outcome, check.title);
+        println!("      {}", check.detail);
+        if let Some(remedy) = &check.remedy {
+            println!("      → {remedy}");
+        }
+    }
+    println!();
+
+    if report.outcome().is_failure() {
+        return Err(DownerError::SetupCheckFailed);
+    }
+    Ok(())
 }
 
 /// Optional callbacks for a download.
@@ -353,6 +390,7 @@ pub fn exit_code(error: &DownerError) -> i32 {
         DownerError::FfmpegFailed { .. }
         | DownerError::SourceFetchFailed { .. }
         | DownerError::MediaNotFound(_) => MEDIA_FAILURE_EXIT,
+        DownerError::SetupCheckFailed => SETUP_EXIT,
         DownerError::OutputIo(_) => OUTPUT_EXIT,
         DownerError::NativeIo(_) | DownerError::Host(_) => 1,
     }

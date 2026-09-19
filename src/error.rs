@@ -38,6 +38,12 @@ pub enum DownerError {
         status: Option<i32>,
         stderr: String,
     },
+    /// `downer doctor` found at least one failing check.
+    ///
+    /// It carries no message: the checks have already been printed, each with
+    /// its own detail and remedy, and restating them as an error would say the
+    /// same thing twice in a less useful shape.
+    SetupCheckFailed,
 }
 
 pub type DownerResult<T> = Result<T, DownerError>;
@@ -90,6 +96,9 @@ impl fmt::Display for DownerError {
                 } else {
                     write!(f, ": {}", stderr.trim())
                 }
+            }
+            Self::SetupCheckFailed => {
+                write!(f, "setup checks failed; see the report above")
             }
             Self::FfmpegFailed { status, stderr } => {
                 if stderr.trim().is_empty() {

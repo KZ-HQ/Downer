@@ -438,6 +438,7 @@ async function runDownload(message, jobId) {
     updateJob(jobId, { state: "preparing" });
     const settings = await browser.storage.local.get({
       outputDir: "",
+      ffmpegPath: "",
       ffmpegThreads: null,
       onConflict: DEFAULT_ON_CONFLICT,
       nameFromTitle: DEFAULT_NAME_FROM_TITLE
@@ -464,6 +465,7 @@ async function runDownload(message, jobId) {
       url: message.url,
       source_url: message.sourceUrl,
       output_dir: settings.outputDir || null,
+      ffmpeg: settings.ffmpegPath || null,
       cookie: cookie || null,
       user_agent: navigator.userAgent,
       // Omitted entirely unless the user opted in: absent means "name it
@@ -543,6 +545,66 @@ function beginDownload(message) {
   return { ok: true, jobId, state: job.state, path: null, error: null };
 }
 
+/**
+ * The report's own verdict: the worst outcome across its checks.
+ *
+ * Mirrors `Report::outcome` in `src/diagnostics.rs`. It is recomputed here
+ * rather than sent, because the popup needs only this one word and the panel
+ * needs the checks themselves.
+ */
+function worstOutcome(status) {
+  const checks = (status && status.checks) || [];
+  if (checks.some((check) => check.outcome === "fail")) return "fail";
+  if (checks.some((check) => check.outcome === "warn")) return "warn";
+  return "pass";
+}
+
+function recordSetupCheck(outcome) {
+  return writeStorage(() =>
+    browser.storage.local.set({ setupCheck: { outcome, at: Date.now() } })
+  ).catch(() => undefined);
+}
+
+/**
+ * Run the host's setup checks and return the report.
+ *
+ * This opens its own short-lived connection rather than reusing a download's:
+ * the host runs one process per job, and the user presses this button when no
+ * download is running — often precisely because none can be started.
+ *
+ * A connection that cannot be opened is itself the answer, so the failure is
+ * returned rather than thrown: "the host is unreachable" is the most important
+ * check result the panel can show, and it is the one the host cannot report.
+ */
+async function checkSetup(message) {
+  const port = browser.runtime.connectNative(NATIVE_HOST);
+  const channel = new DownerTaskProtocol.NativeTaskChannel(
+    port,
+    "setup-check",
+    () => {},
+    () => browser.runtime.lastError?.message
+  );
+  try {
+    const compatibility = DownerTaskProtocol.protocolCompatibility(await channel.hello());
+    if (!compatibility.ok) {
+      return { ok: false, error: compatibility.error };
+    }
+    const response = await channel.status({
+      output_dir: message.outputDir || null,
+      ffmpeg: message.ffmpegPath || null
+    });
+    await recordSetupCheck(worstOutcome(response.status));
+    return { ok: true, status: response.status };
+  } catch (error) {
+    // An unreachable host is a failed check, not an absent one: the popup
+    // should warn, and "never ran" would understate what is known.
+    await recordSetupCheck("fail");
+    return { ok: false, error: error.message || String(error) };
+  } finally {
+    channel.close("setup check finished");
+  }
+}
+
 browser.runtime.onMessage.addListener((message) => {
   if (message?.type === "download-media") {
     return Promise.resolve(beginDownload(message));
@@ -552,6 +614,9 @@ browser.runtime.onMessage.addListener((message) => {
       jobs: Array.from(jobs.values()).slice(-MAX_SAVED_JOBS),
       sessionJobIds: Array.from(sessionJobs)
     }));
+  }
+  if (message?.type === "check-setup") {
+    return checkSetup(message);
   }
   if (message?.type === "control-download") {
     return controlDownload(message.jobId, message.command);

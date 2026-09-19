@@ -61,6 +61,7 @@ extension correlates acknowledgements. The extension generates request IDs as
 | Command | Required fields | Optional fields |
 | --- | --- | --- |
 | `hello` | — | `request_id` |
+| `status` | — | `request_id`, `output_dir`, `ffmpeg` |
 | `download` | `url` | `job_id`, `request_id`, `source_url`, `output_dir`, `title`, `on_conflict`, `overwrite`, `cookie`, `user_agent`, `threads`, `total_segments`, `total_duration_ms` |
 | `pause` | `job_id` | `request_id` |
 | `resume` | `job_id` | `request_id` |
@@ -73,6 +74,11 @@ Notes:
   generates one and reports it on the first event. `job_id` stays on the wire
   even though the current process model runs one job per process.
 * `url` and `source_url` must be `http://` or `https://`.
+* `ffmpeg` on `download` and `status` names the FFmpeg the user chose on the
+  Settings page. Absent, the host discovers one as it always has
+  (`DOWNER_FFMPEG`, then the install-time configuration, then the usual paths).
+  It exists because Firefox starts the host with a minimal environment, so
+  neither `PATH` nor `DOWNER_FFMPEG` can carry the answer.
 * `cookie` and `user_agent` are forwarded to FFmpeg as request headers. Cookie
   values are never logged, by either side.
 * `total_segments` / `total_duration_ms` on `download` seed HLS progress before
@@ -111,6 +117,7 @@ to be present.
 | `type` | `state` | Meaning |
 | --- | --- | --- |
 | `hello` | `ready` | Handshake answer. Adds `host_version` and `capabilities`. |
+| `status` | `ready` | Setup-check answer. Adds `host_version`, `capabilities` and `status`. |
 | `ack` | `paused`, `downloading`, `cancelling` | A control command was applied. Echoes `request_id`. |
 | `progress` | `starting`, `downloading`, `paused` | Job progress. May carry `completed_segments`, `total_segments`, `percent`. |
 | `log` | `downloading` | One line of FFmpeg stderr, in `log`, redacted (see below). |
@@ -156,6 +163,59 @@ ended a running download's channel while FFmpeg kept running.
 A `rejected` event ends a job in exactly one case: when its `request_id` is the
 one that would have started that job (`<job_id>-start`), because in that case
 no job was ever created.
+
+## Setup checks (`status`)
+
+`status` answers "is this installation able to download anything?". It is a
+separate command from `hello`, not extra fields on it, because **the handshake
+does no I/O and this does**: it runs `ffmpeg -version` and writes a probe file
+into `output_dir` to see whether a download could be saved there. The handshake
+runs before every download; this runs when a user presses "Check setup". See
+[ADR-0009](adr/0009-setup-diagnostics.md).
+
+The response carries a `status` object:
+
+| Field | Meaning |
+| --- | --- |
+| `host_version` | The product version, as in `hello`. |
+| `protocol_version` | The version this host speaks. |
+| `platform` | `macos`, `linux`, or `unsupported`. |
+| `ffmpeg_path` | The FFmpeg a download started now would use. |
+| `ffmpeg_version` | As FFmpeg reports it, when it could be run. Absent when it could not. |
+| `ffmpeg_ok` | Whether FFmpeg ran at all. An FFmpeg below the supported minimum is still `true`: it downloads (ADR-0006). |
+| `checks` | The individual checks, below. |
+
+Each entry in `checks` has:
+
+| Field | Meaning |
+| --- | --- |
+| `name` | A stable identifier — `host_registration`, `ffmpeg`, `output_directory`. Safe to key UI and tests off; never translated. |
+| `title` | A human label for the check. |
+| `outcome` | `pass`, `warn`, or `fail`. |
+| `detail` | What was found, present even on a pass — "which FFmpeg?" is the question the panel exists to answer. |
+| `remedy` | What to do. Present whenever `outcome` is not `pass`, absent when it is. |
+
+`warn` is a real third outcome rather than a soft failure: an FFmpeg older than
+the supported minimum still downloads, so calling it a failure would be wrong,
+and saying nothing would be wrong too.
+
+`output_dir` absent does **not** skip the directory check: the host resolves the
+same default `download` would use — the platform's Downloads folder — and checks
+that. Most users configure no directory, so skipping would leave the commonest
+setup the one nothing is checked for. The check is skipped only when no default
+can be resolved at all, which on Linux means a machine with no XDG user-dirs
+configuration; there the download itself has no default either.
+
+The checks the host cannot perform are the ones about reaching it. When the
+registration is missing `connectNative` fails and there is no host to ask; when
+the two sides disagree on `protocol_version` the handshake is refused by
+whichever side is newer. The extension renders these itself, as
+`host_connection` and `protocol_version`, because they need different
+instructions — re-registering the host does not fix a version mismatch, which is
+ordinary upgrade skew between two halves that ship separately.
+
+`downer doctor` reports the same checks from the command line, minus those two:
+a CLI run speaks to no extension.
 
 ## Per-job state machine
 

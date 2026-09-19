@@ -86,6 +86,17 @@ var DownerTaskProtocol = (() => {
       return this.send("hello", {}, timeoutMs, false);
     }
 
+    /**
+     * Ask the host to run its setup checks.
+     *
+     * Longer than the handshake's timeout on purpose: unlike `hello`, this does
+     * I/O — it runs `ffmpeg -version` and writes a probe file — so it is
+     * allowed to take a moment. See `src/diagnostics.rs`.
+     */
+    status(request = {}, timeoutMs = 15000) {
+      return this.send("status", request, timeoutMs, false);
+    }
+
     start(request) {
       this.startRequestId = `${this.jobId}-start`;
       this.port.postMessage({

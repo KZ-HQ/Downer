@@ -76,3 +76,14 @@ button {
 a {
   color: #145dbf;
 }
+
+/* The setup warning is a notice, not an error: it sits above the candidate
+   list without taking the visual weight of a failed download. */
+.setup-warning {
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  border-left: 3px solid #b8860b;
+  background: #fff8e1;
+  color: #5b4300;
+  font-size: 12px;
+}

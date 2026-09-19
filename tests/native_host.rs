@@ -1116,6 +1116,135 @@ fn malformed_json_is_rejected_without_a_job_id() {
     assert_eq!(event["request_id"], json!("after-bad-json"));
 }
 
+/// KEI-59: `status` reports the setup checks, and does so without a download.
+///
+/// The checks themselves live in `src/diagnostics.rs` and are unit-tested
+/// there; what this pins is the wire shape — that every check carries a name,
+/// an outcome from the documented set, and a remedy whenever it is not a pass.
+#[test]
+fn status_reports_every_check_with_an_outcome_and_a_remedy() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg::default().install(temp.path());
+    let downloads = temp.path().join("downloads");
+    std::fs::create_dir(&downloads).unwrap();
+    let mut host = NativeHost::start(&ffmpeg);
+
+    host.send(&json!({
+        "command": "status",
+        "protocol_version": 1,
+        "request_id": "status-1",
+        "output_dir": downloads,
+    }));
+    let event = host.next_event();
+    assert_envelope(&event, "status");
+    assert_eq!(event["ok"], json!(true));
+    assert_eq!(event["request_id"], json!("status-1"));
+    assert_eq!(event["host_version"], json!(env!("CARGO_PKG_VERSION")));
+
+    let status = &event["status"];
+    assert_eq!(status["protocol_version"], json!(1));
+    assert_eq!(status["host_version"], json!(env!("CARGO_PKG_VERSION")));
+    assert!(
+        status["ffmpeg_path"].is_string(),
+        "status names the FFmpeg a download would use: {event}"
+    );
+
+    let outcomes = protocol_strings("/check_outcomes");
+    let checks = status["checks"].as_array().expect("checks are an array");
+    assert!(!checks.is_empty(), "at least one check ran: {event}");
+    for check in checks {
+        let name = check["name"].as_str().expect("a check has a name");
+        let outcome = check["outcome"].as_str().expect("a check has an outcome");
+        assert!(
+            outcomes.iter().any(|documented| documented == outcome),
+            "{name} reports a documented outcome, got {outcome}"
+        );
+        assert!(
+            check["detail"].is_string(),
+            "{name} says what was found, including on a pass"
+        );
+        // A failure the user cannot act on is the defect this command exists
+        // to remove, so a remedy is mandatory whenever something is wrong.
+        if outcome != "pass" {
+            assert!(
+                check["remedy"].is_string(),
+                "{name} is {outcome} and must say what to do: {check}"
+            );
+        }
+    }
+
+    // The directory check ran against the directory that was sent, and the
+    // probe file it writes does not survive.
+    let directory_check = checks
+        .iter()
+        .find(|check| check["name"] == json!("output_directory"))
+        .expect("the output directory was checked");
+    assert_eq!(directory_check["outcome"], json!("pass"));
+    assert_eq!(
+        std::fs::read_dir(&downloads).unwrap().count(),
+        0,
+        "the write probe is cleaned up"
+    );
+}
+
+/// `status` without an `output_dir` checks the directory a download would
+/// actually use, rather than skipping the check.
+///
+/// Most users configure no directory, so the host falls back to the platform's
+/// Downloads folder — the same fallback `download` applies. Skipping here would
+/// mean the commonest setup is the one nothing is checked for.
+#[test]
+fn status_without_an_output_directory_checks_the_default_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg::default().install(temp.path());
+
+    // A temporary HOME with a Downloads folder the platform can discover. On
+    // Linux that means the XDG user-dirs file; without one there is no default
+    // to check, which is a real configuration and not what this test is about.
+    let home = temp.path().join("home");
+    let downloads = home.join("Downloads");
+    std::fs::create_dir_all(&downloads).unwrap();
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    std::fs::write(
+        home.join(".config").join("user-dirs.dirs"),
+        format!("XDG_DOWNLOAD_DIR=\"{}\"\n", downloads.display()),
+    )
+    .unwrap();
+    let mut host = NativeHost::start_discovering(&home, Some(&ffmpeg));
+
+    host.send(&json!({
+        "command": "status",
+        "protocol_version": 1,
+        "request_id": "status-2",
+    }));
+    let event = host.next_event();
+    assert_envelope(&event, "status");
+    let checks = event["status"]["checks"]
+        .as_array()
+        .expect("checks are an array");
+    let directory = checks
+        .iter()
+        .find(|check| check["name"] == json!("output_directory"))
+        .expect("the default download directory is checked, not skipped");
+    // Which directory, and whether it exists, depends on the machine; that it
+    // was named is the contract.
+    assert_eq!(
+        directory["outcome"],
+        json!("pass"),
+        "the discovered Downloads folder is writable: {directory}"
+    );
+    assert!(
+        directory["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("Downloads")),
+        "the check names the directory it looked at: {directory}"
+    );
+    assert!(
+        checks.iter().any(|check| check["name"] == json!("ffmpeg")),
+        "the other checks still run: {event}"
+    );
+}
+
 #[test]
 fn hello_reports_the_protocol_version_host_version_and_capabilities() {
     let temp = tempfile::tempdir().unwrap();

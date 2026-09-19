@@ -4,6 +4,7 @@ const { redactText } = DownerRedact;
 const { trimLogEntries } = DownerJobLogs;
 
 const outputElement = document.getElementById("output-dir");
+const ffmpegPathElement = document.getElementById("ffmpeg-path");
 const threadsElement = document.getElementById("ffmpeg-threads");
 const conflictElement = document.getElementById("on-conflict");
 const titleNamingElement = document.getElementById("name-from-title");
@@ -76,12 +77,14 @@ const DEFAULT_NAME_FROM_TITLE = false;
 
 browser.storage.local.get({
   outputDir: "",
+  ffmpegPath: "",
   ffmpegThreads: null,
   onConflict: DEFAULT_ON_CONFLICT,
   nameFromTitle: DEFAULT_NAME_FROM_TITLE
 }).then((settings) => {
   titleNamingElement.checked = settings.nameFromTitle === true;
   outputElement.value = settings.outputDir;
+  ffmpegPathElement.value = settings.ffmpegPath || "";
   threadsElement.value = Number.isInteger(settings.ffmpegThreads) ? settings.ffmpegThreads : "";
   // An unknown stored value falls back rather than being offered: the host
   // refuses a policy it does not understand.
@@ -101,6 +104,7 @@ document.getElementById("save").addEventListener("click", async () => {
   }
   await browser.storage.local.set({
     outputDir: outputElement.value.trim(),
+    ffmpegPath: ffmpegPathElement.value.trim(),
     ffmpegThreads,
     onConflict: conflictElement.value,
     nameFromTitle: titleNamingElement.checked
@@ -132,4 +136,145 @@ browser.runtime.sendMessage({ type: "get-download-statuses" }).then((response) =
     logsByJob.set(jobId, entries);
   }
   renderLogs();
+});
+
+/**
+ * Render one setup check.
+ *
+ * The outcome vocabulary is the host's (`pass`, `warn`, `fail`) and is not
+ * reinterpreted here: a warning is a real third state, not a soft failure. See
+ * `src/diagnostics.rs`.
+ */
+function renderCheck(check) {
+  const item = document.createElement("li");
+  item.className = `check check-${check.outcome}`;
+
+  const title = document.createElement("p");
+  title.className = "check-title";
+  title.textContent = `${OUTCOME_LABELS[check.outcome] || check.outcome} ${check.title}`;
+  item.append(title);
+
+  const detail = document.createElement("p");
+  detail.className = "check-detail";
+  detail.textContent = check.detail;
+  item.append(detail);
+
+  if (check.remedy) {
+    const remedy = document.createElement("p");
+    remedy.className = "check-remedy";
+    remedy.textContent = check.remedy;
+    item.append(remedy);
+  }
+  return item;
+}
+
+const OUTCOME_LABELS = { pass: "OK", warn: "Warning", fail: "Failed" };
+
+function renderSetupReport(report) {
+  resultsElement.textContent = "";
+
+  const summary = document.createElement("p");
+  summary.className = "check-summary";
+  summary.textContent =
+    `downer ${report.host_version} (protocol ${report.protocol_version}) on ${report.platform}`;
+  resultsElement.append(summary);
+
+  const list = document.createElement("ul");
+  list.className = "checks";
+  for (const check of report.checks || []) {
+    list.append(renderCheck(check));
+  }
+  resultsElement.append(list);
+}
+
+/**
+ * Turn a failure to reach or agree with the host into a rendered check.
+ *
+ * Three different problems arrive here as one exception, and they need three
+ * different instructions:
+ *
+ * - no registration at all, which `downer install-host` fixes;
+ * - a registration Firefox cannot execute;
+ * - a host and extension built from different protocol versions, which is
+ *   ordinary upgrade skew — the two ship separately, so rebuilding one without
+ *   the other is easy — and which `install-host` alone does **not** fix.
+ *
+ * The host cannot report any of these: in the first two there is nothing to
+ * ask, and in the third it either refused the handshake or answered a version
+ * this extension will not talk to.
+ */
+function connectionCheck(message) {
+  const text = String(message || "");
+
+  // Either direction of mismatch: the host refused our version, or answered
+  // with one we refuse. Both mean the two halves are from different builds.
+  if (/protocol version/i.test(text)) {
+    return {
+      name: "protocol_version",
+      title: "Native host and extension speak the same protocol",
+      outcome: "fail",
+      detail: text,
+      remedy:
+        "The host and the extension are from different builds. Update whichever is older: "
+        + "rebuild and reinstall the host with `downer install-host`, or load a matching "
+        + "extension build."
+    };
+  }
+  if (/no such native application/i.test(text)) {
+    return {
+      name: "host_connection",
+      title: "Native host reachable",
+      outcome: "fail",
+      detail: text,
+      remedy: "Firefox has no registration for the native host. Install it with `downer install-host`."
+    };
+  }
+  if (/permission denied|access/i.test(text)) {
+    return {
+      name: "host_connection",
+      title: "Native host reachable",
+      outcome: "fail",
+      detail: text,
+      remedy:
+        "Firefox found the registration but could not run it. Re-run `downer install-host`, "
+        + "and check the launcher is executable."
+    };
+  }
+  return {
+    name: "host_connection",
+    title: "Native host reachable",
+    outcome: "fail",
+    detail: text,
+    remedy: "Could not reach the native host. Install or re-register it with `downer install-host`."
+  };
+}
+
+function renderSetupFailure(error) {
+  resultsElement.textContent = "";
+  resultsElement.append(
+    renderCheck(connectionCheck(error && error.message ? error.message : error))
+  );
+}
+
+const checkButton = document.getElementById("check-setup");
+const resultsElement = document.getElementById("setup-results");
+
+checkButton.addEventListener("click", async () => {
+  checkButton.disabled = true;
+  resultsElement.textContent = "Checking…";
+  try {
+    const response = await browser.runtime.sendMessage({
+      type: "check-setup",
+      outputDir: outputElement.value.trim() || null,
+      ffmpegPath: ffmpegPathElement.value.trim() || null
+    });
+    if (!response || !response.ok) {
+      throw new Error((response && response.error) || "The native host did not answer.");
+    }
+    renderSetupReport(response.status);
+  } catch (error) {
+    renderSetupFailure(error);
+  } finally {
+    checkButton.disabled = false;
+  }
 });

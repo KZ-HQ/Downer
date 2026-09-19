@@ -203,7 +203,7 @@ async function loadPopup({ candidates = [], sourceUrl = "https://example.test/fi
  * wired to a stubbed background. Returns readers for what the Settings page
  * shows and a `receive` driver for the messages the background script sends it.
  */
-async function loadOptions({ jobs = [], logs = {}, settings = {} } = {}) {
+async function loadOptions({ jobs = [], logs = {}, settings = {}, setupResponse } = {}) {
   const dom = new JSDOM(extensionSource("options.html"), {
     url: "moz-extension://downer-test/options.html",
     runScripts: "outside-only",
@@ -231,6 +231,10 @@ async function loadOptions({ jobs = [], logs = {}, settings = {} } = {}) {
         if (message?.type === "get-download-statuses") return { jobs, sessionJobIds: [] };
         if (message?.type === "get-download-logs") return { logs };
         if (message?.type === "clear-download-logs") return { ok: true };
+        if (message?.type === "check-setup") {
+          if (setupResponse instanceof Error) throw setupResponse;
+          return setupResponse;
+        }
         return undefined;
       }
     }
@@ -266,6 +270,18 @@ async function loadOptions({ jobs = [], logs = {}, settings = {} } = {}) {
       filter.value = jobId;
       filter.dispatchEvent(new dom.window.Event("change"));
     },
+    /** Press "Check setup" and wait for the panel to render. */
+    checkSetup() {
+      document.getElementById("check-setup").dispatchEvent(new dom.window.Event("click"));
+      return settle();
+    },
+    /** The setup panel's text, as the user reads it. */
+    setupText: () => document.getElementById("setup-results").textContent,
+    /** The outcome class on each rendered check, in order. */
+    setupOutcomes: () =>
+      [...document.querySelectorAll("#setup-results .check")].map((node) =>
+        node.className.replace("check ", "")
+      ),
     /** Press "Clear logs". */
     clearLogs() {
       document.getElementById("clear-logs").dispatchEvent(new dom.window.Event("click"));

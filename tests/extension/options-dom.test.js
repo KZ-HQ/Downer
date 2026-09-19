@@ -103,3 +103,78 @@ test("a job with no logs does not break the view", async () => {
   options.selectJob("b");
   assert.equal(options.logText(), "No FFmpeg logs yet.");
 });
+
+test("the FFmpeg path setting round-trips and is saved trimmed", async () => {
+  const page = await loadOptions({ settings: { ffmpegPath: "/opt/homebrew/bin/ffmpeg" } });
+  assert.equal(page.field("ffmpeg-path").value, "/opt/homebrew/bin/ffmpeg");
+
+  page.field("ffmpeg-path").value = "  /usr/local/bin/ffmpeg  ";
+  await page.save();
+  assert.equal(page.saved().at(-1).ffmpegPath, "/usr/local/bin/ffmpeg");
+});
+
+test("Check setup renders every check with its outcome and remedy", async () => {
+  const page = await loadOptions({
+    setupResponse: {
+      ok: true,
+      status: {
+        host_version: "0.5.0",
+        protocol_version: 1,
+        platform: "linux",
+        checks: [
+          { name: "host_registration", title: "Native host registered with Firefox", outcome: "pass", detail: "/home/u/.mozilla/x.json" },
+          { name: "ffmpeg", title: "FFmpeg available", outcome: "warn", detail: "ffmpeg is FFmpeg 6.1.1", remedy: "Upgrade FFmpeg." },
+          { name: "output_directory", title: "Download directory writable", outcome: "fail", detail: "/nope cannot be written to", remedy: "Choose a directory you can write to." }
+        ]
+      }
+    }
+  });
+  await page.checkSetup();
+
+  // The host's three outcomes stay three outcomes: a warning is not folded
+  // into a failure, because it means downloads still work (ADR-0006).
+  assert.deepEqual(page.setupOutcomes(), ["check-pass", "check-warn", "check-fail"]);
+
+  const text = page.setupText();
+  assert.match(text, /downer 0\.5\.0 \(protocol 1\) on linux/);
+  assert.match(text, /FFmpeg 6\.1\.1/);
+  assert.match(text, /Upgrade FFmpeg\./);
+  assert.match(text, /Choose a directory you can write to\./);
+});
+
+test("an unreachable host is itself reported as a failed check, with what to do", async () => {
+  const page = await loadOptions({
+    setupResponse: { ok: false, error: "No such native application com.downer.native" }
+  });
+  await page.checkSetup();
+
+  assert.deepEqual(page.setupOutcomes(), ["check-fail"]);
+  const text = page.setupText();
+  assert.match(text, /No such native application/);
+  // The remediation has to be written by the extension: there is no host to
+  // ask, which is exactly the case the panel exists for.
+  assert.match(text, /downer install-host/);
+});
+
+test("a protocol mismatch says to update a build, not to re-register the host", async () => {
+  // The host refuses the handshake when the extension is newer; the extension
+  // refuses the answer when the host is newer. Both arrive here as one
+  // exception, and `downer install-host` fixes neither — the two halves ship
+  // separately, so this is ordinary upgrade skew rather than a broken install.
+  const page = await loadOptions({
+    setupResponse: {
+      ok: false,
+      error: "unsupported protocol version 99; this host speaks version 1"
+    }
+  });
+  await page.checkSetup();
+
+  const text = page.setupText();
+  assert.match(text, /unsupported protocol version 99/);
+  assert.match(text, /different builds/);
+  assert.doesNotMatch(
+    text,
+    /Install or re-register/,
+    "the generic registration advice would not fix a version mismatch"
+  );
+});

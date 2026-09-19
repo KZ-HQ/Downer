@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     io::{self, Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
@@ -32,6 +32,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 const LEGACY_PROTOCOL_VERSION: u32 = 0;
 
 const EVENT_HELLO: &str = "hello";
+const EVENT_STATUS: &str = "status";
 const EVENT_ACK: &str = "ack";
 const EVENT_PROGRESS: &str = "progress";
 const EVENT_LOG: &str = "log";
@@ -77,6 +78,15 @@ struct NativeRequest {
     source_url: Option<String>,
     #[serde(default)]
     output_dir: Option<PathBuf>,
+    /// The FFmpeg the user chose on the Settings page.
+    ///
+    /// Firefox launches the host with a minimal environment, so `DOWNER_FFMPEG`
+    /// cannot reach it and the user needs some way to say which FFmpeg to use.
+    /// Absent, the host discovers one as it always has. This does not widen who
+    /// can run what: the host already runs an FFmpeg named by its own config
+    /// file, and only the pinned extension ID can talk to it at all.
+    #[serde(default)]
+    ffmpeg: Option<PathBuf>,
     #[serde(default)]
     overwrite: bool,
     /// What to do when the inferred output path is taken. Absent means
@@ -128,6 +138,8 @@ struct NativeResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     capabilities: Option<Capabilities>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<crate::diagnostics::Report>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     job_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     state: Option<String>,
@@ -152,6 +164,7 @@ impl Default for NativeResponse {
             error_code: None,
             host_version: None,
             capabilities: None,
+            status: None,
             job_id: None,
             state: None,
             completed_segments: None,
@@ -219,6 +232,11 @@ pub fn run_stdio() -> DownerResult<()> {
         }
         let response = match request.command.as_str() {
             "hello" => hello_response(request.request_id),
+            "status" => status_response(
+                request.output_dir.as_deref(),
+                request.ffmpeg.as_deref(),
+                request.request_id,
+            ),
             "pause" | "resume" | "cancel" => control_download(request, &tasks),
             "hls-info" => update_hls_info(request, &tasks),
             command => rejected(
@@ -244,6 +262,43 @@ fn hello_response(request_id: Option<String>) -> NativeResponse {
             pause_resume: cfg!(unix),
             hls_info: true,
         }),
+        request_id,
+        ..NativeResponse::default()
+    }
+}
+
+/// Answer the setup-diagnostics request.
+///
+/// Unlike `hello` this does I/O — it runs `ffmpeg -version` and writes a probe
+/// file into `output_dir` — which is exactly why it is a separate command and
+/// not part of the handshake: the handshake is on the path of every download,
+/// and this is on the path of a button the user pressed.
+///
+/// `output_dir` is the extension's configured download directory. Absent, the
+/// directory check is skipped rather than guessed at.
+fn status_response(
+    output_dir: Option<&Path>,
+    ffmpeg: Option<&Path>,
+    request_id: Option<String>,
+) -> NativeResponse {
+    // Resolve the directory exactly as `download` does, so the check reports on
+    // the directory a download would really use. Most users configure none, and
+    // checking nothing in the commonest case would make the panel's promise
+    // that downloads "can be written where you asked" untrue by default.
+    let directory = output_dir
+        .map(Path::to_path_buf)
+        .or_else(dirs::download_dir);
+    let report = crate::diagnostics::run(directory.as_deref(), ffmpeg);
+    NativeResponse {
+        event_type: EVENT_STATUS,
+        ok: true,
+        state: Some(STATE_READY.to_string()),
+        host_version: Some(env!("CARGO_PKG_VERSION")),
+        capabilities: Some(Capabilities {
+            pause_resume: cfg!(unix),
+            hls_info: true,
+        }),
+        status: Some(report),
         request_id,
         ..NativeResponse::default()
     }
@@ -617,7 +672,7 @@ fn download(
         overwrite: request.overwrite,
         on_conflict: request.on_conflict,
         naming: NamingHints::new(request.title),
-        ffmpeg: ffmpeg_path(),
+        ffmpeg: request.ffmpeg.clone().unwrap_or_else(ffmpeg_path),
         user_agent,
         cookie: request.cookie,
         threads: request.threads,
@@ -740,7 +795,7 @@ fn progress_response(
 /// `docs/adr/0008-relocatable-native-host-installation.md`). Only then the
 /// Homebrew locations and a bare `ffmpeg` resolved against whatever PATH the
 /// browser happened to pass down.
-fn ffmpeg_path() -> PathBuf {
+pub fn ffmpeg_path() -> PathBuf {
     if let Some(path) = std::env::var_os("DOWNER_FFMPEG") {
         return PathBuf::from(path);
     }

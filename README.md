@@ -108,6 +108,29 @@ afterwards. `downer install-host --link` registers the running binary where it
 is instead of copying it, which is right for a binary you keep in a fixed place
 yourself.
 
+### Checking the setup
+
+`downer doctor` reports whether everything a download needs is in place: the
+native host is registered with Firefox and its launcher still exists, FFmpeg
+runs and is new enough, and — with `--dir` — that downloads can be written
+where you want them.
+
+```sh
+downer doctor --dir ~/Downloads
+```
+
+Each check prints what was found and, when something is wrong, what to do about
+it. It exits `6` if any check **failed**; a **warning** exits `0`, because a
+warning means downloads still work. An FFmpeg older than the supported minimum
+is the usual warning: it downloads, with the caveats in
+[`docs/adr/0006-ffmpeg-version-detection.md`](docs/adr/0006-ffmpeg-version-detection.md).
+
+The same checks are available from the extension: **Settings → Check setup**
+runs them in the native host and shows the results, which is the place to look
+when a download fails before FFmpeg starts. The Settings page also has an
+**FFmpeg path** field — Firefox starts the native host with a minimal
+environment, so a `PATH` or `DOWNER_FFMPEG` set in a shell cannot reach it.
+
 Firefox launches the native host with a minimal environment, so `DOWNER_FFMPEG`
 is not available to it. If FFmpeg is somewhere the host would not look — it
 searches Homebrew's standard locations and then `PATH` — record it at install
@@ -242,7 +265,8 @@ valid browser cookie or a direct signed media URL is required.
 
 Use `downer --help` for all options. Exit status `2` indicates invalid input,
 `3` an output-path problem, `4` an FFmpeg that is unavailable or older than the
-supported minimum, and `5` a media or FFmpeg failure.
+supported minimum, `5` a media or FFmpeg failure, and `6` a failing setup check
+from `downer doctor`.
 
 ## Roadmap, status, and handoffs
 
