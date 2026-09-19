@@ -1,17 +1,122 @@
 use std::{
+    collections::HashMap,
     ffi::OsString,
+    fmt,
     io::{BufRead, BufReader, Read},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{ChildStderr, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     thread,
     time::Duration,
 };
 
 use crate::error::{DownerError, DownerResult};
+
+/// The oldest FFmpeg this project supports, as documented in `README.md`.
+///
+/// The two HLS options in [`FfmpegCommand`] exist only from here onwards, which
+/// is what makes an older FFmpeg worth naming rather than letting it fail as an
+/// argument-parsing error.
+pub const MINIMUM_FFMPEG: FfmpegVersion = FfmpegVersion {
+    major: 7,
+    minor: 1,
+    patch: None,
+};
+
+/// The HLS options that loosen FFmpeg's segment-extension checking. They are
+/// dropped for an FFmpeg that predates them; see
+/// `docs/adr/0006-ffmpeg-version-detection.md`.
+const SEGMENT_EXTENSION_OPTIONS: [&str; 2] = ["-allowed_segment_extensions", "-extension_picky"];
+
+/// A version as FFmpeg reports it on the first line of `ffmpeg -version`.
+///
+/// Only `major` and `minor` take part in the comparison; `patch` is kept so the
+/// diagnostic can name the build the user actually has (`6.1.1`) rather than a
+/// truncation of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FfmpegVersion {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: Option<u32>,
+}
+
+impl FfmpegVersion {
+    /// Whether this version is at least [`MINIMUM_FFMPEG`].
+    pub fn meets_minimum(&self) -> bool {
+        (self.major, self.minor) >= (MINIMUM_FFMPEG.major, MINIMUM_FFMPEG.minor)
+    }
+}
+
+impl fmt::Display for FfmpegVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}", self.major, self.minor)?;
+        match self.patch {
+            Some(patch) => write!(f, ".{patch}"),
+            None => Ok(()),
+        }
+    }
+}
+
+/// The version of the FFmpeg at `program`, detected once per executable per
+/// process.
+///
+/// `None` means "could not tell": FFmpeg would not run, or reported something
+/// this cannot parse, such as a git-snapshot build. An undetectable version is
+/// never treated as too old — the documented contract is that FFmpeg is 7.1 or
+/// newer, and a failed probe is no reason to change how a download is built.
+pub fn version(program: &Path) -> Option<FfmpegVersion> {
+    static PROBED: OnceLock<Mutex<HashMap<PathBuf, Option<FfmpegVersion>>>> = OnceLock::new();
+    let probed = PROBED.get_or_init(|| Mutex::new(HashMap::new()));
+    // A poisoned cache is not worth failing a download over: probe again.
+    let Ok(mut probed) = probed.lock() else {
+        return probe_version(program);
+    };
+    *probed
+        .entry(program.to_path_buf())
+        .or_insert_with(|| probe_version(program))
+}
+
+/// Run `ffmpeg -version` and read the version off its first line.
+fn probe_version(program: &Path) -> Option<FfmpegVersion> {
+    let output = Command::new(program)
+        .arg("-version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_version(stdout.lines().next()?)
+}
+
+/// Parse `ffmpeg version 6.1.1-3ubuntu5 Copyright (c) …` into `6.1.1`.
+///
+/// Distribution builds suffix the version (`6.1.1-3ubuntu5`) and some builds
+/// prefix it (`n4.4.1`), so the numeric prefix of the token after `version` is
+/// what counts. A snapshot build names no release (`N-109755-g1b9f9c1a3d`) and
+/// yields `None`.
+fn parse_version(line: &str) -> Option<FfmpegVersion> {
+    let token = line
+        .split_whitespace()
+        .skip_while(|word| *word != "version")
+        .nth(1)?;
+    let token = token
+        .strip_prefix('n')
+        .filter(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+        .unwrap_or(token);
+    let numeric: String = token
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let mut parts = numeric.split('.').filter(|part| !part.is_empty());
+    Some(FfmpegVersion {
+        major: parts.next()?.parse().ok()?,
+        minor: parts.next().and_then(|part| part.parse().ok()).unwrap_or(0),
+        patch: parts.next().and_then(|part| part.parse().ok()),
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct FfmpegCommand {
@@ -193,9 +298,9 @@ impl FfmpegCommand {
             OsString::from("-stats"),
         ];
         if url.to_ascii_lowercase().contains(".m3u8") {
-            args.push(OsString::from("-allowed_segment_extensions"));
+            args.push(OsString::from(SEGMENT_EXTENSION_OPTIONS[0]));
             args.push(OsString::from("ALL"));
-            args.push(OsString::from("-extension_picky"));
+            args.push(OsString::from(SEGMENT_EXTENSION_OPTIONS[1]));
             args.push(OsString::from("0"));
         }
         if let Some(headers) = headers {
@@ -219,6 +324,38 @@ impl FfmpegCommand {
         args.push(OsString::from(if overwrite { "-y" } else { "-n" }));
         args.push(output.into_os_string());
         Self { program, args }
+    }
+
+    /// Drop the HLS segment-extension options for an FFmpeg that predates them.
+    ///
+    /// They exist only from 7.1, and on an older FFmpeg passing them kills the
+    /// run during argument parsing. Dropping them costs nothing there, because
+    /// the strict extension checking they switch off arrived in 7.1 too — 6.x
+    /// already accepts the segment extensions they would have permitted. So an
+    /// unsupported FFmpeg degrades to "as good as it can be" rather than
+    /// failing every HLS download. The measurements are in
+    /// `docs/adr/0006-ffmpeg-version-detection.md`.
+    pub fn without_segment_extension_options(self) -> Self {
+        let mut args = Vec::with_capacity(self.args.len());
+        let mut drop_value = false;
+        for argument in self.args {
+            if drop_value {
+                drop_value = false;
+                continue;
+            }
+            if SEGMENT_EXTENSION_OPTIONS
+                .iter()
+                .any(|option| argument == *option)
+            {
+                drop_value = true;
+                continue;
+            }
+            args.push(argument);
+        }
+        Self {
+            program: self.program,
+            args,
+        }
     }
 }
 
@@ -594,6 +731,91 @@ mod tests {
             .args
             .iter()
             .any(|arg| arg == "-allowed_segment_extensions"));
+    }
+
+    #[test]
+    fn reads_the_version_off_the_line_ffmpeg_actually_prints() {
+        // The Ubuntu 24.04 build this issue was reported against, verbatim.
+        let ubuntu = parse_version(
+            "ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers",
+        )
+        .expect("a distribution version parses");
+        assert_eq!(ubuntu.to_string(), "6.1.1");
+        assert!(!ubuntu.meets_minimum());
+
+        let conda =
+            parse_version("ffmpeg version 9.0.1 Copyright (c) 2000-2026 the FFmpeg developers")
+                .expect("a release version parses");
+        assert_eq!(conda.to_string(), "9.0.1");
+        assert!(conda.meets_minimum());
+
+        // The boundary itself, and the release just below it.
+        assert!(parse_version("ffmpeg version 7.1 Copyright")
+            .unwrap()
+            .meets_minimum());
+        assert!(!parse_version("ffmpeg version 7.0.2 Copyright")
+            .unwrap()
+            .meets_minimum());
+
+        // Some builds prefix the tag with `n`.
+        assert_eq!(
+            parse_version("ffmpeg version n4.4.1 Copyright")
+                .unwrap()
+                .to_string(),
+            "4.4.1"
+        );
+
+        // A snapshot build names no release. Undetectable is not "too old":
+        // those builds are newer than 7.1, not older.
+        assert!(parse_version("ffmpeg version N-109755-g1b9f9c1a3d Copyright").is_none());
+        assert!(parse_version("not ffmpeg at all").is_none());
+
+        assert_eq!(MINIMUM_FFMPEG.to_string(), "7.1");
+    }
+
+    #[test]
+    fn an_old_ffmpeg_drops_only_the_segment_extension_options() {
+        let command = FfmpegCommand::new_with_headers(
+            PathBuf::from("ffmpeg"),
+            "https://example.test/playlist.m3u8",
+            PathBuf::from("video.mp4"),
+            false,
+            Some("Referer: https://example.test/page\r\n"),
+        );
+        let kept: Vec<String> = command
+            .clone()
+            .without_segment_extension_options()
+            .args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        // Both options and both of their values are gone.
+        assert!(!kept.iter().any(|arg| arg == "-allowed_segment_extensions"));
+        assert!(!kept.iter().any(|arg| arg == "ALL"));
+        assert!(!kept.iter().any(|arg| arg == "-extension_picky"));
+
+        // Everything else survives, in order, including the `0` that would be
+        // removed by a filter matching on values rather than on option pairs.
+        assert!(kept
+            .windows(2)
+            .any(|pair| pair == ["-i", "https://example.test/playlist.m3u8"]));
+        assert!(kept
+            .iter()
+            .any(|arg| arg == "Referer: https://example.test/page\r\n"));
+        assert_eq!(kept.last().unwrap(), "video.mp4");
+
+        // A direct-file command never carried them, so it is left alone.
+        let direct = FfmpegCommand::new(
+            PathBuf::from("ffmpeg"),
+            "https://example.test/video.mp4",
+            PathBuf::from("video.mp4"),
+            false,
+        );
+        assert_eq!(
+            direct.clone().without_segment_extension_options().args,
+            direct.args
+        );
     }
 
     #[test]

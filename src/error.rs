@@ -1,5 +1,7 @@
 use std::{fmt, io, path::PathBuf};
 
+use crate::ffmpeg::FfmpegVersion;
+
 #[derive(Debug)]
 pub enum DownerError {
     InvalidUrl(String),
@@ -17,6 +19,17 @@ pub enum DownerError {
     CookieSource(String),
     NativeIo(io::Error),
     FfmpegUnavailable(PathBuf),
+    /// FFmpeg ran, but it is older than the minimum this project supports, and
+    /// the download failed. Carried as its own error so the CLI and the
+    /// extension both name the version and the minimum instead of surfacing
+    /// whatever FFmpeg complained about.
+    FfmpegTooOld {
+        version: FfmpegVersion,
+        minimum: FfmpegVersion,
+        /// What FFmpeg itself reported, kept because an old FFmpeg can fail for
+        /// ordinary reasons too and the detail is still the useful part.
+        stderr: String,
+    },
     FfmpegFailed {
         status: Option<i32>,
         stderr: String,
@@ -57,6 +70,21 @@ impl fmt::Display for DownerError {
                 "FFmpeg executable is unavailable or cannot be started: {}",
                 path.display()
             ),
+            Self::FfmpegTooOld {
+                version,
+                minimum,
+                stderr,
+            } => {
+                write!(
+                    f,
+                    "FFmpeg {version} is older than the minimum supported {minimum}"
+                )?;
+                if stderr.trim().is_empty() {
+                    Ok(())
+                } else {
+                    write!(f, ": {}", stderr.trim())
+                }
+            }
             Self::FfmpegFailed { status, stderr } => {
                 if stderr.trim().is_empty() {
                     write!(f, "FFmpeg failed with status {}", display_status(*status))

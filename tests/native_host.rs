@@ -228,6 +228,9 @@ struct FakeFfmpeg {
     /// Line written to stderr, surfaced by the host as a log event and error text.
     stderr_line: Option<&'static str>,
     exit_code: i32,
+    /// What the fake reports for `-version`. The default is comfortably above
+    /// the documented minimum; a test lowers it to drive the too-old path.
+    version: &'static str,
 }
 
 impl Default for FakeFfmpeg {
@@ -238,6 +241,7 @@ impl Default for FakeFfmpeg {
             content: "fake media",
             stderr_line: None,
             exit_code: 0,
+            version: "9.0.1",
         }
     }
 }
@@ -255,6 +259,10 @@ impl FakeFfmpeg {
         };
         let script = format!(
             r#"#!/bin/sh
+if [ "$1" = "-version" ]; then
+  echo 'ffmpeg version {version} Copyright (c) 2000-2026 the FFmpeg developers'
+  exit 0
+fi
 dir="$(dirname "$0")"
 last=""
 for arg in "$@"; do last="$arg"; done
@@ -272,6 +280,7 @@ echo "progress=end"
 {stderr_line}: > "$dir/finished"
 exit {exit_code}
 "#,
+            version = self.version,
             content = self.content,
             updates = self.progress_updates,
             sleep = self.sleep_seconds,
@@ -731,6 +740,61 @@ fn failing_ffmpeg_reports_failed_state_and_keeps_the_partial_file() {
     assert_eq!(
         fs::read_to_string(output_dir.join("lecture.mp4")).unwrap(),
         "partial media"
+    );
+}
+
+/// KEI-81: the extension's half of the diagnostic.
+///
+/// A too-old FFmpeg has to name itself on the wire, because the extension shows
+/// the host's `error` text as the job error and its `log` events in the
+/// Settings console — it cannot work the version out for itself. The fake
+/// reports 6.1.1, so this needs no real old FFmpeg and runs in CI.
+#[test]
+fn an_ffmpeg_below_the_minimum_names_itself_in_the_job_error_and_the_log() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg {
+        content: "partial media",
+        stderr_line: Some("network failure"),
+        exit_code: 17,
+        version: "6.1.1-3ubuntu5",
+        ..FakeFfmpeg::default()
+    }
+    .install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    let mut host = NativeHost::start(&ffmpeg);
+
+    let mut request = download_request("https://example.test/hls/index.m3u8", &output_dir);
+    request["job_id"] = json!("job-old-ffmpeg");
+    host.send(&request);
+
+    let (failed, skipped) = host.wait_for_state("failed");
+    assert_envelope(&failed, "terminal");
+    assert_eq!(failed["ok"], json!(false));
+    assert_eq!(failed["job_id"], json!("job-old-ffmpeg"));
+    let error = failed["error"].as_str().expect("failure carries an error");
+    assert!(
+        error.contains("FFmpeg 6.1.1 is older than the minimum supported 7.1"),
+        "error text: {error}"
+    );
+
+    // The warning is also a log event, so a download that still succeeds on an
+    // old FFmpeg is not silent about it.
+    let warning = skipped
+        .iter()
+        .find(|event| {
+            event["log"]
+                .as_str()
+                .is_some_and(|line| line.contains("older than the minimum supported 7.1"))
+        })
+        .unwrap_or_else(|| panic!("expected a version warning log event, saw {skipped:#?}"));
+    assert_envelope(warning, "log");
+
+    // The options that would have killed argument parsing were not passed.
+    let args = fs::read(temp.path().join("args")).expect("the fake recorded its arguments");
+    let args = String::from_utf8_lossy(&args);
+    assert!(
+        !args.contains("-allowed_segment_extensions"),
+        "7.1-only options are omitted for an older FFmpeg: {args}"
     );
 }
 
@@ -1408,11 +1472,16 @@ fn real_ffmpeg(test: &str) -> Option<PathBuf> {
 /// The **direct-file** path is used rather than HLS on purpose.
 /// `src/ffmpeg.rs` passes `-allowed_segment_extensions` and `-extension_picky`
 /// for an `.m3u8` input, and those exist only from FFmpeg 7.1 — the minimum
-/// `README.md` documents. On an older FFmpeg the run would fail on the argument
-/// list before making a single request, and the test would pass while proving
-/// nothing. The direct path carries no version-specific options, so this test
-/// says something real on any FFmpeg. `tests/log_redaction.rs` covers the HLS
-/// demuxer's per-segment line against a real FFmpeg separately.
+/// `README.md` documents. The direct path carries no version-specific options,
+/// so this test says something real on any FFmpeg. `tests/log_redaction.rs`
+/// covers the HLS demuxer's per-segment line against a real FFmpeg separately.
+///
+/// KEI-81 removed the sharper reason this was written: an older FFmpeg used to
+/// die on that argument list before making a single request, so an HLS version
+/// of this test would have passed while proving nothing. The download path now
+/// omits those options below 7.1, so that trap is gone. The choice stands
+/// anyway — the direct path is the one that needs a real FFmpeg here, and it
+/// keeps this test independent of which FFmpeg the machine has.
 ///
 /// A sentinel, never a real token: `AGENTS.md` forbids one in a test.
 #[test]

@@ -179,6 +179,20 @@ The Rust package and the Firefox extension share one product version; see
 
 ### Fixed
 
+- An FFmpeg older than the supported 7.1 no longer fails every HLS download with
+  an unreadable error. `-allowed_segment_extensions` and `-extension_picky` exist
+  only from 7.1, so on FFmpeg 6.x — what `apt install ffmpeg` gives on Ubuntu
+  24.04 — every playlist download died during argument parsing with
+  `Unrecognized option 'allowed_segment_extensions'`, while direct-file downloads
+  kept working and nothing suggested the FFmpeg was the problem. The version is
+  now detected at startup, those two options are omitted below 7.1 so the
+  download proceeds, and both the CLI and the extension say *FFmpeg 6.1.1 is
+  older than the minimum supported 7.1* — as a warning up front, and in the error
+  if the download then fails (exit `4`, unavailable FFmpeg). Omitting the options
+  costs nothing on 6.x: the strict segment-extension checking they switch off was
+  introduced in 7.1 as well, measured both ways in
+  [ADR-0006](docs/adr/0006-ffmpeg-version-detection.md). 7.1 remains the
+  supported minimum; an older FFmpeg is warned about, not supported.
 - The second HLS download no longer fails with "output already exists". Because
   most playlists are called `index.m3u8`, `playlist.m3u8` or `master.m3u8` and
   the extension always requested `overwrite: false`, any two HLS downloads

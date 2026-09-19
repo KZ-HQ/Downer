@@ -44,6 +44,12 @@
 //! FFmpeg **without** those options, so the redaction check also runs on an
 //! older FFmpeg that is otherwise unsupported. What is under test here is the
 //! shape of FFmpeg's log lines, which those options do not affect.
+//!
+//! Since KEI-81 the download path omits those two options on an FFmpeg below
+//! 7.1 rather than dying on them, so this file's invocation is no longer the
+//! *only* way to reach an older FFmpeg. It is still the right one here: driving
+//! FFmpeg directly keeps this test about FFmpeg's output and nothing else, and
+//! it holds on a supported FFmpeg too, where the download path does pass them.
 
 mod support;
 
