@@ -11,9 +11,7 @@ use std::path::PathBuf;
 
 use cli::Cli;
 use error::{DownerError, DownerResult};
-use ffmpeg::{
-    execute, execute_controlled_with_progress, FfmpegCommand, FfmpegProgress, ProcessControl,
-};
+use ffmpeg::{execute, FfmpegInvocation, FfmpegProgress, ProcessControl, Reporting};
 use output::{release_reservation, resolve_conflict, resolve_output_path, NamingHints, OnConflict};
 use scraper::ResolvedMedia;
 
@@ -115,55 +113,46 @@ pub fn run(cli: Cli) -> DownerResult<()> {
         threads: cli.threads,
         quiet: false,
     };
-    download_resolved(media, &options).map(|_| ())
+    download_resolved(media, &options, Hooks::default()).map(|_| ())
 }
 
-pub fn download_resolved(media: ResolvedMedia, options: &DownloadOptions) -> DownerResult<PathBuf> {
-    download_resolved_with_executor(media, options, execute)
+/// Optional callbacks for a download.
+///
+/// All absent — [`Hooks::default`] — is the CLI's case: FFmpeg writes its own
+/// progress to the terminal and nothing needs to interrupt it. Supplying a
+/// [`ProcessControl`] is what makes a download controllable, and is required
+/// before progress or log callbacks can fire, because both are read from a
+/// process this owns.
+#[derive(Default)]
+pub struct Hooks<'a> {
+    pub control: Option<&'a ProcessControl>,
+    pub on_progress: Option<Box<dyn Fn(FfmpegProgress) + Send + Sync>>,
+    pub on_log: Option<Box<dyn Fn(String) + Send + Sync>>,
 }
 
-pub fn download_resolved_controlled(
+impl<'a> Hooks<'a> {
+    /// A controllable download reporting progress and FFmpeg's output.
+    pub fn controlled<F, L>(control: &'a ProcessControl, on_progress: F, on_log: L) -> Self
+    where
+        F: Fn(FfmpegProgress) + Send + Sync + 'static,
+        L: Fn(String) + Send + Sync + 'static,
+    {
+        Self {
+            control: Some(control),
+            on_progress: Some(Box::new(on_progress)),
+            on_log: Some(Box::new(on_log)),
+        }
+    }
+}
+
+/// Download `media` to the path `options` resolves, and return where it landed.
+///
+/// The one download entry point: the CLI, the native host and the tests all
+/// come through here, differing only in `hooks`.
+pub fn download_resolved(
     media: ResolvedMedia,
     options: &DownloadOptions,
-    control: &ProcessControl,
-) -> DownerResult<PathBuf> {
-    download_resolved_controlled_with_progress(media, options, control, |_| {})
-}
-
-pub fn download_resolved_controlled_with_progress<F>(
-    media: ResolvedMedia,
-    options: &DownloadOptions,
-    control: &ProcessControl,
-    progress: F,
-) -> DownerResult<PathBuf>
-where
-    F: Fn(FfmpegProgress) + Send + Sync + 'static,
-{
-    download_resolved_with_executor(media, options, |command| {
-        execute_controlled_with_progress(command, control, progress)
-    })
-}
-
-pub fn download_resolved_controlled_with_progress_and_logs<F, L>(
-    media: ResolvedMedia,
-    options: &DownloadOptions,
-    control: &ProcessControl,
-    progress: F,
-    log: L,
-) -> DownerResult<PathBuf>
-where
-    F: Fn(FfmpegProgress) + Send + Sync + 'static,
-    L: Fn(String) + Send + Sync + 'static,
-{
-    download_resolved_with_executor(media, options, |command| {
-        ffmpeg::execute_controlled_with_progress_and_logs(command, control, progress, log)
-    })
-}
-
-fn download_resolved_with_executor(
-    media: ResolvedMedia,
-    options: &DownloadOptions,
-    execute: impl FnOnce(&FfmpegCommand) -> DownerResult<PathBuf>,
+    hooks: Hooks<'_>,
 ) -> DownerResult<PathBuf> {
     let url = &media.url;
     let destination = resolve_output_path(
@@ -184,32 +173,57 @@ fn download_resolved_with_executor(
         println!("Destination: {}", destination.display());
     }
 
-    let headers = scraper::ffmpeg_headers(media.referer.as_ref(), &options.user_agent);
-    // Scoped to this URL's host, so a redirect target or a cross-host HLS
-    // segment server never receives the media host's session.
-    let cookies = scraper::ffmpeg_cookies(url, options.cookie.as_deref());
-    let command = FfmpegCommand::new_with_headers_and_threads(
-        options.ffmpeg.clone(),
-        url.as_str(),
-        destination,
-        target.overwrite,
-        headers.as_deref(),
-        cookies.as_deref(),
-        options.threads,
-    );
     // Both the CLI and the native host reach FFmpeg through here, so this is
     // the one place that has to know whether it is old enough to matter.
     let outdated = unsupported_ffmpeg(&options.ffmpeg);
-    let command = match outdated {
-        Some(version) => {
-            if !options.quiet {
-                eprintln!("{}", outdated_ffmpeg_warning(version));
-            }
-            command.without_segment_extension_options()
+    if let Some(version) = outdated {
+        if !options.quiet {
+            eprintln!("{}", outdated_ffmpeg_warning(version));
         }
-        None => command,
+    }
+
+    let invocation = FfmpegInvocation {
+        program: options.ffmpeg.clone(),
+        input: url.as_str().to_string(),
+        headers: scraper::ffmpeg_headers(media.referer.as_ref(), &options.user_agent),
+        // Scoped to this URL's host, so a redirect target or a cross-host HLS
+        // segment server never receives the media host's session.
+        cookies: scraper::ffmpeg_cookies(url, options.cookie.as_deref()),
+        // An HLS input needs the leniency options, but only an FFmpeg that has
+        // them can be given them; see ADR-0006.
+        hls_lenient: is_hls(url.as_str()) && outdated.is_none(),
+        threads: options.threads,
+        overwrite: target.overwrite,
+        output: destination,
+        reporting: match hooks.control {
+            Some(_) => Reporting::CONTROLLED,
+            None => Reporting::Cli,
+        },
     };
-    let destination = match execute(&command) {
+
+    let result = match hooks.control {
+        Some(control) => {
+            let on_progress = hooks.on_progress;
+            let on_log = hooks.on_log;
+            ffmpeg::execute_controlled_with_progress_and_logs(
+                &invocation,
+                control,
+                move |progress| {
+                    if let Some(hook) = &on_progress {
+                        hook(progress);
+                    }
+                },
+                move |line| {
+                    if let Some(hook) = &on_log {
+                        hook(line);
+                    }
+                },
+            )
+        }
+        None => execute(&invocation),
+    };
+
+    let destination = match result {
         Ok(destination) => destination,
         Err(error) => {
             // A name we reserved and never wrote to is residue, not output.
@@ -233,6 +247,15 @@ fn download_resolved_with_executor(
         println!("Download complete: {}", destination.display());
     }
     Ok(destination)
+}
+
+/// Whether an input is an HLS playlist.
+///
+/// A substring match on the URL is what this has always been; the difference
+/// is that the answer is now a field on the invocation rather than something
+/// the argv builder rediscovers.
+fn is_hls(url: &str) -> bool {
+    url.to_ascii_lowercase().contains(".m3u8")
 }
 
 /// The version of `path`, when it is older than [`ffmpeg::MINIMUM_FFMPEG`].

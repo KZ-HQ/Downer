@@ -678,12 +678,10 @@ fn download(
     if let Some(version) = crate::unsupported_ffmpeg(&options.ffmpeg) {
         log(crate::outdated_ffmpeg_warning(version));
     }
-    crate::download_resolved_controlled_with_progress_and_logs(
+    crate::download_resolved(
         media,
         &options,
-        &task.control,
-        progress,
-        log,
+        crate::Hooks::controlled(&task.control, progress, log),
     )
 }
 
