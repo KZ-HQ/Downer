@@ -61,6 +61,21 @@ or cannot be parsed costs the bandwidth this would have saved and nothing else.
 A wasteful download beats a broken one, and this change must not be able to turn
 a working download into a failing one.
 
+**A master that declares a rendition separately is left alone.** `#EXT-X-MEDIA`
+with a `URI` is how a master carries audio (or subtitles) outside the variant
+streams, referenced by group from `#EXT-X-STREAM-INF`. Measured on FFmpeg 9.0.1:
+
+| Input | Streams written |
+| --- | --- |
+| the master | video **and** audio |
+| the video variant alone | **video only** |
+
+`select_variant` reads only `#EXT-X-STREAM-INF`, so it cannot express "this
+video plus that audio". Resolving such a master would silently drop the audio —
+a new defect, and a worse one than the waste being removed. The optimisation
+therefore declines and the master is used as before. Caught by measurement
+before this shipped, not by reasoning about it.
+
 **One request, not one per rendition.** A master lists every variant in a single
 text file, so the cost does not grow with the number of renditions and no media
 is fetched to make the choice.
@@ -95,8 +110,12 @@ is fetched to make the choice.
   segments a genuine download needs.
 * Only two renditions were measured. Nothing suggests more behave differently,
   but "n renditions cost n×" is inference from two points.
-* Audio-only and subtitle renditions declared with `#EXT-X-MEDIA` rather than
-  `#EXT-X-STREAM-INF` were not exercised. `select_variant` reads only
-  `#EXT-X-STREAM-INF`, so a master whose audio is a separate `#EXT-X-MEDIA`
-  group may resolve to a video-only variant. That is a real gap and deserves its
-  own issue rather than a guess here.
+* **How common a separately declared audio rendition is was not established.**
+  Masters carrying one are left unoptimised by the rule above, so those
+  downloads stay exactly as wasteful as before. Whether that describes most real
+  masters or few of them is unmeasured, and it decides how much of this issue's
+  benefit is realised in practice.
+* The guard is a conservative one: it declines whenever `#EXT-X-MEDIA` names a
+  `URI`, including for subtitles, which FFmpeg may well handle without help.
+  Narrowing it to audio alone would optimise more masters, and would need its
+  own measurement to justify.

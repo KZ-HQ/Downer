@@ -128,6 +128,37 @@ fn a_media_playlist_is_passed_through_unchanged() {
     );
 }
 
+/// A master whose audio is a separate rendition is left alone.
+///
+/// Measured on FFmpeg 9.0.1: the master yields video **and** audio, the video
+/// variant alone yields video only. Resolving such a master would silently drop
+/// the audio track — a new defect, and worse than the waste this optimisation
+/// removes. `select_variant` reads only `#EXT-X-STREAM-INF` and cannot express
+/// "this video plus that audio", so the master is used as before.
+#[test]
+fn a_master_with_separate_audio_is_not_resolved() {
+    let origin = HeaderRecorder::start("127.0.0.1");
+    let video = origin.url("/media/v/video.m3u8");
+    let audio = origin.url("/media/a/audio.m3u8");
+    let master = format!(
+        "#EXTM3U\n\
+         #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"English\",DEFAULT=YES,URI=\"{audio}\"\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,AUDIO=\"aud\"\n{video}\n"
+    );
+    origin.route(
+        "/media/with-audio.m3u8",
+        Reply::text("application/vnd.apple.mpegurl", master),
+    );
+
+    let url = origin.url("/media/with-audio.m3u8");
+    let args = argv_for(&url);
+    assert_eq!(
+        input_of(&args),
+        url,
+        "the master is used as given, so FFmpeg still muxes the separate audio: {args:?}"
+    );
+}
+
 /// The safety property: resolution is best-effort.
 ///
 /// A playlist the host cannot fetch or parse must not break a download that

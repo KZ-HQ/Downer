@@ -88,10 +88,31 @@ pub fn resolve_variant(
         .build()
         .ok()?;
     let (playlist, base_url) = fetch_hls_playlist(&client, url, user_agent, referer, cookie)?;
-    if !is_master_playlist(&playlist) {
+    if !is_master_playlist(&playlist) || declares_separate_renditions(&playlist) {
         return None;
     }
     select_variant(&playlist, &base_url, None)
+}
+
+/// Does this master serve any rendition as its own playlist, outside the
+/// variant streams?
+///
+/// `#EXT-X-MEDIA` with a `URI` is how a master declares audio (or subtitles)
+/// carried separately from the video, which a `#EXT-X-STREAM-INF` then
+/// references by group. Resolving such a master to its video variant would hand
+/// FFmpeg the video alone and **silently lose the audio** — measured: the master
+/// yields video+audio, the variant alone yields video only.
+///
+/// `select_variant` reads only `#EXT-X-STREAM-INF`, so it cannot express "this
+/// one plus that audio". Rather than guess, this declines to resolve and the
+/// master is used as before: the download is wasteful, which is this
+/// optimisation's own problem, instead of wrong, which would be a new one. See
+/// `docs/adr/0010-resolve-hls-master-playlists.md`.
+fn declares_separate_renditions(playlist: &str) -> bool {
+    playlist.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("#EXT-X-MEDIA:") && line.contains("URI=")
+    })
 }
 
 /// Whether a playlist lists variant streams rather than segments.
