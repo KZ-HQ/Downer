@@ -255,6 +255,15 @@ def landing_page(site: Site) -> bytes:
 """.encode()
 
 
+def master_playlist(variants: list[tuple[int, str, str]]) -> bytes:
+    """A master playlist: `(bandwidth, resolution, url)` per rendition."""
+    lines = ["#EXTM3U", "#EXT-X-VERSION:3"]
+    for bandwidth, resolution, url in variants:
+        lines.append(f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},RESOLUTION={resolution}")
+        lines.append(url)
+    return ("\n".join(lines) + "\n").encode()
+
+
 def playlist(urls: list[str]) -> bytes:
     lines = ["#EXTM3U", "#EXT-X-VERSION:3", f"#EXT-X-TARGETDURATION:{SEGMENT_SECONDS}",
              "#EXT-X-MEDIA-SEQUENCE:0", "#EXT-X-PLAYLIST-TYPE:VOD"]
@@ -418,6 +427,34 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if path == "/media/master.m3u8":
+            # A master playlist: it lists renditions, not segments. Handing one
+            # to FFmpeg makes it fetch *every* rendition and keep only the best,
+            # so the rest is downloaded and thrown away — KEI-89. The two
+            # renditions serve the same media under distinguishable paths, so a
+            # test can tell which one was actually fetched.
+            self.respond(
+                HTTPStatus.OK,
+                master_playlist([
+                    (100_000, "320x180", f"{site.origin}/media/low.m3u8"),
+                    (800_000, "1280x720", f"{site.origin}/media/high.m3u8"),
+                ]),
+                "application/vnd.apple.mpegurl",
+            )
+            return
+
+        if path in ("/media/low.m3u8", "/media/high.m3u8"):
+            rendition = "low" if path == "/media/low.m3u8" else "high"
+            self.respond(
+                HTTPStatus.OK,
+                playlist([
+                    f"{site.origin}/media/{rendition}/segment{i}.ts"
+                    for i in range(SEGMENT_COUNT)
+                ]),
+                "application/vnd.apple.mpegurl",
+            )
+            return
+
         if path == "/media/cross-host.m3u8":
             if not site.peer:
                 self.respond(
@@ -448,6 +485,16 @@ class Handler(BaseHTTPRequestHandler):
                 "application/vnd.apple.mpegurl",
             )
             return
+
+        for rendition in ("low", "high"):
+            prefix = f"/media/{rendition}/segment"
+            if path.startswith(prefix) and path.endswith(".ts"):
+                index = path[len(prefix):-len(".ts")]
+                if index.isdigit():
+                    # Both renditions serve the same bytes. What matters to
+                    # KEI-89 is only which *paths* were requested.
+                    self.send_file(site.media.segment(int(index)), "video/mp2t")
+                    return
 
         if path.startswith("/media/segment") and path.endswith(".ts"):
             index = path[len("/media/segment"):-len(".ts")]

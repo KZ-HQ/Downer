@@ -135,6 +135,14 @@ The Rust package and the Firefox extension share one product version; see
 
 ### Changed
 
+- Downloading an HLS **master** playlist now fetches one rendition instead of
+  all of them. FFmpeg opens every variant a master lists and keeps only the
+  best, so the rest was downloaded and discarded — two renditions meant twice
+  the data for the same file. The host now resolves the master to the rendition
+  it already counts, costing one small request and no media. An unreadable
+  playlist, or one whose audio is a separate rendition, falls back to the
+  previous behaviour rather than failing or losing a track. The file produced is
+  unchanged. See `docs/adr/0010-resolve-hls-master-playlists.md`.
 - The FFmpeg command layer now models a download rather than an argument list.
   `FfmpegInvocation` names what a run is — input, headers, cookies, HLS
   leniency, threads, overwrite, output, and a reporting mode — and renders argv

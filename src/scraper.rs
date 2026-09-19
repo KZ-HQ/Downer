@@ -58,6 +58,76 @@ pub fn hls_info_with_timeout(
     hls_info_from_playlist(&client, &parent, user_agent, referer, cookie, Some(url))
 }
 
+/// The media playlist an HLS input actually means.
+///
+/// `Some` only when `url` is a **master** playlist: the chosen variant's URL,
+/// by the same highest-bandwidth rule the segment count uses, so the rendition
+/// downloaded is the rendition counted.
+///
+/// `None` means "use `url` as given" and covers every other case — a media
+/// playlist, a playlist that could not be fetched, one that could not be
+/// parsed. That is deliberate. Handing FFmpeg the original URL is exactly what
+/// this project did before, so a failure here costs the bandwidth this
+/// resolution would have saved and nothing else. A challenged CDN (KEI-87) or a
+/// playlist shape nobody anticipated must not turn a working download into a
+/// broken one.
+///
+/// Costs one request. A master playlist lists every variant in one text file,
+/// so the count does not grow with the number of renditions, and no media is
+/// fetched. See `docs/adr/0010-resolve-hls-master-playlists.md`.
+pub fn resolve_variant(
+    url: &Url,
+    user_agent: &str,
+    referer: Option<&Url>,
+    cookie: Option<&str>,
+) -> Option<Url> {
+    let client = Client::builder()
+        .redirect(Policy::limited(10))
+        .connect_timeout(VARIANT_CONNECT_TIMEOUT)
+        .timeout(VARIANT_TIMEOUT)
+        .build()
+        .ok()?;
+    let (playlist, base_url) = fetch_hls_playlist(&client, url, user_agent, referer, cookie)?;
+    if !is_master_playlist(&playlist) || declares_separate_renditions(&playlist) {
+        return None;
+    }
+    select_variant(&playlist, &base_url, None)
+}
+
+/// Does this master serve any rendition as its own playlist, outside the
+/// variant streams?
+///
+/// `#EXT-X-MEDIA` with a `URI` is how a master declares audio (or subtitles)
+/// carried separately from the video, which a `#EXT-X-STREAM-INF` then
+/// references by group. Resolving such a master to its video variant would hand
+/// FFmpeg the video alone and **silently lose the audio** — measured: the master
+/// yields video+audio, the variant alone yields video only.
+///
+/// `select_variant` reads only `#EXT-X-STREAM-INF`, so it cannot express "this
+/// one plus that audio". Rather than guess, this declines to resolve and the
+/// master is used as before: the download is wasteful, which is this
+/// optimisation's own problem, instead of wrong, which would be a new one. See
+/// `docs/adr/0010-resolve-hls-master-playlists.md`.
+fn declares_separate_renditions(playlist: &str) -> bool {
+    playlist.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("#EXT-X-MEDIA:") && line.contains("URI=")
+    })
+}
+
+/// Whether a playlist lists variant streams rather than segments.
+fn is_master_playlist(playlist: &str) -> bool {
+    playlist
+        .lines()
+        .any(|line| line.trim().starts_with("#EXT-X-STREAM-INF:"))
+}
+
+/// Bounded so a slow or hanging playlist host delays a download by seconds
+/// rather than stalling it: the fallback is the download we would have run
+/// anyway.
+const VARIANT_TIMEOUT: Duration = Duration::from_secs(8);
+const VARIANT_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
+
 fn hls_info_from_playlist(
     client: &Client,
     url: &Url,
@@ -67,10 +137,7 @@ fn hls_info_from_playlist(
     preferred_variant: Option<&Url>,
 ) -> Option<HlsInfo> {
     let (playlist, base_url) = fetch_hls_playlist(client, url, user_agent, referer, cookie)?;
-    let playlist = if playlist
-        .lines()
-        .any(|line| line.trim().starts_with("#EXT-X-STREAM-INF:"))
-    {
+    let playlist = if is_master_playlist(&playlist) {
         let variant = select_variant(&playlist, &base_url, preferred_variant)?;
         fetch_hls_playlist(client, &variant, user_agent, referer, cookie)
             .or_else(|| fetch_hls_playlist(client, &variant, user_agent, Some(&base_url), cookie))?
