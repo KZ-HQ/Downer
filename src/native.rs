@@ -601,11 +601,6 @@ fn download(
     let user_agent = request
         .user_agent
         .unwrap_or_else(|| "Mozilla/5.0 (Firefox; downer native host)".to_string());
-    let source_host = referer
-        .as_ref()
-        .unwrap_or(&url)
-        .host_str()
-        .map(str::to_string);
     let media = ResolvedMedia {
         url,
         referer,
@@ -621,7 +616,7 @@ fn download(
         ),
         overwrite: request.overwrite,
         on_conflict: request.on_conflict,
-        naming: NamingHints::new(request.title, source_host),
+        naming: NamingHints::new(request.title),
         ffmpeg: ffmpeg_path(),
         user_agent,
         cookie: request.cookie,

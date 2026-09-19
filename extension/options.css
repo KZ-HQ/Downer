@@ -65,3 +65,18 @@ section {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* A checkbox is not a text field: the block, full-width `input` rule above
+   would stretch it across the page and drop its label onto another line. */
+label.checkbox {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  margin: 10px 0 0;
+}
+
+label.checkbox input {
+  display: inline-block;
+  margin: 0;
+  width: auto;
+}

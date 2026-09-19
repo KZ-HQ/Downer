@@ -71,7 +71,8 @@ The minimum supported FFmpeg version is documented in `README.md`.
 Architectural decisions are recorded as ADRs under `docs/adr/`, numbered
 `NNNN-short-title.md`. ADR-0001 records the native messaging protocol
 contract, ADR-0002 cookie scoping and argv exposure, ADR-0003 where URL
-redaction happens, and ADR-0004 the output naming and collision policy; KEI-63
+redaction happens, ADR-0004 the output collision policy, and ADR-0005 the
+default output name; KEI-63
 backfills the decisions already embodied in the code and adds the rest of the
 documentation set.
 
@@ -272,11 +273,13 @@ stale release binary is the most common cause of "it worked before" reports.
   interpolation.
 - Name a download after the media URL's own filename when it has one. When that
   stem is generic (`index`, `playlist`, `master`, `download`, `video`, `media`,
-  or digits only) name it after the page title instead, falling back to the
-  source host. A title is user data reaching the disk: sanitize it with the same
-  rules as a URL-derived name, bound its length, and never let it into a log, an
-  error, or any event but the output path.
-- Resolve an output collision by **renaming** — ` (2)`, ` (3)`, … before the
+  or digits only) the name is **`video.<ext>`** — a predictable default beats a
+  derived one, see ADR-0005. Naming after the page title is **opt-in**: `--name`
+  on the CLI, and a Settings checkbox that is off by default in the extension,
+  which simply does not send `title` when off. A title is user data reaching the
+  disk: sanitize it with the same rules as a URL-derived name, bound its length,
+  and never let it into a log, an error, or any event but the output path.
+- Resolve an output collision by **renaming** — `_2`, `_3`, … before the
   extension — whenever *we* inferred the filename, which is every extension
   download and every CLI run without `--output`. Refuse the collision only when
   the user named an exact path with `--output`. `--on-conflict

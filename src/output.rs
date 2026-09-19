@@ -17,15 +17,20 @@ use crate::error::{DownerError, DownerResult};
 /// nothing useful, and never contributes more than this many characters.
 const MAX_TITLE_CHARS: usize = 80;
 
-/// How many ` (n)` candidates [`OnConflict::Rename`] tries before giving up.
+/// How many `_n` candidates [`OnConflict::Rename`] tries before giving up.
 /// A directory holding this many same-named downloads is a user problem, not a
 /// loop to run forever.
 const MAX_RENAME_ATTEMPTS: u32 = 1_000;
 
 /// Stems that identify the stream rather than the content. A URL ending in one
-/// of these says nothing a user would recognise, so naming falls back to the
-/// caller's hints. Numeric-only stems (`1080.m3u8`, `42.mp4`) count too.
+/// of these says nothing a user would recognise, so the name becomes
+/// [`DEFAULT_STEM`], or the caller's title when one was supplied. Numeric-only
+/// stems (`1080.m3u8`, `42.mp4`) count too.
 const GENERIC_STEMS: [&str; 6] = ["index", "playlist", "master", "download", "video", "media"];
+
+/// What a download is called when neither the URL nor the caller says anything
+/// useful. Predictable beats clever: see ADR-0005.
+const DEFAULT_STEM: &str = "video";
 
 /// What to do when the resolved output path is already taken.
 ///
@@ -38,7 +43,7 @@ const GENERIC_STEMS: [&str; 6] = ["index", "playlist", "master", "download", "vi
 pub enum OnConflict {
     /// Refuse to touch an existing file.
     Fail,
-    /// Write beside it as `name (2).ext`, `name (3).ext`, and so on.
+    /// Write beside it as `name_2.ext`, `name_3.ext`, and so on.
     #[default]
     Rename,
     /// Replace it.
@@ -47,19 +52,20 @@ pub enum OnConflict {
 
 /// Naming material the caller knows and the URL does not.
 ///
-/// The extension supplies the page title and the page's host; the CLI supplies
-/// `--name` and the source page host. Both are advisory: they are consulted
-/// only when the URL-derived stem is generic, and never widen what may be
-/// written — see [`sanitize_title`].
+/// A title is **opt-in**: the CLI supplies one only for `--name`, and the
+/// extension only when its "name downloads after the page title" setting is on.
+/// Absent — which is the default — a generically named download is
+/// [`DEFAULT_STEM`]. Even when present a title is advisory: it is consulted
+/// only when the URL-derived stem is generic, and never widens what may be
+/// written, see [`sanitize_title`].
 #[derive(Debug, Clone, Default)]
 pub struct NamingHints {
     pub title: Option<String>,
-    pub source_host: Option<String>,
 }
 
 impl NamingHints {
-    pub fn new(title: Option<String>, source_host: Option<String>) -> Self {
-        Self { title, source_host }
+    pub fn new(title: Option<String>) -> Self {
+        Self { title }
     }
 }
 
@@ -231,7 +237,7 @@ pub fn release_reservation(target: &OutputTarget) {
     }
 }
 
-/// `video.mp4` and 2 become `video (2).mp4`; the suffix goes before the
+/// `video.mp4` and 2 become `video_2.mp4`; the suffix goes before the
 /// extension so the file still opens in the application that handles it.
 fn numbered_variant(path: &Path, attempt: u32) -> PathBuf {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
@@ -239,20 +245,21 @@ fn numbered_variant(path: &Path, attempt: u32) -> PathBuf {
     };
     let numbered = match name.rsplit_once('.') {
         Some((stem, extension)) if !stem.is_empty() => {
-            format!("{stem} ({attempt}).{extension}")
+            format!("{stem}_{attempt}.{extension}")
         }
-        _ => format!("{name} ({attempt})"),
+        _ => format!("{name}_{attempt}"),
     };
     path.with_file_name(numbered)
 }
 
-/// Infer a filename, falling back to the caller's hints when the URL-derived
-/// stem is generic.
+/// Infer a filename, replacing a generic URL stem with the caller's title when
+/// there is one and with [`DEFAULT_STEM`] when there is not.
 ///
 /// The URL always wins when it says something: a distinctive path segment is a
-/// better name than a page title, and it keeps today's behaviour for
-/// direct-file downloads untouched. The extension only reaches the hints for
-/// the `index.m3u8` / `playlist.m3u8` case this exists to fix.
+/// better name than anything we could invent, and direct-file downloads are
+/// untouched. Only the `index.m3u8` / `playlist.m3u8` case reaches the rest of
+/// this, and there the answer is `video.mp4` unless a title was explicitly
+/// supplied — ADR-0005 records why a predictable default won over a derived one.
 pub fn infer_filename_with_hints(url: &Url, hints: &NamingHints) -> String {
     let inferred = infer_filename(url);
     let (stem, extension) = match inferred.rsplit_once('.') {
@@ -266,11 +273,8 @@ pub fn infer_filename_with_hints(url: &Url, hints: &NamingHints) -> String {
         .title
         .as_deref()
         .and_then(sanitize_title)
-        .or_else(|| hints.source_host.as_deref().and_then(sanitize_title));
-    match replacement {
-        Some(replacement) => format!("{replacement}.{extension}"),
-        None => inferred,
-    }
+        .unwrap_or_else(|| DEFAULT_STEM.to_string());
+    format!("{replacement}.{extension}")
 }
 
 /// Whether a stem names the stream rather than its content.
@@ -318,7 +322,7 @@ pub fn infer_filename(url: &Url) -> String {
 
     let mut filename = sanitize_filename(&candidate);
     if filename.is_empty() {
-        filename = "download".to_string();
+        filename = DEFAULT_STEM.to_string();
     }
 
     let extension = filename
@@ -413,7 +417,7 @@ mod tests {
     fn uses_mp4_for_missing_or_playlist_names() {
         assert_eq!(
             infer_filename(&Url::parse("https://example.test/").unwrap()),
-            "download.mp4"
+            "video.mp4"
         );
         assert_eq!(
             infer_filename(&Url::parse("https://example.test/stream.m3u8").unwrap()),
@@ -433,7 +437,7 @@ mod tests {
     fn avoids_device_and_traversal_names() {
         assert_eq!(
             infer_filename(&Url::parse("https://example.test/CON").unwrap()),
-            "download.mp4"
+            "video.mp4"
         );
         assert_eq!(
             infer_filename(&Url::parse("https://example.test/evil%2Fname.mp4").unwrap()),
@@ -441,8 +445,8 @@ mod tests {
         );
     }
 
-    fn hints(title: Option<&str>, host: Option<&str>) -> NamingHints {
-        NamingHints::new(title.map(str::to_string), host.map(str::to_string))
+    fn hints(title: Option<&str>) -> NamingHints {
+        NamingHints::new(title.map(str::to_string))
     }
 
     #[test]
@@ -467,40 +471,56 @@ mod tests {
     }
 
     #[test]
-    fn uses_the_title_only_when_the_url_stem_is_generic() {
-        let generic = Url::parse("https://example.test/hls/index.m3u8").unwrap();
-        assert_eq!(
-            infer_filename_with_hints(&generic, &hints(Some("Lecture 3"), Some("example.test"))),
-            "Lecture 3.mp4"
-        );
+    fn a_generic_stem_defaults_to_video_with_no_title() {
+        // The default, and the case that matters: nothing was opted into, so
+        // the name is predictable rather than derived.
+        for generic in [
+            "https://example.test/hls/index.m3u8",
+            "https://example.test/playlist.m3u8",
+            "https://example.test/master.m3u8",
+            "https://example.test/media/1080.mp4",
+            "https://example.test/",
+        ] {
+            let url = Url::parse(generic).unwrap();
+            assert_eq!(
+                infer_filename_with_hints(&url, &hints(None)),
+                "video.mp4",
+                "{generic}"
+            );
+        }
 
-        // A distinctive URL segment beats a page title, so direct-file
-        // downloads keep naming themselves exactly as they do today.
-        let distinctive = Url::parse("https://example.test/lecture-three.mp4").unwrap();
+        // The source host is deliberately not a fallback any more: it only ever
+        // fired when no title was given, which is now the common case, and
+        // `example.test.mp4` is not what "default" should mean.
         assert_eq!(
             infer_filename_with_hints(
-                &distinctive,
-                &hints(Some("Some Unrelated Page Title"), Some("example.test"))
+                &Url::parse("https://example.test/playlist.m3u8").unwrap(),
+                &hints(None)
             ),
-            "lecture-three.mp4"
+            "video.mp4"
         );
     }
 
     #[test]
-    fn falls_back_to_the_source_host_then_to_the_url_name() {
-        let url = Url::parse("https://example.test/playlist.m3u8").unwrap();
+    fn a_supplied_title_replaces_a_generic_stem_and_nothing_else() {
+        let generic = Url::parse("https://example.test/hls/index.m3u8").unwrap();
         assert_eq!(
-            infer_filename_with_hints(&url, &hints(None, Some("example.test"))),
-            "example.test.mp4"
+            infer_filename_with_hints(&generic, &hints(Some("Lecture 3"))),
+            "Lecture 3.mp4"
         );
+
+        // A distinctive URL segment beats an opted-in title, so direct-file
+        // downloads keep naming themselves exactly as they always have.
+        let distinctive = Url::parse("https://example.test/lecture-three.mp4").unwrap();
+        assert_eq!(
+            infer_filename_with_hints(&distinctive, &hints(Some("Some Unrelated Page Title"))),
+            "lecture-three.mp4"
+        );
+
         // A title that sanitises away is the same as no title at all.
         assert_eq!(
-            infer_filename_with_hints(&url, &hints(Some("   ...   "), Some("example.test"))),
-            "example.test.mp4"
-        );
-        assert_eq!(
-            infer_filename_with_hints(&url, &hints(None, None)),
-            "playlist.mp4"
+            infer_filename_with_hints(&generic, &hints(Some("   ...   "))),
+            "video.mp4"
         );
     }
 
@@ -541,7 +561,7 @@ mod tests {
     #[test]
     fn rename_walks_the_numbered_sequence_and_reserves_its_choice() {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().join("Lecture 3.mp4");
+        let base = directory.path().join("video.mp4");
 
         let first = resolve_conflict(base.clone(), OnConflict::Rename).unwrap();
         assert_eq!(first.path, base);
@@ -550,21 +570,21 @@ mod tests {
         assert!(first.overwrite);
 
         let second = resolve_conflict(base.clone(), OnConflict::Rename).unwrap();
-        assert_eq!(second.path, directory.path().join("Lecture 3 (2).mp4"));
+        assert_eq!(second.path, directory.path().join("video_2.mp4"));
 
         let third = resolve_conflict(base.clone(), OnConflict::Rename).unwrap();
-        assert_eq!(third.path, directory.path().join("Lecture 3 (3).mp4"));
+        assert_eq!(third.path, directory.path().join("video_3.mp4"));
 
         // A gap is filled rather than skipped: the lowest free number wins.
-        fs::remove_file(directory.path().join("Lecture 3 (2).mp4")).unwrap();
+        fs::remove_file(directory.path().join("video_2.mp4")).unwrap();
         let fourth = resolve_conflict(base, OnConflict::Rename).unwrap();
-        assert_eq!(fourth.path, directory.path().join("Lecture 3 (2).mp4"));
+        assert_eq!(fourth.path, directory.path().join("video_2.mp4"));
     }
 
     #[test]
     fn a_failed_download_leaves_no_reservation_behind() {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().join("Lecture 3.mp4");
+        let base = directory.path().join("video.mp4");
 
         let target = resolve_conflict(base.clone(), OnConflict::Rename).unwrap();
         assert!(target.path.exists(), "the reservation was created");
@@ -574,7 +594,7 @@ mod tests {
             "an unused reservation is residue and must not survive"
         );
 
-        // And the name is free again, so a retry does not start at " (2)".
+        // And the name is free again, so a retry does not start at "_2".
         let retry = resolve_conflict(base.clone(), OnConflict::Rename).unwrap();
         assert_eq!(retry.path, base);
     }
@@ -583,7 +603,7 @@ mod tests {
     fn releasing_never_deletes_output_ffmpeg_actually_wrote() {
         let directory = tempfile::tempdir().unwrap();
         let target =
-            resolve_conflict(directory.path().join("Lecture 3.mp4"), OnConflict::Rename).unwrap();
+            resolve_conflict(directory.path().join("video.mp4"), OnConflict::Rename).unwrap();
         // The moment FFmpeg writes a byte the file stops being a reservation:
         // "preserve partial output after failures" takes over from here.
         fs::write(&target.path, b"partial media").unwrap();
@@ -613,12 +633,12 @@ mod tests {
         let dotless = directory.path().join("noextension");
         fs::write(&dotless, b"old").unwrap();
         let target = resolve_conflict(dotless, OnConflict::Rename).unwrap();
-        assert_eq!(target.path, directory.path().join("noextension (2)"));
+        assert_eq!(target.path, directory.path().join("noextension_2"));
 
         let dotfile = directory.path().join(".hidden");
         fs::write(&dotfile, b"old").unwrap();
         let target = resolve_conflict(dotfile, OnConflict::Rename).unwrap();
-        assert_eq!(target.path, directory.path().join(".hidden (2)"));
+        assert_eq!(target.path, directory.path().join(".hidden_2"));
     }
 
     #[test]

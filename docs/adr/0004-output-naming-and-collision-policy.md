@@ -1,6 +1,11 @@
 # ADR-0004: Name downloads from the page title, and rename rather than refuse
 
-* Status: Accepted
+* Status: Accepted, then **superseded in part** by
+  [ADR-0005](0005-default-output-name-over-derived-one.md): the naming decision
+  below is replaced by a fixed `video.<ext>` default with title naming opt-in.
+  The collision decision — rename for an inferred name, fail for an exact path,
+  reserve exclusively, release an unused reservation — still stands, with
+  ` (2)` respelled as `_2`.
 * Date: 2026-09-17
 * Issue: [KEI-60](https://linear.app/kzhq/issue/KEI-60)
 * Amends: [ADR-0001](0001-native-messaging-protocol.md), by adding two optional

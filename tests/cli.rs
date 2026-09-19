@@ -19,7 +19,7 @@ fn help_and_version_are_available() {
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("downer 0.4.0"));
+        .stdout(predicate::str::contains("downer 0.5.0"));
 }
 
 #[test]
@@ -158,7 +158,7 @@ fn an_inferred_filename_renames_rather_than_failing() {
         "fake media"
     );
     assert_eq!(
-        fs::read_to_string(output_dir.join("Lecture 3 (2).mp4")).unwrap(),
+        fs::read_to_string(output_dir.join("Lecture 3_2.mp4")).unwrap(),
         "fake media"
     );
 }
@@ -196,7 +196,7 @@ fn on_conflict_overrides_the_inferred_default() {
         "already here",
         "fail must not touch the existing file"
     );
-    assert!(!output_dir.join("Lecture 3 (2).mp4").exists());
+    assert!(!output_dir.join("Lecture 3_2.mp4").exists());
 
     attempt("overwrite").success();
     assert_eq!(
@@ -204,7 +204,7 @@ fn on_conflict_overrides_the_inferred_default() {
         "fake media"
     );
     assert!(
-        !output_dir.join("Lecture 3 (2).mp4").exists(),
+        !output_dir.join("Lecture 3_2.mp4").exists(),
         "overwrite replaces in place rather than renaming"
     );
 }
@@ -229,7 +229,7 @@ fn an_exact_output_path_still_fails_on_collision_by_default() {
         .code(3)
         .stderr(predicate::str::contains("already exists"));
     assert_eq!(fs::read_to_string(&output).unwrap(), "already here");
-    assert!(!temp.path().join("exact (2).mp4").exists());
+    assert!(!temp.path().join("exact_2.mp4").exists());
 
     Command::cargo_bin("downer")
         .unwrap()
@@ -242,7 +242,7 @@ fn an_exact_output_path_still_fails_on_collision_by_default() {
         .success();
     assert_eq!(fs::read_to_string(&output).unwrap(), "already here");
     assert_eq!(
-        fs::read_to_string(temp.path().join("exact (2).mp4")).unwrap(),
+        fs::read_to_string(temp.path().join("exact_2.mp4")).unwrap(),
         "fake media"
     );
 }

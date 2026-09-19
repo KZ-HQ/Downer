@@ -340,6 +340,42 @@ fn a_page_title_names_a_generically_named_stream() {
     }
 }
 
+/// The default, and the case almost every download takes: no `title` on the
+/// wire, so a generically named playlist becomes `video.mp4` rather than
+/// anything derived from the page or the host. KEI-84.
+#[test]
+fn a_download_without_a_title_is_named_video() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg::default().install(temp.path());
+    let output_dir = temp.path().join("downloads");
+
+    let mut produced = Vec::new();
+    for job in ["job-default-a", "job-default-b"] {
+        let mut host = NativeHost::start(&ffmpeg);
+        let request = {
+            let mut request = download_request("https://example.test/hls/index.m3u8", &output_dir);
+            request["job_id"] = json!(job);
+            // No `title` key at all: the extension omits it unless the user
+            // opted into title naming.
+            assert!(request.get("title").is_none());
+            request
+        };
+        host.send(&request);
+        let (completed, _) = host.wait_for_state("completed");
+        assert_envelope(&completed, "terminal");
+        produced.push(PathBuf::from(
+            completed["path"]
+                .as_str()
+                .expect("completed carries a path"),
+        ));
+    }
+
+    assert_eq!(produced[0], output_dir.join("video.mp4"));
+    // Still collision-free: the default name repeating is the normal case now,
+    // so the rename sequence is what keeps downloads from destroying each other.
+    assert_eq!(produced[1], output_dir.join("video_2.mp4"));
+}
+
 /// With no `title` the host still must not fail the second download: the
 /// vocabulary's `default_on_conflict` is `rename`, so the same page downloaded
 /// twice lands beside itself.
@@ -371,7 +407,7 @@ fn a_repeated_download_renames_instead_of_failing() {
     }
 
     assert_eq!(produced[0], output_dir.join("Same Page.mp4"));
-    assert_eq!(produced[1], output_dir.join("Same Page (2).mp4"));
+    assert_eq!(produced[1], output_dir.join("Same Page_2.mp4"));
 }
 
 /// `on_conflict: "fail"` restores the strict behaviour, and every policy name
@@ -399,7 +435,7 @@ fn on_conflict_fail_is_honoured_and_every_listed_policy_is_accepted() {
         "already here",
         "fail must leave the existing file alone"
     );
-    assert!(!output_dir.join("Same Page (2).mp4").exists());
+    assert!(!output_dir.join("Same Page_2.mp4").exists());
 
     for policy in protocol_strings("/on_conflict_policies") {
         let mut host = NativeHost::start(&ffmpeg);

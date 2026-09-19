@@ -14,6 +14,17 @@ const ON_CONFLICT_POLICIES = ["fail", "rename", "overwrite"];
 const DEFAULT_ON_CONFLICT = "rename";
 
 /**
+ * Whether a download is named after the page title.
+ *
+ * Off by default (KEI-84): a generically named playlist becomes `video.mp4`,
+ * which is predictable, rather than something derived from whatever the page
+ * happened to put in its `<title>`. When it is off the extension simply does
+ * not send `title`, so the opt-in needs no protocol field of its own and an
+ * older host sees exactly what it saw before.
+ */
+const DEFAULT_NAME_FROM_TITLE = false;
+
+/**
  * How long storage writes and log broadcasts are coalesced for.
  *
  * FFmpeg's HLS demuxer logs one line per segment at `-loglevel info`, so a
@@ -428,7 +439,8 @@ async function runDownload(message, jobId) {
     const settings = await browser.storage.local.get({
       outputDir: "",
       ffmpegThreads: null,
-      onConflict: DEFAULT_ON_CONFLICT
+      onConflict: DEFAULT_ON_CONFLICT,
+      nameFromTitle: DEFAULT_NAME_FROM_TITLE
     });
     const cookie = await cookieHeader(message.url);
     let playlistInfo = null;
@@ -454,7 +466,14 @@ async function runDownload(message, jobId) {
       output_dir: settings.outputDir || null,
       cookie: cookie || null,
       user_agent: navigator.userAgent,
-      title: typeof message.title === "string" && message.title.trim() ? message.title.trim() : null,
+      // Omitted entirely unless the user opted in: absent means "name it
+      // video.<ext>", which is the default policy rather than a fallback.
+      title:
+        settings.nameFromTitle === true &&
+        typeof message.title === "string" &&
+        message.title.trim()
+          ? message.title.trim()
+          : null,
       on_conflict: ON_CONFLICT_POLICIES.includes(settings.onConflict)
         ? settings.onConflict
         : DEFAULT_ON_CONFLICT,
