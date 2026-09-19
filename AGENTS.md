@@ -72,10 +72,10 @@ Architectural decisions are recorded as ADRs under `docs/adr/`, numbered
 `NNNN-short-title.md`. ADR-0001 records the native messaging protocol
 contract, ADR-0002 cookie scoping and argv exposure, ADR-0003 where URL
 redaction happens, ADR-0004 the output collision policy, ADR-0005 the
-default output name, ADR-0006 FFmpeg version detection, and ADR-0007 the
-structured FFmpeg command model; KEI-63
-backfills the decisions already embodied in the code and adds the rest of the
-documentation set.
+default output name, ADR-0006 FFmpeg version detection, ADR-0007 the
+structured FFmpeg command model, and ADR-0008 relocatable native host
+installation; KEI-63 backfills the decisions already embodied in the code and
+adds the rest of the documentation set.
 
 Any change to the native messaging protocol, the host process model, the
 FFmpeg command layer, discovery ownership, or control semantics requires an
@@ -86,7 +86,9 @@ ADR.
 - `src/`: Rust CLI, FFmpeg process layer, scraper, output handling, and native host.
 - `extension/`: Firefox WebExtension files, popup, Settings page, background worker,
   content script, and native messaging protocol.
-- `scripts/`: native host installation and launcher scripts,
+- `scripts/`: `install_native_host.sh`, a thin development wrapper that builds
+  the release binary and runs `downer install-host --dev` (the installation
+  itself lives in `src/host.rs`, so a user without the repository can run it),
   `install_test_browser.sh`, which installs the Firefox and geckodriver the
   end-to-end tests drive, and `session_start.sh`, the SessionStart hook that
   runs it in a Claude Code cloud session and nowhere else.
@@ -163,6 +165,11 @@ ADR.
 8. `src/scraper.rs` resolves source-page media URLs and parses HLS metadata.
 9. `src/output.rs` validates URLs, infers and sanitizes filenames from the URL
    and the caller's `NamingHints`, and applies the `OnConflict` policy.
+10. `src/host.rs` registers and removes the Firefox native messaging host: the
+   manifest, the launcher that supplies `--native-host` because Firefox does
+   not, the stable binary location outside the checkout, and the host config
+   file recording an FFmpeg path for a browser-launched host that has no
+   `DOWNER_FFMPEG`.
 
 ## Required workflow
 

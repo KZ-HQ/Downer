@@ -18,6 +18,10 @@ pub enum DownerError {
     /// the source, never the value.
     CookieSource(String),
     NativeIo(io::Error),
+    /// Installing or removing the native messaging host failed part way.
+    Host(String),
+    /// An argument to a host command named something unusable.
+    HostArgument(String),
     FfmpegUnavailable(PathBuf),
     /// FFmpeg ran, but it is older than the minimum this project supports, and
     /// the download failed. Carried as its own error so the CLI and the
@@ -65,6 +69,8 @@ impl fmt::Display for DownerError {
             ),
             Self::CookieSource(message) => write!(f, "could not read cookie: {message}"),
             Self::NativeIo(error) => write!(f, "native messaging I/O error: {error}"),
+            Self::Host(message) => write!(f, "native host installation failed: {message}"),
+            Self::HostArgument(message) => write!(f, "{message}"),
             Self::FfmpegUnavailable(path) => write!(
                 f,
                 "FFmpeg executable is unavailable or cannot be started: {}",

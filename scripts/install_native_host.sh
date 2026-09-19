@@ -1,25 +1,16 @@
 #!/bin/sh
+# Register the *development* build as Firefox's native messaging host.
+#
+# This is a thin wrapper now: `downer install-host` does the work, and it lives
+# in the binary so a user who installed Downer without the repository can run it
+# too (see docs/adr/0008-relocatable-native-host-installation.md). `--dev`
+# registers the freshly built binary where it sits in `target/release`, which is
+# what a checkout wants — reinstalling after `cargo build --release` is not
+# needed — and labels the manifest so an unexpected registration is easy to
+# recognise. A real installation uses `downer install-host` with no flags and
+# keeps working when the checkout is gone.
 set -eu
 
 repo_dir=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 cargo build --release --manifest-path "$repo_dir/Cargo.toml"
-native_binary="$repo_dir/scripts/native-host.sh"
-
-case "$(uname -s)" in
-  Darwin)
-    manifest_dir="${HOME}/Library/Application Support/Mozilla/NativeMessagingHosts"
-    ;;
-  Linux)
-    manifest_dir="${HOME}/.mozilla/native-messaging-hosts"
-    ;;
-  *)
-    echo "error: automatic native-host installation is supported on macOS and Linux" >&2
-    exit 1
-    ;;
-esac
-
-mkdir -p "$manifest_dir"
-manifest_path="$manifest_dir/com.downer.native.json"
-printf '{\n  "name": "com.downer.native",\n  "description": "Downer FFmpeg native messaging host",\n  "path": "%s",\n  "type": "stdio",\n  "allowed_extensions": ["downer@example.com"]\n}\n' "$native_binary" > "$manifest_path"
-chmod 755 "$native_binary" "$repo_dir/target/release/downer"
-echo "Installed native host manifest: $manifest_path"
+exec "$repo_dir/target/release/downer" install-host --dev "$@"

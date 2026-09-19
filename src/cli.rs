@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 use crate::output::OnConflict;
 
@@ -9,12 +9,18 @@ use crate::output::OnConflict;
     name = "downer",
     version,
     about = "Download one media URL using FFmpeg",
-    long_about = "Download one media URL using FFmpeg. Supports direct media files, HLS playlists, and segmented streams."
+    long_about = "Download one media URL using FFmpeg. Supports direct media files, HLS playlists, and segmented streams.",
+    // `downer URL [options]` is the interface (AGENTS.md), so the URL stays a
+    // required positional and the subcommands are an alternative to it rather
+    // than a layer above it: `downer install-host` needs no URL, and no option
+    // of the download command applies to it.
+    args_conflicts_with_subcommands = true,
+    subcommand_negates_reqs = true
 )]
 pub struct Cli {
     /// HTTP(S) media URL to download.
-    #[arg(value_name = "URL")]
-    pub url: String,
+    #[arg(value_name = "URL", required = true)]
+    pub url: Option<String>,
 
     /// Write to this exact file path.
     #[arg(short, long, value_name = "PATH", conflicts_with = "dir")]
@@ -72,4 +78,45 @@ pub struct Cli {
     /// Number of FFmpeg processing threads; omit to let FFmpeg choose.
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
     pub threads: Option<u16>,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+/// Everything `downer` does other than download a URL.
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Register this binary as Firefox's native messaging host.
+    InstallHost(InstallHostArgs),
+    /// Remove the native messaging host registration.
+    UninstallHost(UninstallHostArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct InstallHostArgs {
+    /// Record this FFmpeg for the host to use.
+    ///
+    /// Firefox launches the native host with a minimal environment, so
+    /// `DOWNER_FFMPEG` is not available to it. The path is written to the host
+    /// configuration file and used unless `DOWNER_FFMPEG` overrides it.
+    #[arg(long, value_name = "PATH")]
+    pub ffmpeg: Option<PathBuf>,
+
+    /// Register the running binary where it is instead of copying it.
+    ///
+    /// The registration then breaks if that binary is moved or deleted, which
+    /// is what `--dev` accepts deliberately.
+    #[arg(long)]
+    pub link: bool,
+
+    /// Register a development build: implies `--link` and labels the manifest.
+    #[arg(long)]
+    pub dev: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct UninstallHostArgs {
+    /// Also delete the copied binary, not just the registration.
+    #[arg(long)]
+    pub binary: bool,
 }
