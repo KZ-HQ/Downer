@@ -58,6 +58,50 @@ pub fn hls_info_with_timeout(
     hls_info_from_playlist(&client, &parent, user_agent, referer, cookie, Some(url))
 }
 
+/// What a playlist turned out to be, once parsed.
+///
+/// This is the single entry point for reading an HLS playlist. The extension
+/// fetches playlists — only the page's context carries the session a challenged
+/// CDN demands — and hands the text here rather than parsing it itself, so one
+/// implementation decides what a playlist means. See
+/// `docs/adr/0011-one-playlist-parser.md`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Playlist {
+    /// Lists renditions rather than segments.
+    Master {
+        /// The rendition a download should use, absent when resolving would be
+        /// unsafe — a master carrying audio as a separate rendition loses it if
+        /// only the video variant is taken (ADR-0010).
+        variant: Option<Url>,
+    },
+    /// Lists segments: how many, and how long altogether.
+    Media(HlsInfo),
+    /// Not a playlist this can use — no variants and no segments. A challenge
+    /// page and an empty playlist both land here; the caller says which it was
+    /// from what it fetched.
+    Unusable,
+}
+
+/// Read a playlist that somebody else fetched.
+///
+/// `base_url` is the URL the text came from, after redirects, because variant
+/// URIs are relative to it.
+pub fn parse_playlist(text: &str, base_url: &Url) -> Playlist {
+    if is_master_playlist(text) {
+        return Playlist::Master {
+            variant: if declares_separate_renditions(text) {
+                None
+            } else {
+                select_variant(text, base_url, None)
+            },
+        };
+    }
+    match parse_hls_info(text) {
+        Some(info) => Playlist::Media(info),
+        None => Playlist::Unusable,
+    }
+}
+
 /// The media playlist an HLS input actually means.
 ///
 /// `Some` only when `url` is a **master** playlist: the chosen variant's URL,
@@ -88,10 +132,10 @@ pub fn resolve_variant(
         .build()
         .ok()?;
     let (playlist, base_url) = fetch_hls_playlist(&client, url, user_agent, referer, cookie)?;
-    if !is_master_playlist(&playlist) || declares_separate_renditions(&playlist) {
-        return None;
+    match parse_playlist(&playlist, &base_url) {
+        Playlist::Master { variant } => variant,
+        Playlist::Media(_) | Playlist::Unusable => None,
     }
-    select_variant(&playlist, &base_url, None)
 }
 
 /// Does this master serve any rendition as its own playlist, outside the
@@ -468,24 +512,66 @@ fn resolve_candidate(raw: &str, base: &Url) -> Option<Url> {
     matches!(url.scheme(), "http" | "https").then_some(url)
 }
 
-fn is_playlist_url(url: &Url) -> bool {
+/// The extensions that mark a URL as media.
+///
+/// Mirrored by `MEDIA_EXTENSIONS` in `extension/media-scan.js`; both are
+/// asserted against `tests/fixtures/media-extensions.json`, so the two cannot
+/// drift without a test failing. See `docs/adr/0011-one-playlist-parser.md`.
+pub const MEDIA_EXTENSIONS: [&str; 15] = [
+    ".m3u8", ".mpd", ".mp4", ".webm", ".mov", ".m4v", ".mkv", ".avi", ".flv", ".ts", ".mpeg",
+    ".mpg", ".ogg", ".ogv", ".3gp",
+];
+
+/// The subset of [`MEDIA_EXTENSIONS`] that names a playlist rather than a file.
+pub const PLAYLIST_EXTENSIONS: [&str; 2] = [".m3u8", ".mpd"];
+
+/// Substring, not suffix: query strings and CDN path segments routinely follow
+/// the extension, and a suffix test would miss every signed URL.
+fn has_extension(url: &Url, extensions: &[&str]) -> bool {
     let value = url.as_str().to_ascii_lowercase();
-    value.contains(".m3u8") || value.contains(".mpd")
+    extensions.iter().any(|extension| value.contains(extension))
+}
+
+fn is_playlist_url(url: &Url) -> bool {
+    has_extension(url, &PLAYLIST_EXTENSIONS)
 }
 
 fn is_media_url(url: &Url) -> bool {
-    let value = url.as_str().to_ascii_lowercase();
-    [
-        ".m3u8", ".mpd", ".mp4", ".webm", ".mov", ".m4v", ".mkv", ".avi", ".flv", ".ts", ".mpeg",
-        ".mpg", ".ogg", ".ogv", ".3gp",
-    ]
-    .iter()
-    .any(|extension| value.contains(extension))
+    has_extension(url, &MEDIA_EXTENSIONS)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The extension lists on both sides come from one place.
+    ///
+    /// `extension/media-scan.js` keeps its own literal, because a content
+    /// script cannot read a repository file at runtime. This is what stops the
+    /// two from drifting: the shared vocabulary is the definition, and both
+    /// suites check themselves against it. The Node half is in
+    /// `tests/extension/media-scan.test.js`.
+    #[test]
+    fn media_extensions_match_the_shared_vocabulary() {
+        const VOCABULARY: &str = include_str!("../tests/fixtures/media-extensions.json");
+        let shared: serde_json::Value =
+            serde_json::from_str(VOCABULARY).expect("the shared vocabulary is valid JSON");
+        let listed = |key: &str| -> Vec<String> {
+            shared[key]
+                .as_array()
+                .unwrap_or_else(|| panic!("{key} is an array"))
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .expect("an extension is a string")
+                        .to_string()
+                })
+                .collect()
+        };
+        assert_eq!(listed("media_extensions"), MEDIA_EXTENSIONS.to_vec());
+        assert_eq!(listed("playlist_extensions"), PLAYLIST_EXTENSIONS.to_vec());
+    }
 
     #[test]
     fn extracts_relative_and_absolute_media_urls_with_playlists_first() {

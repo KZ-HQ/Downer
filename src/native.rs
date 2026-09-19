@@ -78,6 +78,14 @@ struct NativeRequest {
     source_url: Option<String>,
     #[serde(default)]
     output_dir: Option<PathBuf>,
+    /// The playlist the extension fetched in the page's context.
+    ///
+    /// Sent instead of the extension parsing it: one implementation reads a
+    /// playlist, and it is this one. Absent — the CLI, or a fetch the extension
+    /// could not make — the host fetches for itself, as it always has. See
+    /// `docs/adr/0011-one-playlist-parser.md`.
+    #[serde(default)]
+    playlist_text: Option<String>,
     /// The FFmpeg the user chose on the Settings page.
     ///
     /// Firefox launches the host with a minimal environment, so `DOWNER_FFMPEG`
@@ -455,6 +463,15 @@ fn start_hls_preflight(
     let Ok(url) = crate::output::validate_url(&request.url) else {
         return;
     };
+    // The extension fetched this in the page's context. When it is a media
+    // playlist the totals are already in hand, so no fetch is needed at all —
+    // and no second implementation has to agree about what they are.
+    if let Some(text) = request.playlist_text.as_deref() {
+        if let crate::scraper::Playlist::Media(info) = crate::scraper::parse_playlist(text, &url) {
+            publish_hls_info(job_id, info, task, &output);
+            return;
+        }
+    }
     let referer = request
         .source_url
         .as_deref()
@@ -484,20 +501,28 @@ fn start_hls_preflight(
         if !still_active {
             return;
         }
-        if let Ok(mut current) = task.hls_info.lock() {
-            *current = Some(info);
-        }
-        let progress = task.progress.lock().ok().and_then(|progress| *progress);
-        let state = if task.control.is_paused() {
-            "paused"
-        } else {
-            "downloading"
-        };
-        let _ = send_response(
-            &output,
-            &progress_response(&job_id, Some(info), progress, state, None),
-        );
+        publish_hls_info(&job_id, info, &task, &output);
     });
+}
+
+/// Record playlist totals on the task and tell the extension.
+///
+/// Shared by both ways they arrive: parsed from the text the extension sent, or
+/// fetched by the host when it did not.
+fn publish_hls_info(job_id: &str, info: HlsInfo, task: &ActiveTask, output: &SharedOutput) {
+    if let Ok(mut current) = task.hls_info.lock() {
+        *current = Some(info);
+    }
+    let progress = task.progress.lock().ok().and_then(|progress| *progress);
+    let state = if task.control.is_paused() {
+        "paused"
+    } else {
+        "downloading"
+    };
+    let _ = send_response(
+        output,
+        &progress_response(job_id, Some(info), progress, state, None),
+    );
 }
 
 fn control_download(request: NativeRequest, tasks: &ActiveTasks) -> NativeResponse {
@@ -677,6 +702,7 @@ fn download(
         cookie: request.cookie,
         threads: request.threads,
         quiet: true,
+        playlist_text: request.playlist_text.clone(),
     };
     let info = task.hls_info.lock().ok().and_then(|info| *info);
     let state = if task.control.is_paused() {

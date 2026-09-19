@@ -88,7 +88,6 @@ extension-e2e: ## Run the end-to-end tests against a real Firefox
 extension-check: extension-lint extension-test ## Validate Firefox extension JSON and JavaScript
 	@python3 -m json.tool extension/manifest.json >/dev/null
 	@node --check extension/background.js
-	@node --check extension/hls.js
 	@node --check extension/redact.js
 	@node --check extension/job-logs.js
 	@node --check extension/task-protocol.js

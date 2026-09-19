@@ -135,6 +135,13 @@ The Rust package and the Firefox extension share one product version; see
 
 ### Changed
 
+- HLS playlists are now parsed in one place. The extension fetches them — only
+  the page's context carries the session a protected CDN answers — and sends the
+  text to the native host, which reads it for the segment totals and the
+  rendition to download. `extension/hls.js` is gone. The two parsers had already
+  drifted: a playlist with a space after `#EXTINF:` gave the extension a segment
+  count and the host none. The host also makes no playlist request of its own
+  when the extension supplied one. See `docs/adr/0011-one-playlist-parser.md`.
 - Downloading an HLS **master** playlist now fetches one rendition instead of
   all of them. FFmpeg opens every variant a master lists and keeps only the
   best, so the rest was downloaded and discarded — two renditions meant twice

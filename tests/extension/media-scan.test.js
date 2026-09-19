@@ -6,12 +6,27 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const {
+  MEDIA_EXTENSIONS,
   MEDIA_ATTRIBUTES,
   MEDIA_SELECTOR,
   collectCandidates
 } = require("../../extension/media-scan.js");
 
+const sharedVocabulary = require("../fixtures/media-extensions.json");
+
 const PAGE_BASE = "https://example.test/files/index.html";
+
+/**
+ * KEI-51: the extension's extension list and the Rust one come from one place.
+ *
+ * Both keep their own literal — a content script cannot read a repository file
+ * at runtime — and both assert against the shared vocabulary, so adding an
+ * extension on one side without the other fails here or in
+ * `scraper::tests::media_extensions_match_the_shared_vocabulary`.
+ */
+test("the media extension list matches the shared vocabulary", () => {
+  assert.deepEqual(MEDIA_EXTENSIONS, sharedVocabulary.media_extensions);
+});
 
 /**
  * HTML fixtures are shared with `src/scraper.rs`'s own tests, so the CLI and the

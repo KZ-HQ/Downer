@@ -1,0 +1,8 @@
+{
+  "comment": "Single source of truth for the file extensions treated as media. src/scraper.rs (is_media_url, is_playlist_url) and extension/media-scan.js (MEDIA_EXTENSIONS) each keep their own literal, and both test suites assert against this file, so the two cannot drift without failing. Matching is a case-insensitive substring test on the whole URL, not a suffix test, because query strings and CDN path segments routinely follow the extension. See docs/adr/0011-one-playlist-parser.md.",
+  "media_extensions": [
+    ".m3u8", ".mpd", ".mp4", ".webm", ".mov", ".m4v", ".mkv", ".avi",
+    ".flv", ".ts", ".mpeg", ".mpg", ".ogg", ".ogv", ".3gp"
+  ],
+  "playlist_extensions": [".m3u8", ".mpd"]
+}

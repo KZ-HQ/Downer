@@ -7,7 +7,7 @@
  * storage key (KEI-55).
  *
  * Pure and importable from Node, with the same `module.exports` guard as
- * `extension/hls.js`, so the caps can be tested without a browser.
+ * `extension/task-protocol.js`, so the caps can be tested without a browser.
  */
 var DownerJobLogs = (() => {
   const LOG_KEY_PREFIX = "downloadLogs:";

@@ -2,7 +2,7 @@
  * Decides which persisted download jobs the popup should render.
  *
  * Pure and importable from Node (same `module.exports` guard as
- * `extension/hls.js`), because `extension/popup.js` touches the DOM and the
+ * `extension/task-protocol.js`), because `extension/popup.js` touches the DOM and the
  * `browser` global at load and cannot be imported as-is.
  *
  * This is a **rendering** decision, not a job state. The state machine itself

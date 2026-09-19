@@ -45,6 +45,11 @@ fn media_playlist(origin: &HeaderRecorder) -> String {
 
 /// Run a download against a fake FFmpeg and return the argv it received.
 fn argv_for(url: &str) -> Vec<String> {
+    argv_for_with_text(url, None)
+}
+
+/// As `argv_for`, with a playlist the caller already fetched.
+fn argv_for_with_text(url: &str, playlist_text: Option<&str>) -> Vec<String> {
     let temp = tempfile::tempdir().expect("a temporary directory");
     let fake = install_recording_fake(temp.path());
     let output = temp.path().join("out.mp4");
@@ -64,6 +69,7 @@ fn argv_for(url: &str) -> Vec<String> {
         cookie: None,
         threads: None,
         quiet: true,
+        playlist_text: playlist_text.map(str::to_string),
     };
     downer::download_resolved(media, &options, Hooks::default()).expect("the fake download runs");
     recorded(temp.path())
@@ -216,4 +222,59 @@ fn recorded(directory: &Path) -> Vec<String> {
         .filter(|argument| !argument.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+/// KEI-51: a playlist the extension already fetched is parsed, not refetched.
+///
+/// The extension has the page's session and the host does not, so the text it
+/// fetched is the one that can be read at all on a challenged CDN (KEI-87).
+/// Supplying it must also cost nothing: the recording server sees no request.
+#[test]
+fn a_supplied_master_playlist_is_used_without_any_fetch() {
+    let origin = HeaderRecorder::start("127.0.0.1");
+    let low = origin.url("/media/low.m3u8");
+    let high = origin.url("/media/high.m3u8");
+    // Deliberately not routed: reaching for it over HTTP would 404, so a pass
+    // here proves the text was read rather than the URL fetched.
+    let url = origin.url("/media/master.m3u8");
+
+    let args = argv_for_with_text(&url, Some(&master_playlist(&low, &high)));
+    assert_eq!(
+        input_of(&args),
+        high,
+        "the supplied master resolved to its highest rendition: {args:?}"
+    );
+    assert!(
+        origin.requests().is_empty(),
+        "supplying the text means no fetch at all: {:?}",
+        origin
+            .requests()
+            .iter()
+            .map(|r| &r.path)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A supplied media playlist is left as the input, and still not refetched.
+#[test]
+fn a_supplied_media_playlist_needs_no_fetch_either() {
+    let origin = HeaderRecorder::start("127.0.0.1");
+    let url = origin.url("/media/video.m3u8");
+
+    let args = argv_for_with_text(&url, Some(&media_playlist(&origin)));
+    assert_eq!(input_of(&args), url);
+    assert!(origin.requests().is_empty(), "no fetch was needed");
+}
+
+/// Text that is not a playlist falls back to the URL, as a failed fetch does.
+#[test]
+fn supplied_text_that_is_not_a_playlist_falls_back() {
+    let origin = HeaderRecorder::start("127.0.0.1");
+    let url = origin.url("/media/challenged.m3u8");
+
+    let args = argv_for_with_text(
+        &url,
+        Some("<!DOCTYPE html><title>Attention Required!</title>"),
+    );
+    assert_eq!(input_of(&args), url);
 }
