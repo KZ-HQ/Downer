@@ -4,7 +4,7 @@ CARGO ?= cargo
 FFMPEG ?= ffmpeg
 NPM ?= npm
 
-.PHONY: help setup doctor build fmt fmt-check lint test version-check extension-deps extension-lint extension-test extension-check extension-browser extension-e2e check run install extension extension-package extension-install fixture-site fixture-site-peer clean
+.PHONY: help setup doctor build fmt fmt-check lint test version-check extension-deps extension-lint extension-test extension-check extension-browser extension-ffmpeg extension-e2e extension-e2e-native check run install extension extension-package extension-install fixture-site fixture-site-peer clean
 
 help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -68,6 +68,18 @@ extension-browser: ## Install the Firefox and geckodriver used by the end-to-end
 # Deliberately not part of `check`: it needs a real browser, which a plain
 # checkout does not have. `make extension-browser` installs one; see
 # docs/e2e-firefox.md.
+extension-ffmpeg: ## Install the FFmpeg used by the native end-to-end test
+	./scripts/install_test_ffmpeg.sh
+
+# A focused way to run just the native download test; `extension-e2e` picks it
+# up too. It never runs in CI, because it needs a registered native messaging
+# host and an FFmpeg 7.1+ and CI has neither — AGENTS.md keeps FFmpeg out of CI
+# deliberately. Rather than being excluded by the glob, the test detects that
+# itself and skips out loud, so a green run is never mistaken for a pass and the
+# reason is printed wherever it runs.
+extension-e2e-native: ## Run the native download end-to-end test (needs a native host and FFmpeg 7.1+)
+	@node --test tests/e2e/native-download.test.mjs
+
 extension-e2e: ## Run the end-to-end tests against a real Firefox
 	@node -e 'import("./tests/e2e/browser.mjs").then(({ browserBinaries }) => browserBinaries())' \
 		2>/dev/null || { echo "no Firefox for the end-to-end tests; run 'make extension-browser'" >&2; exit 1; }

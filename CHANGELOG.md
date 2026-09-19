@@ -109,6 +109,23 @@ The Rust package and the Firefox extension share one product version; see
 
 ### Changed
 
+- The end-to-end suite now covers the whole download path in a real Firefox, not
+  just the browser: `tests/e2e/native-download.test.mjs` drives the content
+  script's `document.title` through the popup message, the background script, a
+  real native messaging port, the Rust host and FFmpeg, to the file that lands
+  on disk. It pins the collision-free naming rule's acceptance criterion — two
+  pages whose playlists are both `index.m3u8` produce two distinct, title-based
+  filenames — plus the rename sequence, the Settings collision policy, and that
+  a failed download leaves no file behind. It needs a registered native host and
+  an FFmpeg 7.1+, so it skips out loud with a `SKIP:` line wherever those are
+  missing, including CI. `make extension-ffmpeg` installs a suitable FFmpeg
+  beside the test browser.
+- The fixture site serves its playlist a second time as `/media/index.m3u8` and
+  titles each instance's page after its own host and port, so two origins
+  produce two different filenames from an identically named playlist. Every
+  playlist it served before had a distinctive stem, which no naming rule would
+  ever reach.
+
 - A download whose media URL has a generic filename — `index`, `playlist`,
   `master`, `download`, `video`, `media`, or digits only, which covers most HLS
   playlists — is now named after the source page's title, falling back to the
