@@ -281,9 +281,30 @@ pub fn download_resolved(
         }
     }
 
+    // A master playlist lists renditions; handing one to FFmpeg makes it fetch
+    // *every* rendition and write only the best, so the rest is downloaded and
+    // discarded. Resolving to the variant we already count means one rendition
+    // is fetched, and the same one lands on disk. Best-effort by design: an
+    // unresolvable playlist falls back to the URL as given, which is what this
+    // did before. See ADR-0010.
+    let input = if is_hls(url.as_str()) {
+        scraper::resolve_variant(
+            url,
+            &options.user_agent,
+            media.referer.as_ref(),
+            options.cookie.as_deref(),
+        )
+        .unwrap_or_else(|| url.clone())
+    } else {
+        url.clone()
+    };
+    if !options.quiet && input != *url {
+        println!("Selected rendition: {input}");
+    }
+
     let invocation = FfmpegInvocation {
         program: options.ffmpeg.clone(),
-        input: url.as_str().to_string(),
+        input: input.as_str().to_string(),
         headers: scraper::ffmpeg_headers(media.referer.as_ref(), &options.user_agent),
         // Scoped to this URL's host, so a redirect target or a cross-host HLS
         // segment server never receives the media host's session.
