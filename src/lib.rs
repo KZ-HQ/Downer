@@ -103,18 +103,12 @@ fn normalize_cookie(raw: &str) -> Option<String> {
 pub fn run(cli: Cli) -> DownerResult<()> {
     let cookie = resolve_cookie(&cli)?;
     let media = scraper::resolve_media(&cli.url, &cli.user_agent, cookie.as_deref())?;
-    let source_host = media
-        .referer
-        .as_ref()
-        .unwrap_or(&media.url)
-        .host_str()
-        .map(str::to_string);
     let options = DownloadOptions {
         output: cli.output,
         dir: cli.dir,
         overwrite: cli.overwrite,
         on_conflict: cli.on_conflict,
-        naming: NamingHints::new(cli.name, source_host),
+        naming: NamingHints::new(cli.name),
         ffmpeg: cli.ffmpeg,
         user_agent: cli.user_agent,
         cookie,

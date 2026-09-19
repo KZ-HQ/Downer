@@ -8,10 +8,12 @@
  *   content script's `document.title` -> popup's `download-media` message ->
  *   background -> `runtime.connectNative` -> the Rust host -> FFmpeg -> a file
  *
- * — because KEI-60's acceptance criterion lives at the end of it: two pages
- * whose playlists are both `index.m3u8` must produce two distinct, title-based
- * filenames. Every layer below the browser is exercised by unit and integration
- * tests; only a real Gecko can prove the title survives the trip.
+ * — because the output naming rule's acceptance criterion lives at the end of
+ * it. By default (KEI-84) a generically named playlist becomes `video.<ext>`
+ * and repeats rename to `video_2.mp4`; with the "name downloads after the page
+ * title" setting on, the page's own title names the file instead. Every layer
+ * below the browser is exercised by unit and integration tests; only a real
+ * Gecko can show that the setting, and the title, survive the whole trip.
  *
  * It cannot run in CI (no native host, and AGENTS.md keeps FFmpeg out of CI
  * deliberately), and it needs setup a plain checkout does not have, so it skips
@@ -81,6 +83,7 @@ const DOWNLOAD = `
 `;
 
 const SET_POLICY = `await browser.storage.local.set({ onConflict: arguments[0] }); return true;`;
+const SET_TITLE_NAMING = `await browser.storage.local.set({ nameFromTitle: arguments[0] }); return true;`;
 
 test("the extension downloads through the native host", { skip, concurrency: 1 }, async (t) => {
   // The native host discovers FFmpeg through this, and geckodriver inherits it,
@@ -115,7 +118,31 @@ test("the extension downloads through the native host", { skip, concurrency: 1 }
 
     const [first, second] = fixtures.origins;
 
-    await t.test("two pages named index.m3u8 produce two distinct title-based files", async () => {
+    await t.test("a generically named playlist is video.mp4 by default", async () => {
+      // The shipped default: the page has a perfectly good title and it is
+      // deliberately not used, because naming from it is opt-in (KEI-84).
+      const job = await downloadFrom(first);
+      assert.equal(job.state, "completed", `download failed: ${job.error || "(no error)"}`);
+      assert.equal(job.path, path.join(output, "video.mp4"));
+      // A name is not enough: an empty file would satisfy that assertion while
+      // meaning the download never happened.
+      assert.ok(fs.statSync(job.path).size > 1000, "video.mp4 holds real media");
+    });
+
+    await t.test("a repeat renames to video_2.mp4 rather than failing", async () => {
+      const before = fs.statSync(path.join(output, "video.mp4")).size;
+      const job = await downloadFrom(second);
+      assert.equal(job.state, "completed");
+      assert.equal(job.path, path.join(output, "video_2.mp4"));
+      assert.equal(
+        fs.statSync(path.join(output, "video.mp4")).size,
+        before,
+        "the first download is left alone"
+      );
+    });
+
+    await t.test("the title names the file once the user opts in", async () => {
+      await browser.evaluate(SET_TITLE_NAMING, [true]);
       const results = [];
       for (const origin of fixtures.origins) {
         const job = await downloadFrom(origin);
@@ -128,24 +155,11 @@ test("the extension downloads through the native host", { skip, concurrency: 1 }
       );
       assert.deepEqual(results, expected);
       assert.notEqual(results[0], results[1], "the two pages must not collide");
-
       for (const file of results) {
-        // A name is not enough: an empty file would satisfy every assertion
-        // above while meaning the download never happened.
         assert.ok(fs.statSync(file).size > 1000, `${file} holds real media`);
       }
-    });
 
-    await t.test("downloading the same page twice renames rather than failing", async () => {
-      const before = fs.statSync(path.join(output, `${first.title.replace(/:/g, "_")}.mp4`)).size;
-      const job = await downloadFrom(first);
-      assert.equal(job.state, "completed");
-      assert.equal(job.path, path.join(output, `${first.title.replace(/:/g, "_")} (2).mp4`));
-      assert.equal(
-        fs.statSync(path.join(output, `${first.title.replace(/:/g, "_")}.mp4`)).size,
-        before,
-        "the first download is left alone"
-      );
+      await browser.evaluate(SET_TITLE_NAMING, [false]);
     });
 
     await t.test("the Settings policy reaches the host", async () => {
@@ -160,7 +174,7 @@ test("the extension downloads through the native host", { skip, concurrency: 1 }
       const names = listing();
       const overwritten = await downloadFrom(first);
       assert.equal(overwritten.state, "completed");
-      assert.equal(overwritten.path, path.join(output, `${first.title.replace(/:/g, "_")}.mp4`));
+      assert.equal(overwritten.path, path.join(output, "video.mp4"));
       assert.deepEqual(listing(), names, "overwrite replaces in place, adding no numbered file");
     });
 

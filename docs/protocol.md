@@ -79,7 +79,11 @@ Notes:
   FFmpeg starts; `hls-info` supplies them later for an already-running job.
 * `title` is the source page's title, used to name the output file when the
   media URL's own filename stem is generic (`index`, `playlist`, `master`,
-  `download`, `video`, `media`, or digits only). It is naming material, not
+  `download`, `video`, `media`, or digits only). **It is opt-in and absent by
+  default**: the extension omits it unless the user turns on "name downloads
+  after the page title", and a `download` without it is named `video.<ext>`.
+  Sending or omitting the field *is* how the opt-in is expressed, which is why
+  no separate flag joins this contract (ADR-0005). It is naming material, not
   diagnostics: the host sanitises and bounds it, and never echoes it in a `log`,
   a `progress` or an `error` — the `path` of a `terminal` event is the only
   response it can reach. See

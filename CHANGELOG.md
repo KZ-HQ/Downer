@@ -109,6 +109,22 @@ The Rust package and the Firefox extension share one product version; see
 
 ### Changed
 
+- A download whose media URL has no useful filename is now named `video.mp4`
+  rather than after the source page's title. A fixed default is predictable,
+  where a derived one varies with the site, the login state and the locale.
+  Naming after the page title is still available but **off by default**:
+  `--name` on the command line, or "Name downloads after the page title" on the
+  extension's Settings page. The source-host fallback is gone — it only ever
+  applied when no title was supplied, which is now the normal case. See
+  `docs/adr/0005-default-output-name-over-derived-one.md`; this supersedes the
+  naming half of ADR-0004, whose collision policy is unchanged.
+- The collision suffix is now `_2`, `_3`, … instead of ` (2)`, ` (3)`, … — no
+  quoting needed in a shell, and no separator surprises in other tools. Because
+  the default name now repeats for every generically named download, renaming is
+  the common path rather than the exception; nothing is overwritten unless asked.
+- The native protocol is unchanged and stays at version 1. `title` remains an
+  accepted optional field; the extension simply does not send it unless the user
+  opts in, so the opt-in needs no field of its own.
 - The end-to-end suite now covers the whole download path in a real Firefox, not
   just the browser: `tests/e2e/native-download.test.mjs` drives the content
   script's `document.title` through the popup message, the background script, a

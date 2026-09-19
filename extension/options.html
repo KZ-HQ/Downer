@@ -20,12 +20,17 @@
     <label>
       When a file of that name already exists
       <select id="on-conflict">
-        <option value="rename">Keep both — save as "name (2)"</option>
+        <option value="rename">Keep both — save as "name_2"</option>
         <option value="fail">Stop and report the collision</option>
         <option value="overwrite">Replace the existing file</option>
       </select>
     </label>
-    <p class="hint">Downloads are named after the page title when the media URL says nothing useful, so two pages rarely collide. "Replace the existing file" permanently discards what is already there.</p>
+    <p class="hint">Downloads whose media URL says nothing useful are named <code>video.mp4</code>, so repeats are common and "Keep both" is the default. "Replace the existing file" permanently discards what is already there.</p>
+    <label class="checkbox">
+      <input id="name-from-title" type="checkbox">
+      Name downloads after the page title
+    </label>
+    <p class="hint">Off by default. When on, a download whose media URL has no useful filename is named after the page's title instead of <code>video.mp4</code>. Page titles can contain account or document names, which would then appear in your Downloads folder.</p>
     <button id="save">Save</button>
     <p id="status"></p>
     <section aria-labelledby="logs-heading">

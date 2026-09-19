@@ -34,17 +34,34 @@ async function startedRequest(background, message) {
   return port.posted.find((posted) => posted?.command === "download");
 }
 
-test("the page title is forwarded to the host, trimmed", async () => {
+test("no title is sent by default, so the host names the file video.<ext>", async () => {
+  // KEI-84: naming from the page title is opt-in. With the setting off — the
+  // default — the field is absent rather than empty, which is what tells the
+  // host to use its own default name instead of deriving one.
   const background = await loadBackground({ native: true });
+  const request = await startedRequest(background, { title: "Lecture 3 — Topology" });
+  assert.equal(request.title, null);
+});
+
+test("the page title is forwarded, trimmed, once the user opts in", async () => {
+  const background = await loadBackground({ native: true, storage: { nameFromTitle: true } });
   const request = await startedRequest(background, { title: "  Lecture 3 — Topology  " });
   assert.equal(request.title, "Lecture 3 — Topology");
 });
 
-test("a missing or blank title is sent as null rather than an empty name", async () => {
+test("a missing or blank title is sent as null even when opted in", async () => {
   for (const title of [undefined, "", "   ", 42]) {
-    const background = await loadBackground({ native: true });
+    const background = await loadBackground({ native: true, storage: { nameFromTitle: true } });
     const request = await startedRequest(background, { title });
     assert.equal(request.title, null, `title ${JSON.stringify(title)}`);
+  }
+});
+
+test("only an explicit true opts in, so a stray stored value cannot enable it", async () => {
+  for (const stored of ["true", 1, "yes", null, undefined]) {
+    const background = await loadBackground({ native: true, storage: { nameFromTitle: stored } });
+    const request = await startedRequest(background, { title: "Lecture 3" });
+    assert.equal(request.title, null, `nameFromTitle ${JSON.stringify(stored)}`);
   }
 });
 
@@ -52,6 +69,8 @@ test("on_conflict defaults to the policy the shared protocol fixture pins", asyn
   const background = await loadBackground({ native: true });
   const request = await startedRequest(background, { title: "Lecture 3" });
   assert.equal(request.on_conflict, PROTOCOL.default_on_conflict);
+  // Renaming matters more now, not less: with video.<ext> as the default name,
+  // repeats are the normal case rather than the exception.
   assert.equal(request.on_conflict, "rename");
 });
 
@@ -98,6 +117,18 @@ test("the popup sends the scanned page title along with the media URL", async ()
   assert.ok(started, "the popup asked the background script to download");
   assert.equal(started.title, "Lecture 3 — Topology");
   assert.equal(started.sourceUrl, SOURCE_URL);
+});
+
+test("Settings offers the title-naming opt-in, off unless stored true", async () => {
+  const off = await loadOptions({});
+  assert.equal(off.field("name-from-title").checked, false, "off by default");
+
+  const on = await loadOptions({ settings: { nameFromTitle: true } });
+  assert.equal(on.field("name-from-title").checked, true);
+
+  on.field("name-from-title").checked = false;
+  await on.save();
+  assert.equal(on.saved().at(-1).nameFromTitle, false, "the choice is persisted");
 });
 
 test("Settings offers exactly the policies the host accepts, and saves the choice", async () => {

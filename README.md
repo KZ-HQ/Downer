@@ -131,16 +131,21 @@ outputs.
 
 When the media URL's own filename is generic — `index`, `playlist`, `master`,
 `download`, `video`, `media`, or digits only, which covers most HLS playlists —
-the download is named after the page title instead, falling back to the source
-host. The browser extension supplies the title automatically; on the command
-line, `--name` does. A title is sanitized the same way a URL-derived name is and
-is truncated to 80 characters.
+the download is named **`video.mp4`**. That is deliberate: a fixed default is
+predictable, where a name derived from the page varies with the site, the
+locale, and whatever marketing put in the `<title>`.
+
+Naming a download after the page title is available, but **off by default**: use
+`--name` on the command line, or tick "Name downloads after the page title" on
+the extension's Settings page. A title is sanitized the same way a URL-derived
+name is and is truncated to 80 characters. Bear in mind that page titles can
+carry account or document names, which then appear in your Downloads folder.
 
 A collision is then resolved according to who chose the filename:
 
 | Situation | Default | Effect |
 | --- | --- | --- |
-| Inferred filename (`--dir`, or neither flag, and every extension download) | `rename` | Writes `name (2).mp4`, `name (3).mp4`, … beside the existing file. Nothing is replaced. |
+| Inferred filename (`--dir`, or neither flag, and every extension download) | `rename` | Writes `video_2.mp4`, `video_3.mp4`, … beside the existing file. Nothing is replaced. |
 | Exact path (`--output`) | `fail` | Refuses with exit code 3 and leaves the existing file untouched. |
 
 `--on-conflict fail|rename|overwrite` overrides the default in either
@@ -148,8 +153,13 @@ direction, and `--overwrite` remains shorthand for `--on-conflict overwrite`.
 The two cannot be combined. The extension exposes the same choice on its
 Settings page; `overwrite` there permanently discards the existing file.
 
-The policy and the reasoning behind it are recorded in
-[ADR-0004](docs/adr/0004-output-naming-and-collision-policy.md).
+Because the default name repeats, renaming is the common path rather than the
+exception, and nothing is ever overwritten without being asked.
+
+The collision policy is recorded in
+[ADR-0004](docs/adr/0004-output-naming-and-collision-policy.md) and the naming
+default in
+[ADR-0005](docs/adr/0005-default-output-name-over-derived-one.md).
 Partial files are retained if FFmpeg fails for diagnostics. Resuming failed
 downloads is not promised in v1.
 

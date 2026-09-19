@@ -6,6 +6,7 @@ const { trimLogEntries } = DownerJobLogs;
 const outputElement = document.getElementById("output-dir");
 const threadsElement = document.getElementById("ffmpeg-threads");
 const conflictElement = document.getElementById("on-conflict");
+const titleNamingElement = document.getElementById("name-from-title");
 const statusElement = document.getElementById("status");
 const filterElement = document.getElementById("job-filter");
 const logsElement = document.getElementById("logs");
@@ -70,12 +71,16 @@ function appendLogs(jobId, entries) {
 
 /** Kept identical to `default_on_conflict` in `tests/fixtures/protocol.json`. */
 const DEFAULT_ON_CONFLICT = "rename";
+/** Kept identical to `DEFAULT_NAME_FROM_TITLE` in `background.js` (KEI-84). */
+const DEFAULT_NAME_FROM_TITLE = false;
 
 browser.storage.local.get({
   outputDir: "",
   ffmpegThreads: null,
-  onConflict: DEFAULT_ON_CONFLICT
+  onConflict: DEFAULT_ON_CONFLICT,
+  nameFromTitle: DEFAULT_NAME_FROM_TITLE
 }).then((settings) => {
+  titleNamingElement.checked = settings.nameFromTitle === true;
   outputElement.value = settings.outputDir;
   threadsElement.value = Number.isInteger(settings.ffmpegThreads) ? settings.ffmpegThreads : "";
   // An unknown stored value falls back rather than being offered: the host
@@ -97,7 +102,8 @@ document.getElementById("save").addEventListener("click", async () => {
   await browser.storage.local.set({
     outputDir: outputElement.value.trim(),
     ffmpegThreads,
-    onConflict: conflictElement.value
+    onConflict: conflictElement.value,
+    nameFromTitle: titleNamingElement.checked
   });
   statusElement.textContent = "Saved.";
 });
