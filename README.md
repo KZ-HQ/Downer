@@ -28,6 +28,13 @@ already-established browser session be used for protected media.
   `-extension_picky 0`, which older builds do not accept. Development and
   testing currently use FFmpeg 9.0.1.
 
+  The version is detected at startup. An older FFmpeg is **warned about, not
+  refused**: those two 7.1-only options are omitted so the download can proceed,
+  because the strict segment-extension checking they switch off arrived in 7.1
+  too and 6.x does not need them. It remains unsupported — anything else that
+  needs 7.1 will still fail, and the failure names the version you have and the
+  minimum. See [ADR-0006](docs/adr/0006-ffmpeg-version-detection.md).
+
 The CLI and the Firefox extension share one product version; see "Versioning"
 in `AGENTS.md`. User-visible changes are listed in `CHANGELOG.md`.
 
@@ -192,8 +199,8 @@ not attempt to solve JavaScript challenges automatically. In that case, a
 valid browser cookie or a direct signed media URL is required.
 
 Use `downer --help` for all options. Exit status `2` indicates invalid input,
-`3` an output-path problem, `4` unavailable FFmpeg, and `5` a media or FFmpeg
-failure.
+`3` an output-path problem, `4` an FFmpeg that is unavailable or older than the
+supported minimum, and `5` a media or FFmpeg failure.
 
 ## Roadmap, status, and handoffs
 

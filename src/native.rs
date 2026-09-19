@@ -672,6 +672,12 @@ fn download(
             },
         );
     };
+    // The job error names an old FFmpeg on its own, but a download that still
+    // succeeds would say nothing at all, so the warning also goes out as a log
+    // line — the channel the Settings console already shows and persists.
+    if let Some(version) = crate::unsupported_ffmpeg(&options.ffmpeg) {
+        log(crate::outdated_ffmpeg_warning(version));
+    }
     crate::download_resolved_controlled_with_progress_and_logs(
         media,
         &options,

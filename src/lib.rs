@@ -197,6 +197,18 @@ fn download_resolved_with_executor(
         cookies.as_deref(),
         options.threads,
     );
+    // Both the CLI and the native host reach FFmpeg through here, so this is
+    // the one place that has to know whether it is old enough to matter.
+    let outdated = unsupported_ffmpeg(&options.ffmpeg);
+    let command = match outdated {
+        Some(version) => {
+            if !options.quiet {
+                eprintln!("{}", outdated_ffmpeg_warning(version));
+            }
+            command.without_segment_extension_options()
+        }
+        None => command,
+    };
     let destination = match execute(&command) {
         Ok(destination) => destination,
         Err(error) => {
@@ -204,7 +216,17 @@ fn download_resolved_with_executor(
             // Anything FFmpeg did write is kept; `release_reservation` only
             // takes the file back while it is still empty.
             release_reservation(&target);
-            return Err(error);
+            return Err(match (outdated, error) {
+                // An old FFmpeg that fails names itself, whatever it failed at.
+                (Some(version), DownerError::FfmpegFailed { stderr, .. }) => {
+                    DownerError::FfmpegTooOld {
+                        version,
+                        minimum: ffmpeg::MINIMUM_FFMPEG,
+                        stderr,
+                    }
+                }
+                (_, error) => error,
+            });
         }
     };
     if !options.quiet {
@@ -213,13 +235,34 @@ fn download_resolved_with_executor(
     Ok(destination)
 }
 
+/// The version of `path`, when it is older than [`ffmpeg::MINIMUM_FFMPEG`].
+///
+/// `None` covers both "new enough" and "could not tell"; neither changes how a
+/// download is built or reported.
+pub fn unsupported_ffmpeg(path: &Path) -> Option<ffmpeg::FfmpegVersion> {
+    ffmpeg::version(path).filter(|version| !version.meets_minimum())
+}
+
+/// The one wording for an FFmpeg below the minimum, so the CLI's warning, the
+/// extension's log, and [`DownerError::FfmpegTooOld`] cannot drift apart.
+pub fn outdated_ffmpeg_warning(version: ffmpeg::FfmpegVersion) -> String {
+    format!(
+        "Warning: FFmpeg {version} is older than the minimum supported {}. \
+         HLS segment-extension options are being omitted; downloads may fail.",
+        ffmpeg::MINIMUM_FFMPEG
+    )
+}
+
 pub fn exit_code(error: &DownerError) -> i32 {
     match error {
         DownerError::InvalidUrl(_) | DownerError::CookieSource(_) => INVALID_INPUT_EXIT,
         DownerError::OutputExists(_)
         | DownerError::OutputPath(_)
         | DownerError::OutputDirectory(_) => OUTPUT_EXIT,
-        DownerError::FfmpegUnavailable(_) => FFMPEG_UNAVAILABLE_EXIT,
+        // An FFmpeg too old to run this is unusable, not a media failure.
+        DownerError::FfmpegUnavailable(_) | DownerError::FfmpegTooOld { .. } => {
+            FFMPEG_UNAVAILABLE_EXIT
+        }
         DownerError::FfmpegFailed { .. }
         | DownerError::SourceFetchFailed { .. }
         | DownerError::MediaNotFound(_) => MEDIA_FAILURE_EXIT,

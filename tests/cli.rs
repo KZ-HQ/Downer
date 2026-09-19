@@ -129,6 +129,98 @@ fn fake_ffmpeg_failure_is_nonzero_and_preserves_partial_file() {
     assert_eq!(fs::read_to_string(output).unwrap(), "partial media");
 }
 
+/// KEI-81: an FFmpeg below the documented minimum names itself.
+///
+/// The fake reports 6.1.1 — Ubuntu 24.04's package, the version the issue was
+/// filed against — so this runs anywhere, including a CI machine with no FFmpeg
+/// at all. What is pinned is the wording: the version the user has, and the
+/// minimum they need.
+#[cfg(unix)]
+#[test]
+fn an_ffmpeg_below_the_minimum_reports_its_version_and_the_minimum() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake = fake_ffmpeg_reporting(temp.path(), true, "6.1.1-3ubuntu5");
+    let output = temp.path().join("partial.mp4");
+
+    Command::cargo_bin("downer")
+        .unwrap()
+        .args(["https://example.test/playlist.m3u8", "--output"])
+        .arg(&output)
+        .arg("--ffmpeg")
+        .arg(&fake)
+        .assert()
+        // Exit 4 is "unavailable FFmpeg": too old to use is not a media failure.
+        .code(4)
+        .stderr(predicate::str::contains(
+            "FFmpeg 6.1.1 is older than the minimum supported 7.1",
+        ))
+        // FFmpeg's own complaint is still the useful detail, so it is kept.
+        .stderr(predicate::str::contains("network failure"));
+}
+
+/// The other half of the decision recorded in ADR-0006: an HLS download on an
+/// old FFmpeg omits the two 7.1-only options rather than dying on them, and
+/// says so, so the degradation is visible rather than silent.
+#[cfg(unix)]
+#[test]
+fn an_old_ffmpeg_downloads_hls_without_the_71_only_options() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake = fake_ffmpeg_reporting(temp.path(), false, "6.1.1-3ubuntu5");
+    let output_dir = temp.path().join("downloads");
+
+    Command::cargo_bin("downer")
+        .unwrap()
+        .args(["https://example.test/stream.m3u8", "--dir"])
+        .arg(&output_dir)
+        .arg("--ffmpeg")
+        .arg(&fake)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "FFmpeg 6.1.1 is older than the minimum supported 7.1",
+        ));
+
+    let received_args = recorded_args(temp.path());
+    assert!(
+        !received_args
+            .iter()
+            .any(|argument| argument == "-allowed_segment_extensions"),
+        "the 7.1-only options are omitted on an older FFmpeg: {received_args:?}"
+    );
+    assert!(!received_args
+        .iter()
+        .any(|argument| argument == "-extension_picky"));
+    assert!(received_args.contains(&"https://example.test/stream.m3u8".to_string()));
+}
+
+/// A supported FFmpeg keeps the options: they are what makes an HLS stream with
+/// unusual segment extensions work at all from 7.1 onwards.
+#[cfg(unix)]
+#[test]
+fn a_supported_ffmpeg_still_receives_the_segment_extension_options() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake = fake_ffmpeg(temp.path(), false);
+    let output_dir = temp.path().join("downloads");
+
+    Command::cargo_bin("downer")
+        .unwrap()
+        .args(["https://example.test/stream.m3u8", "--dir"])
+        .arg(&output_dir)
+        .arg("--ffmpeg")
+        .arg(&fake)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("older than the minimum").not());
+
+    let received_args = recorded_args(temp.path());
+    assert!(received_args
+        .windows(2)
+        .any(|pair| pair == ["-allowed_segment_extensions", "ALL"]));
+    assert!(received_args
+        .windows(2)
+        .any(|pair| pair == ["-extension_picky", "0"]));
+}
+
 /// The default for an inferred filename is `rename`: a second download of the
 /// same stream lands beside the first instead of failing, which is the defect
 /// KEI-60 exists to fix.
@@ -372,40 +464,65 @@ fn a_missing_ffmpeg_leaves_no_file_behind() {
     assert_eq!(fs::read_dir(&output_dir).unwrap().count(), 0);
 }
 
+/// The version the fakes claim unless a test asks for another one. Anything at
+/// or above the documented minimum keeps them on the supported path.
+#[cfg(unix)]
+const FAKE_FFMPEG_VERSION: &str = "9.0.1";
+
+/// Answer `-version` the way FFmpeg does and exit before doing anything else.
+///
+/// Every download probes the version now, so a fake that did not answer would
+/// be asked to "download" to a file called `-version`.
+#[cfg(unix)]
+fn version_prelude(version: &str) -> String {
+    format!(
+        "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\n  \
+         echo 'ffmpeg version {version} Copyright (c) 2000-2026 the FFmpeg developers'\n  \
+         exit 0\nfi\n"
+    )
+}
+
 /// An FFmpeg that fails without writing to the output path at all.
 #[cfg(unix)]
 fn fake_silent_ffmpeg(directory: &Path) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let script = directory.join("fake-silent-ffmpeg");
-    fs::write(
-        &script,
-        "#!/bin/sh\necho 'could not open input' >&2\nexit 1\n",
-    )
-    .unwrap();
-    let mut permissions = fs::metadata(&script).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&script, permissions).unwrap();
-    script
+    let body = format!(
+        "{}echo 'could not open input' >&2\nexit 1\n",
+        version_prelude(FAKE_FFMPEG_VERSION)
+    );
+    install_fake(&script, &body)
 }
 
 #[cfg(unix)]
 fn fake_ffmpeg(directory: &Path, fail: bool) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
+    fake_ffmpeg_reporting(directory, fail, FAKE_FFMPEG_VERSION)
+}
+
+/// A fake that claims `version`, so a test can drive the too-old path without a
+/// real old FFmpeg.
+#[cfg(unix)]
+fn fake_ffmpeg_reporting(directory: &Path, fail: bool, version: &str) -> PathBuf {
     let script = directory.join(if fail {
         "fake-fail-ffmpeg"
     } else {
         "fake-ffmpeg"
     });
     let body = if fail {
-        "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\nprintf 'partial media' > \"$last\"\nprintf '%s\\0' \"$@\" > \"$(dirname \"$0\")/args\"\necho 'network failure' >&2\nexit 17\n"
+        "last=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\nprintf 'partial media' > \"$last\"\nprintf '%s\\0' \"$@\" > \"$(dirname \"$0\")/args\"\necho 'network failure' >&2\nexit 17\n"
     } else {
-        "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\nmkdir -p \"$(dirname \"$last\")\"\nprintf 'fake media' > \"$last\"\nprintf '%s\\0' \"$@\" > \"$(dirname \"$0\")/args\"\n"
+        "last=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\nmkdir -p \"$(dirname \"$last\")\"\nprintf 'fake media' > \"$last\"\nprintf '%s\\0' \"$@\" > \"$(dirname \"$0\")/args\"\n"
     };
-    fs::write(&script, body).unwrap();
-    let mut permissions = fs::metadata(&script).unwrap().permissions();
+    install_fake(&script, &format!("{}{body}", version_prelude(version)))
+}
+
+#[cfg(unix)]
+fn install_fake(script: &Path, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    fs::write(script, body).unwrap();
+    let mut permissions = fs::metadata(script).unwrap().permissions();
     permissions.set_mode(0o755);
-    fs::set_permissions(&script, permissions).unwrap();
-    script
+    fs::set_permissions(script, permissions).unwrap();
+    script.to_path_buf()
 }
 
 #[cfg(unix)]
