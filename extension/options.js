@@ -188,33 +188,71 @@ function renderSetupReport(report) {
 }
 
 /**
- * Turn a native-messaging connection failure into something to do about it.
+ * Turn a failure to reach or agree with the host into a rendered check.
  *
- * This is the case the Settings panel exists for: when the host is not
- * registered there is no host to ask, so the remediation has to be written
- * here rather than coming back from `status`.
+ * Three different problems arrive here as one exception, and they need three
+ * different instructions:
+ *
+ * - no registration at all, which `downer install-host` fixes;
+ * - a registration Firefox cannot execute;
+ * - a host and extension built from different protocol versions, which is
+ *   ordinary upgrade skew — the two ship separately, so rebuilding one without
+ *   the other is easy — and which `install-host` alone does **not** fix.
+ *
+ * The host cannot report any of these: in the first two there is nothing to
+ * ask, and in the third it either refused the handshake or answered a version
+ * this extension will not talk to.
  */
-function disconnectRemedy(message) {
+function connectionCheck(message) {
   const text = String(message || "");
+
+  // Either direction of mismatch: the host refused our version, or answered
+  // with one we refuse. Both mean the two halves are from different builds.
+  if (/protocol version/i.test(text)) {
+    return {
+      name: "protocol_version",
+      title: "Native host and extension speak the same protocol",
+      outcome: "fail",
+      detail: text,
+      remedy:
+        "The host and the extension are from different builds. Update whichever is older: "
+        + "rebuild and reinstall the host with `downer install-host`, or load a matching "
+        + "extension build."
+    };
+  }
   if (/no such native application/i.test(text)) {
-    return "Firefox has no registration for the native host. Install it with `downer install-host`.";
+    return {
+      name: "host_connection",
+      title: "Native host reachable",
+      outcome: "fail",
+      detail: text,
+      remedy: "Firefox has no registration for the native host. Install it with `downer install-host`."
+    };
   }
   if (/permission denied|access/i.test(text)) {
-    return "Firefox found the registration but could not run it. Re-run `downer install-host`, and check the launcher is executable.";
+    return {
+      name: "host_connection",
+      title: "Native host reachable",
+      outcome: "fail",
+      detail: text,
+      remedy:
+        "Firefox found the registration but could not run it. Re-run `downer install-host`, "
+        + "and check the launcher is executable."
+    };
   }
-  return "Could not reach the native host. Install or re-register it with `downer install-host`.";
+  return {
+    name: "host_connection",
+    title: "Native host reachable",
+    outcome: "fail",
+    detail: text,
+    remedy: "Could not reach the native host. Install or re-register it with `downer install-host`."
+  };
 }
 
 function renderSetupFailure(error) {
   resultsElement.textContent = "";
   resultsElement.append(
-    renderCheck({
-      name: "host_connection",
-      title: "Native host reachable",
-      outcome: "fail",
-      detail: String(error && error.message ? error.message : error),
-      remedy: disconnectRemedy(error && error.message ? error.message : error)
-    })
+    renderCheck(connectionCheck(error && error.message ? error.message : error))
   );
 }
 

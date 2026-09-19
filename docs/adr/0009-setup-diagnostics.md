@@ -50,9 +50,18 @@ to remove, so the type makes the omission visible rather than optional by habit.
 using?" is a question people ask when nothing is broken.
 
 **The unreachable case is the extension's to report.** When the host is not
-registered there is no host to ask, so the Settings panel renders that itself as
-a failed `host_connection` check and maps Firefox's `lastError` wording to
-instructions. It is the one check whose answer cannot come from `status`.
+registered there is no host to ask, so the Settings panel renders that itself
+and maps Firefox's `lastError` wording to instructions. These are the checks
+whose answer cannot come from `status`, and there are three of them, because
+they need three different instructions: no registration (`host_connection`,
+fixed by `downer install-host`), a registration Firefox cannot execute
+(`host_connection`), and a protocol version mismatch (`protocol_version`).
+
+The mismatch is not tampering — the extension and the host ship and update
+separately, so rebuilding one without the other is ordinary upgrade skew, and
+the handshake exists to catch it. Crucially `install-host` does **not** fix it:
+the remedy is to update whichever half is older. Manual testing caught the panel
+giving the registration advice for a mismatch, which was actively misleading.
 
 **An `ffmpeg` request field** on `download` and `status` carries the Settings
 page's FFmpeg path. Firefox starts the host with a minimal environment, so
@@ -90,6 +99,8 @@ and only the pinned extension ID can open the port at all.
 * **`log_path` is not reported**, though KEI-59's scope lists it. There is no
   host log file yet — KEI-64 creates one. A field that always says "none" would
   be noise, so it is left out until there is something to point at.
-* The protocol-version-mismatch path reuses the existing handshake check rather
-  than being a check of its own, so it is reported as a connection failure
-  rather than as a named check.
+* Both mismatch directions are covered by one rendered check. The host refuses
+  the handshake when the extension is newer; the extension refuses the answer
+  when the host is newer. They arrive as one exception and are classified by its
+  message, which is a string match — a structured error code on the wire would
+  be sturdier.

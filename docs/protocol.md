@@ -206,10 +206,16 @@ setup the one nothing is checked for. The check is skipped only when no default
 can be resolved at all, which on Linux means a machine with no XDG user-dirs
 configuration; there the download itself has no default either.
 
-The check the host cannot perform is whether it is reachable at all. When the
-registration is missing, `connectNative` fails and there is no host to ask, so
-the extension renders that itself as a failed `host_connection` check with its
-own remediation. `downer doctor` reports the same checks from the command line.
+The checks the host cannot perform are the ones about reaching it. When the
+registration is missing `connectNative` fails and there is no host to ask; when
+the two sides disagree on `protocol_version` the handshake is refused by
+whichever side is newer. The extension renders these itself, as
+`host_connection` and `protocol_version`, because they need different
+instructions — re-registering the host does not fix a version mismatch, which is
+ordinary upgrade skew between two halves that ship separately.
+
+`downer doctor` reports the same checks from the command line, minus those two:
+a CLI run speaks to no extension.
 
 ## Per-job state machine
 

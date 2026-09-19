@@ -155,3 +155,26 @@ test("an unreachable host is itself reported as a failed check, with what to do"
   // ask, which is exactly the case the panel exists for.
   assert.match(text, /downer install-host/);
 });
+
+test("a protocol mismatch says to update a build, not to re-register the host", async () => {
+  // The host refuses the handshake when the extension is newer; the extension
+  // refuses the answer when the host is newer. Both arrive here as one
+  // exception, and `downer install-host` fixes neither — the two halves ship
+  // separately, so this is ordinary upgrade skew rather than a broken install.
+  const page = await loadOptions({
+    setupResponse: {
+      ok: false,
+      error: "unsupported protocol version 99; this host speaks version 1"
+    }
+  });
+  await page.checkSetup();
+
+  const text = page.setupText();
+  assert.match(text, /unsupported protocol version 99/);
+  assert.match(text, /different builds/);
+  assert.doesNotMatch(
+    text,
+    /Install or re-register/,
+    "the generic registration advice would not fix a version mismatch"
+  );
+});
