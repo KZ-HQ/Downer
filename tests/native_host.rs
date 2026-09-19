@@ -1187,13 +1187,30 @@ fn status_reports_every_check_with_an_outcome_and_a_remedy() {
     );
 }
 
-/// `status` without an `output_dir` checks everything else rather than failing
-/// or inventing a directory.
+/// `status` without an `output_dir` checks the directory a download would
+/// actually use, rather than skipping the check.
+///
+/// Most users configure no directory, so the host falls back to the platform's
+/// Downloads folder — the same fallback `download` applies. Skipping here would
+/// mean the commonest setup is the one nothing is checked for.
 #[test]
-fn status_without_an_output_directory_skips_only_that_check() {
+fn status_without_an_output_directory_checks_the_default_one() {
     let temp = tempfile::tempdir().unwrap();
     let ffmpeg = FakeFfmpeg::default().install(temp.path());
-    let mut host = NativeHost::start(&ffmpeg);
+
+    // A temporary HOME with a Downloads folder the platform can discover. On
+    // Linux that means the XDG user-dirs file; without one there is no default
+    // to check, which is a real configuration and not what this test is about.
+    let home = temp.path().join("home");
+    let downloads = home.join("Downloads");
+    std::fs::create_dir_all(&downloads).unwrap();
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    std::fs::write(
+        home.join(".config").join("user-dirs.dirs"),
+        format!("XDG_DOWNLOAD_DIR=\"{}\"\n", downloads.display()),
+    )
+    .unwrap();
+    let mut host = NativeHost::start_discovering(&home, Some(&ffmpeg));
 
     host.send(&json!({
         "command": "status",
@@ -1205,11 +1222,22 @@ fn status_without_an_output_directory_skips_only_that_check() {
     let checks = event["status"]["checks"]
         .as_array()
         .expect("checks are an array");
+    let directory = checks
+        .iter()
+        .find(|check| check["name"] == json!("output_directory"))
+        .expect("the default download directory is checked, not skipped");
+    // Which directory, and whether it exists, depends on the machine; that it
+    // was named is the contract.
+    assert_eq!(
+        directory["outcome"],
+        json!("pass"),
+        "the discovered Downloads folder is writable: {directory}"
+    );
     assert!(
-        !checks
-            .iter()
-            .any(|check| check["name"] == json!("output_directory")),
-        "no directory was given, so none is checked: {event}"
+        directory["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("Downloads")),
+        "the check names the directory it looked at: {directory}"
     );
     assert!(
         checks.iter().any(|check| check["name"] == json!("ffmpeg")),

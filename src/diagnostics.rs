@@ -143,10 +143,12 @@ impl Report {
 
 /// Run every check.
 ///
-/// `output_dir` is the directory downloads would land in — the extension's
-/// configured one, or the CLI's `--dir`. `None` skips that check rather than
-/// inventing a directory to test, because a guess that passes says nothing
-/// about the directory the user actually uses.
+/// `output_dir` is the directory downloads would land in. Callers pass the
+/// directory their *own* download path would resolve to, defaults included —
+/// the native host's default is the user's Downloads folder, the CLI's is the
+/// working directory, and checking anything else would report on a directory
+/// nobody uses. `None` is for the case where even that cannot be resolved, and
+/// skips the check rather than inventing one.
 ///
 /// `ffmpeg` overrides discovery. `None` reports the FFmpeg the native host
 /// would pick, which is what the Settings panel is asking about; a caller that

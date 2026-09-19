@@ -199,9 +199,12 @@ Each entry in `checks` has:
 the supported minimum still downloads, so calling it a failure would be wrong,
 and saying nothing would be wrong too.
 
-Which checks run depends on the request. `output_dir` absent means the
-directory check is **skipped**, not failed: there is no directory to test, and
-testing a guessed one would report on something the user does not use.
+`output_dir` absent does **not** skip the directory check: the host resolves the
+same default `download` would use — the platform's Downloads folder — and checks
+that. Most users configure no directory, so skipping would leave the commonest
+setup the one nothing is checked for. The check is skipped only when no default
+can be resolved at all, which on Linux means a machine with no XDG user-dirs
+configuration; there the download itself has no default either.
 
 The check the host cannot perform is whether it is reachable at all. When the
 registration is missing, `connectNative` fails and there is no host to ask, so

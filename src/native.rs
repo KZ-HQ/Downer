@@ -281,7 +281,14 @@ fn status_response(
     ffmpeg: Option<&Path>,
     request_id: Option<String>,
 ) -> NativeResponse {
-    let report = crate::diagnostics::run(output_dir, ffmpeg);
+    // Resolve the directory exactly as `download` does, so the check reports on
+    // the directory a download would really use. Most users configure none, and
+    // checking nothing in the commonest case would make the panel's promise
+    // that downloads "can be written where you asked" untrue by default.
+    let directory = output_dir
+        .map(Path::to_path_buf)
+        .or_else(dirs::download_dir);
+    let report = crate::diagnostics::run(directory.as_deref(), ffmpeg);
     NativeResponse {
         event_type: EVENT_STATUS,
         ok: true,

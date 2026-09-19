@@ -66,6 +66,12 @@ and only the pinned extension ID can open the port at all.
   with no separate protocol change and no second ADR.
 * KEI-65's capability bullet needed nothing — `hello` has carried
   `capabilities.pause_resume` since ADR-0001. Only its UI half remains.
+* The directory check reports on the directory a download would really use:
+  each caller resolves its own default first — the native host's Downloads
+  folder, the CLI's working directory — rather than the check being skipped when
+  none was named. Checking nothing in the default configuration would have made
+  the panel's own promise untrue for most users. Found by manual testing, which
+  is exactly the case the jsdom and integration tests could not show.
 * The directory check writes a file. It is uniquely named, removed immediately,
   and a unit test asserts nothing survives: a diagnostic that litters the user's
   Downloads folder would be its own bug.

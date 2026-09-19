@@ -190,7 +190,10 @@ fn print_install_report(report: &host::InstallReport) {
 /// downloads — ADR-0006), so only a failing check makes this non-zero, which is
 /// what lets the command be used in a script.
 fn run_doctor(args: &cli::DoctorArgs) -> DownerResult<()> {
-    let report = diagnostics::run(args.dir.as_deref(), args.ffmpeg.as_deref());
+    // The CLI writes into the working directory when `--dir` is absent, so that
+    // is what gets checked — the same rule the download itself follows.
+    let directory = args.dir.clone().or_else(|| std::env::current_dir().ok());
+    let report = diagnostics::run(directory.as_deref(), args.ffmpeg.as_deref());
 
     println!(
         "downer {} (protocol {}), {}",
