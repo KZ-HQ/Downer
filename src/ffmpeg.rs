@@ -17,7 +17,7 @@ use crate::error::{DownerError, DownerResult};
 
 /// The oldest FFmpeg this project supports, as documented in `README.md`.
 ///
-/// The two HLS options in [`FfmpegCommand`] exist only from here onwards, which
+/// The two HLS options in [`FfmpegInvocation`] exist only from here onwards, which
 /// is what makes an older FFmpeg worth naming rather than letting it fail as an
 /// argument-parsing error.
 pub const MINIMUM_FFMPEG: FfmpegVersion = FfmpegVersion {
@@ -118,10 +118,56 @@ fn parse_version(line: &str) -> Option<FfmpegVersion> {
     })
 }
 
+/// How FFmpeg should report progress.
+///
+/// This is the only thing that differs between a run in a terminal and one
+/// driven by the native host, and it is a mode rather than a set of flags so
+/// that the two spellings cannot drift apart.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Reporting {
+    /// A terminal reading FFmpeg's own `-stats` line on stderr.
+    Cli,
+    /// A caller reading machine-readable progress from stdout.
+    Controlled { stats_period: f32 },
+}
+
+/// Seconds between `-progress` reports in [`Reporting::Controlled`].
+pub const DEFAULT_STATS_PERIOD: f32 = 0.5;
+
+impl Reporting {
+    /// [`Reporting::Controlled`] at the default period.
+    pub const CONTROLLED: Self = Self::Controlled {
+        stats_period: DEFAULT_STATS_PERIOD,
+    };
+}
+
+/// One FFmpeg download, expressed as what it is rather than as argv.
+///
+/// [`FfmpegInvocation::to_args`] is the only place argument order is decided,
+/// so no caller has to know where an option lands. The output path is a field
+/// rather than something recovered from the last argv element.
 #[derive(Debug, Clone)]
-pub struct FfmpegCommand {
+pub struct FfmpegInvocation {
     pub program: PathBuf,
-    pub args: Vec<OsString>,
+    /// The media URL, passed to FFmpeg as a single argument so a shell can
+    /// never see it; see `docs/adr/0002-cookie-scoping-and-argv-exposure.md`.
+    pub input: String,
+    /// The `-headers` block, applied to every request for this input.
+    pub headers: Option<String>,
+    /// The newline-delimited Set-Cookie syntax FFmpeg takes as `-cookies`,
+    /// built by `scraper::ffmpeg_cookies`. Separate from `headers` because
+    /// FFmpeg scopes `-cookies` per request host while applying `-headers` to
+    /// every request.
+    pub cookies: Option<String>,
+    /// Whether to loosen FFmpeg's segment-extension checking. The caller
+    /// decides, from the input *and* from whether this FFmpeg has the options
+    /// at all — they exist only from [`MINIMUM_FFMPEG`]; see
+    /// `docs/adr/0006-ffmpeg-version-detection.md`.
+    pub hls_lenient: bool,
+    pub threads: Option<u16>,
+    pub overwrite: bool,
+    pub output: PathBuf,
+    pub reporting: Reporting,
 }
 
 #[derive(Clone, Debug)]
@@ -263,105 +309,80 @@ mod unix_signal {
     pub const STOP: i32 = 0;
 }
 
-impl FfmpegCommand {
-    pub fn new(program: PathBuf, url: &str, output: PathBuf, overwrite: bool) -> Self {
-        Self::new_with_headers(program, url, output, overwrite, None)
+impl FfmpegInvocation {
+    /// A plain download of `input` to `output`: no headers, no cookies, no
+    /// leniency, no threading, reporting to a terminal.
+    pub fn new(program: PathBuf, input: &str, output: PathBuf, overwrite: bool) -> Self {
+        Self {
+            program,
+            input: input.to_string(),
+            headers: None,
+            cookies: None,
+            hls_lenient: false,
+            threads: None,
+            overwrite,
+            output,
+            reporting: Reporting::Cli,
+        }
     }
 
-    pub fn new_with_headers(
-        program: PathBuf,
-        url: &str,
-        output: PathBuf,
-        overwrite: bool,
-        headers: Option<&str>,
-    ) -> Self {
-        Self::new_with_headers_and_threads(program, url, output, overwrite, headers, None, None)
-    }
-
-    /// `cookies` is the newline-delimited Set-Cookie syntax FFmpeg takes as
-    /// `-cookies`, built by `scraper::ffmpeg_cookies`. It is passed separately
-    /// from `headers` because FFmpeg scopes `-cookies` per request host while
-    /// applying `-headers` to every request for the input.
-    pub fn new_with_headers_and_threads(
-        program: PathBuf,
-        url: &str,
-        output: PathBuf,
-        overwrite: bool,
-        headers: Option<&str>,
-        cookies: Option<&str>,
-        threads: Option<u16>,
-    ) -> Self {
-        let mut args = vec![
-            OsString::from("-hide_banner"),
-            OsString::from("-loglevel"),
-            OsString::from("error"),
-            OsString::from("-stats"),
-        ];
-        if url.to_ascii_lowercase().contains(".m3u8") {
+    /// Render argv.
+    ///
+    /// This is the single source of argument order. Everything FFmpeg treats
+    /// as an input option is emitted before `-i`, and the output path stays
+    /// last, but nothing outside this function depends on either fact.
+    pub fn to_args(&self) -> Vec<OsString> {
+        let mut args = vec![OsString::from("-hide_banner"), OsString::from("-loglevel")];
+        match self.reporting {
+            Reporting::Cli => {
+                args.push(OsString::from("error"));
+                args.push(OsString::from("-stats"));
+            }
+            // `-progress` needs a log level that carries what it reports, and
+            // `-nostats` keeps the human-readable line off stderr so the
+            // machine-readable stream on stdout is the only progress source.
+            Reporting::Controlled { stats_period } => {
+                args.push(OsString::from("info"));
+                args.push(OsString::from("-nostats"));
+                args.push(OsString::from("-stats_period"));
+                args.push(OsString::from(stats_period.to_string()));
+                args.push(OsString::from("-progress"));
+                args.push(OsString::from("pipe:1"));
+            }
+        }
+        if self.hls_lenient {
             args.push(OsString::from(SEGMENT_EXTENSION_OPTIONS[0]));
             args.push(OsString::from("ALL"));
             args.push(OsString::from(SEGMENT_EXTENSION_OPTIONS[1]));
             args.push(OsString::from("0"));
         }
-        if let Some(headers) = headers {
+        if let Some(headers) = &self.headers {
             args.push(OsString::from("-headers"));
             args.push(OsString::from(headers));
         }
-        if let Some(cookies) = cookies {
+        if let Some(cookies) = &self.cookies {
             args.push(OsString::from("-cookies"));
             args.push(OsString::from(cookies));
         }
         args.extend([
             OsString::from("-i"),
-            OsString::from(url),
+            OsString::from(&self.input),
             OsString::from("-c"),
             OsString::from("copy"),
         ]);
-        if let Some(threads) = threads {
+        if let Some(threads) = self.threads {
             args.push(OsString::from("-threads"));
             args.push(OsString::from(threads.to_string()));
         }
-        args.push(OsString::from(if overwrite { "-y" } else { "-n" }));
-        args.push(output.into_os_string());
-        Self { program, args }
-    }
-
-    /// Drop the HLS segment-extension options for an FFmpeg that predates them.
-    ///
-    /// They exist only from 7.1, and on an older FFmpeg passing them kills the
-    /// run during argument parsing. Dropping them costs nothing there, because
-    /// the strict extension checking they switch off arrived in 7.1 too — 6.x
-    /// already accepts the segment extensions they would have permitted. So an
-    /// unsupported FFmpeg degrades to "as good as it can be" rather than
-    /// failing every HLS download. The measurements are in
-    /// `docs/adr/0006-ffmpeg-version-detection.md`.
-    pub fn without_segment_extension_options(self) -> Self {
-        let mut args = Vec::with_capacity(self.args.len());
-        let mut drop_value = false;
-        for argument in self.args {
-            if drop_value {
-                drop_value = false;
-                continue;
-            }
-            if SEGMENT_EXTENSION_OPTIONS
-                .iter()
-                .any(|option| argument == *option)
-            {
-                drop_value = true;
-                continue;
-            }
-            args.push(argument);
-        }
-        Self {
-            program: self.program,
-            args,
-        }
+        args.push(OsString::from(if self.overwrite { "-y" } else { "-n" }));
+        args.push(self.output.clone().into_os_string());
+        args
     }
 }
 
-pub fn execute(command: &FfmpegCommand) -> DownerResult<PathBuf> {
-    let mut child = Command::new(&command.program)
-        .args(&command.args)
+pub fn execute(invocation: &FfmpegInvocation) -> DownerResult<PathBuf> {
+    let mut child = Command::new(&invocation.program)
+        .args(invocation.to_args())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -371,7 +392,7 @@ pub fn execute(command: &FfmpegCommand) -> DownerResult<PathBuf> {
                 error.kind(),
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
             ) {
-                DownerError::FfmpegUnavailable(command.program.clone())
+                DownerError::FfmpegUnavailable(invocation.program.clone())
             } else {
                 DownerError::FfmpegFailed {
                     status: None,
@@ -394,7 +415,7 @@ pub fn execute(command: &FfmpegCommand) -> DownerResult<PathBuf> {
         .unwrap_or_else(|error| error.to_string());
 
     if status.success() {
-        Ok(command_output_path(&command.args))
+        Ok(invocation.output.clone())
     } else {
         Err(DownerError::FfmpegFailed {
             status: status.code(),
@@ -404,25 +425,25 @@ pub fn execute(command: &FfmpegCommand) -> DownerResult<PathBuf> {
 }
 
 pub fn execute_controlled(
-    command: &FfmpegCommand,
+    invocation: &FfmpegInvocation,
     control: &ProcessControl,
 ) -> DownerResult<PathBuf> {
-    execute_controlled_with_progress(command, control, |_| {})
+    execute_controlled_with_progress(invocation, control, |_| {})
 }
 
 pub fn execute_controlled_with_progress<F>(
-    command: &FfmpegCommand,
+    invocation: &FfmpegInvocation,
     control: &ProcessControl,
     progress: F,
 ) -> DownerResult<PathBuf>
 where
     F: Fn(FfmpegProgress) + Send + Sync + 'static,
 {
-    execute_controlled_with_progress_and_logs(command, control, progress, |_| {})
+    execute_controlled_with_progress_and_logs(invocation, control, progress, |_| {})
 }
 
 pub fn execute_controlled_with_progress_and_logs<F, L>(
-    command: &FfmpegCommand,
+    invocation: &FfmpegInvocation,
     control: &ProcessControl,
     progress: F,
     log: L,
@@ -431,22 +452,8 @@ where
     F: Fn(FfmpegProgress) + Send + Sync + 'static,
     L: Fn(String) + Send + Sync + 'static,
 {
-    let mut args = command.args.clone();
-    args.retain(|argument| argument != "-stats");
-    args.splice(
-        3..3,
-        [
-            OsString::from("-loglevel"),
-            OsString::from("info"),
-            OsString::from("-nostats"),
-            OsString::from("-stats_period"),
-            OsString::from("0.5"),
-            OsString::from("-progress"),
-            OsString::from("pipe:1"),
-        ],
-    );
-    let mut child = Command::new(&command.program)
-        .args(&args)
+    let mut child = Command::new(&invocation.program)
+        .args(invocation.to_args())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -456,7 +463,7 @@ where
                 error.kind(),
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
             ) {
-                DownerError::FfmpegUnavailable(command.program.clone())
+                DownerError::FfmpegUnavailable(invocation.program.clone())
             } else {
                 DownerError::FfmpegFailed {
                     status: None,
@@ -524,19 +531,13 @@ where
     control.detach();
 
     if status.success() {
-        Ok(command_output_path(&command.args))
+        Ok(invocation.output.clone())
     } else {
         Err(DownerError::FfmpegFailed {
             status: status.code(),
             stderr,
         })
     }
-}
-
-fn command_output_path(args: &[OsString]) -> PathBuf {
-    args.last()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("output"))
 }
 
 fn capture_and_display(stderr: ChildStderr) -> std::io::Result<Vec<u8>> {
@@ -619,118 +620,165 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    /// The rendered argv for each shape the builder supports.
+    ///
+    /// `tests/ffmpeg_argv.rs` pins the same six cases against a real process;
+    /// this covers the rendering itself, including the pieces that never reach
+    /// a fake because they concern quoting.
     #[test]
-    fn builds_arguments_without_shell_interpolation() {
-        let command = FfmpegCommand::new(
+    fn renders_each_option_without_shell_interpolation() {
+        let injected = FfmpegInvocation::new(
             PathBuf::from("ffmpeg"),
             "https://example.test/video?a=$HOME;echo injected",
             PathBuf::from("a file;name.mp4"),
             false,
         );
-        let args: Vec<String> = command
-            .args
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
+        let args = strings(&injected);
+        // Both arrive as single argv elements, so no shell ever splits them.
         assert!(args.contains(&"https://example.test/video?a=$HOME;echo injected".to_string()));
         assert!(args.contains(&"a file;name.mp4".to_string()));
         assert!(args.contains(&"-n".to_string()));
-        assert!(!args.iter().any(|arg| arg == "sh"));
+        assert!(!args.iter().any(|argument| argument == "sh"));
 
-        let threaded = FfmpegCommand::new_with_headers_and_threads(
-            PathBuf::from("ffmpeg"),
-            "https://example.test/video.mp4",
-            PathBuf::from("video.mp4"),
-            false,
-            None,
-            None,
-            Some(4),
-        );
-        let threaded_args: Vec<String> = threaded
-            .args
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-        assert!(threaded_args
+        let threaded = FfmpegInvocation {
+            threads: Some(4),
+            ..plain()
+        };
+        assert!(strings(&threaded)
             .windows(2)
             .any(|pair| pair == ["-threads", "4"]));
 
-        let overwrite = FfmpegCommand::new(
-            PathBuf::from("ffmpeg"),
-            "https://example.test/video.mp4",
-            PathBuf::from("video.mp4"),
-            true,
-        );
-        assert!(overwrite.args.iter().any(|arg| arg == "-y"));
+        let overwrite = FfmpegInvocation {
+            overwrite: true,
+            ..plain()
+        };
+        assert!(strings(&overwrite).iter().any(|argument| argument == "-y"));
 
-        let with_headers = FfmpegCommand::new_with_headers(
-            PathBuf::from("ffmpeg"),
-            "https://example.test/video.mp4",
-            PathBuf::from("video.mp4"),
-            false,
-            Some("Referer: https://example.test/page\r\n"),
-        );
-        assert!(with_headers.args.iter().any(|arg| arg == "-headers"));
-        assert!(with_headers
-            .args
-            .iter()
-            .any(|arg| arg == "Referer: https://example.test/page\r\n"));
+        let with_headers = FfmpegInvocation {
+            headers: Some("Referer: https://example.test/page\r\n".to_string()),
+            ..plain()
+        };
+        let args = strings(&with_headers);
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-headers", "Referer: https://example.test/page\r\n"]));
         assert!(
-            !with_headers.args.iter().any(|arg| arg == "-cookies"),
+            !args.iter().any(|argument| argument == "-cookies"),
             "no -cookies argument when there are no cookies"
         );
 
-        let with_cookies = FfmpegCommand::new_with_headers_and_threads(
-            PathBuf::from("ffmpeg"),
-            "https://example.test/video.mp4",
-            PathBuf::from("video.mp4"),
-            false,
-            None,
-            Some("sid=downer-sentinel; path=/; domain=example.test"),
-            None,
-        );
-        let cookie_args: Vec<String> = with_cookies
-            .args
+        let with_cookies = FfmpegInvocation {
+            cookies: Some("sid=downer-sentinel; path=/; domain=example.test".to_string()),
+            ..plain()
+        };
+        let args = strings(&with_cookies);
+        let cookies = args
             .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-        let index = cookie_args
-            .iter()
-            .position(|arg| arg == "-cookies")
+            .position(|argument| argument == "-cookies")
             .expect("-cookies is passed");
         assert_eq!(
-            cookie_args[index + 1],
+            args[cookies + 1],
             "sid=downer-sentinel; path=/; domain=example.test"
         );
         assert!(
-            index < cookie_args.iter().position(|arg| arg == "-i").unwrap(),
-            "-cookies is an input option: {cookie_args:?}"
+            cookies < args.iter().position(|argument| argument == "-i").unwrap(),
+            "-cookies is an input option: {args:?}"
         );
+    }
 
-        let hls = FfmpegCommand::new(
-            PathBuf::from("ffmpeg"),
-            "https://example.test/playlist.m3u8",
-            PathBuf::from("video.mp4"),
-            false,
-        );
-        assert!(hls
-            .args
+    /// The leniency options are the caller's decision, not a URL substring
+    /// match, so an old FFmpeg simply never has them rendered (ADR-0006).
+    #[test]
+    fn segment_extension_options_follow_the_lenient_flag() {
+        let lenient = FfmpegInvocation {
+            input: "https://example.test/playlist.m3u8".to_string(),
+            hls_lenient: true,
+            ..plain()
+        };
+        let args = strings(&lenient);
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-allowed_segment_extensions", "ALL"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-extension_picky", "0"]));
+
+        // The same input with leniency off loses both options and both values,
+        // and nothing else: the `0` that a value-matching filter would eat is
+        // gone with its option, while the rest of the command is untouched.
+        let strict = FfmpegInvocation {
+            hls_lenient: false,
+            ..lenient.clone()
+        };
+        let args = strings(&strict);
+        assert!(!args
             .iter()
-            .any(|arg| arg == "-allowed_segment_extensions"));
-        assert!(hls.args.iter().any(|arg| arg == "ALL"));
-        assert!(hls.args.iter().any(|arg| arg == "-extension_picky"));
-        assert!(hls.args.iter().any(|arg| arg == "0"));
+            .any(|argument| argument == "-allowed_segment_extensions"));
+        assert!(!args.iter().any(|argument| argument == "ALL"));
+        assert!(!args.iter().any(|argument| argument == "-extension_picky"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-i", "https://example.test/playlist.m3u8"]));
+        assert_eq!(args.last().unwrap(), "video.mp4");
+    }
 
-        let direct = FfmpegCommand::new(
+    /// Controlled mode swaps the reporting flags and leaves everything else
+    /// alone — the property the old index-based `splice` depended on argument
+    /// order to achieve.
+    #[test]
+    fn controlled_reporting_changes_only_the_reporting_flags() {
+        let cli = strings(&plain());
+        let controlled = strings(&FfmpegInvocation {
+            reporting: Reporting::CONTROLLED,
+            ..plain()
+        });
+
+        assert!(cli.windows(2).any(|pair| pair == ["-loglevel", "error"]));
+        assert!(cli.iter().any(|argument| argument == "-stats"));
+        assert!(controlled
+            .windows(2)
+            .any(|pair| pair == ["-loglevel", "info"]));
+        assert!(controlled
+            .windows(2)
+            .any(|pair| pair == ["-progress", "pipe:1"]));
+        assert!(controlled
+            .windows(2)
+            .any(|pair| pair == ["-stats_period", "0.5"]));
+        // `-stats` and `-nostats` are distinct arguments; match exactly.
+        assert!(!controlled.iter().any(|argument| argument == "-stats"));
+        assert_eq!(
+            controlled
+                .iter()
+                .filter(|argument| *argument == "-loglevel")
+                .count(),
+            1,
+            "one log level, not one overriding another: {controlled:?}"
+        );
+
+        // Everything after the reporting flags is identical.
+        let tail = |args: &[String]| {
+            let at = args.iter().position(|argument| argument == "-i").unwrap();
+            args[at..].to_vec()
+        };
+        assert_eq!(tail(&cli), tail(&controlled));
+    }
+
+    /// A plain invocation the case tests vary one field of.
+    fn plain() -> FfmpegInvocation {
+        FfmpegInvocation::new(
             PathBuf::from("ffmpeg"),
             "https://example.test/video.mp4",
             PathBuf::from("video.mp4"),
             false,
-        );
-        assert!(!direct
-            .args
+        )
+    }
+
+    fn strings(invocation: &FfmpegInvocation) -> Vec<String> {
+        invocation
+            .to_args()
             .iter()
-            .any(|arg| arg == "-allowed_segment_extensions"));
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect()
     }
 
     #[test]
@@ -771,51 +819,6 @@ mod tests {
         assert!(parse_version("not ffmpeg at all").is_none());
 
         assert_eq!(MINIMUM_FFMPEG.to_string(), "7.1");
-    }
-
-    #[test]
-    fn an_old_ffmpeg_drops_only_the_segment_extension_options() {
-        let command = FfmpegCommand::new_with_headers(
-            PathBuf::from("ffmpeg"),
-            "https://example.test/playlist.m3u8",
-            PathBuf::from("video.mp4"),
-            false,
-            Some("Referer: https://example.test/page\r\n"),
-        );
-        let kept: Vec<String> = command
-            .clone()
-            .without_segment_extension_options()
-            .args
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-
-        // Both options and both of their values are gone.
-        assert!(!kept.iter().any(|arg| arg == "-allowed_segment_extensions"));
-        assert!(!kept.iter().any(|arg| arg == "ALL"));
-        assert!(!kept.iter().any(|arg| arg == "-extension_picky"));
-
-        // Everything else survives, in order, including the `0` that would be
-        // removed by a filter matching on values rather than on option pairs.
-        assert!(kept
-            .windows(2)
-            .any(|pair| pair == ["-i", "https://example.test/playlist.m3u8"]));
-        assert!(kept
-            .iter()
-            .any(|arg| arg == "Referer: https://example.test/page\r\n"));
-        assert_eq!(kept.last().unwrap(), "video.mp4");
-
-        // A direct-file command never carried them, so it is left alone.
-        let direct = FfmpegCommand::new(
-            PathBuf::from("ffmpeg"),
-            "https://example.test/video.mp4",
-            PathBuf::from("video.mp4"),
-            false,
-        );
-        assert_eq!(
-            direct.clone().without_segment_extension_options().args,
-            direct.args
-        );
     }
 
     #[test]

@@ -72,7 +72,8 @@ Architectural decisions are recorded as ADRs under `docs/adr/`, numbered
 `NNNN-short-title.md`. ADR-0001 records the native messaging protocol
 contract, ADR-0002 cookie scoping and argv exposure, ADR-0003 where URL
 redaction happens, ADR-0004 the output collision policy, ADR-0005 the
-default output name, and ADR-0006 FFmpeg version detection; KEI-63
+default output name, ADR-0006 FFmpeg version detection, and ADR-0007 the
+structured FFmpeg command model; KEI-63
 backfills the decisions already embodied in the code and adds the rest of the
 documentation set.
 

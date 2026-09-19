@@ -109,6 +109,15 @@ The Rust package and the Firefox extension share one product version; see
 
 ### Changed
 
+- The FFmpeg command layer now models a download rather than an argument list.
+  `FfmpegInvocation` names what a run is — input, headers, cookies, HLS
+  leniency, threads, overwrite, output, and a reporting mode — and renders argv
+  in one place, replacing three constructors and an index-based `splice` that
+  edited the arguments after the fact. The four `download_resolved*` functions
+  collapse into one entry point taking `Hooks`. No user-visible behaviour
+  changes; the one argv difference is that a controlled download no longer
+  passes a redundant `-loglevel error` before `-loglevel info`. See
+  `docs/adr/0007-structured-ffmpeg-command-model.md`.
 - A download whose media URL has no useful filename is now named `video.mp4`
   rather than after the source page's title. A fixed default is predictable,
   where a derived one varies with the site, the login state and the locale.
