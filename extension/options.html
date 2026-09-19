@@ -13,6 +13,11 @@
       <input id="output-dir" type="text" placeholder="Defaults to your Downloads folder">
     </label>
     <label>
+      FFmpeg path (optional)
+      <input id="ffmpeg-path" type="text" placeholder="Leave blank to let the host find FFmpeg">
+    </label>
+    <p class="hint">Firefox starts the native host with a minimal environment, so it cannot see a <code>PATH</code> you set in a shell. Give a full path here if your FFmpeg is somewhere unusual.</p>
+    <label>
       FFmpeg processing threads (optional)
       <input id="ffmpeg-threads" type="number" min="1" step="1" placeholder="Auto">
     </label>
@@ -33,6 +38,12 @@
     <p class="hint">Off by default. When on, a download whose media URL has no useful filename is named after the page's title instead of <code>video.mp4</code>. Page titles can contain account or document names, which would then appear in your Downloads folder.</p>
     <button id="save">Save</button>
     <p id="status"></p>
+    <section aria-labelledby="setup-heading">
+      <h2 id="setup-heading">Setup</h2>
+      <p class="hint">Checks that Firefox can reach the native host, that FFmpeg runs and is new enough, and that downloads can be written where you asked.</p>
+      <button id="check-setup" type="button">Check setup</button>
+      <div id="setup-results" aria-live="polite"></div>
+    </section>
     <section aria-labelledby="logs-heading">
       <div class="logs-header">
         <h2 id="logs-heading">Live FFmpeg logs</h2>

@@ -335,3 +335,31 @@ async function scanActiveTab() {
 }
 
 scanActiveTab();
+
+/**
+ * Warn, compactly, when the setup has never been checked or last failed.
+ *
+ * A warning outcome is deliberately not surfaced here: it means downloads work
+ * (an old FFmpeg still downloads — ADR-0006), and a permanent banner for a
+ * working setup is the kind of notice people learn to ignore.
+ */
+async function renderSetupWarning() {
+  const element = document.getElementById("setup-warning");
+  if (!element) return;
+  let check = null;
+  try {
+    ({ setupCheck: check } = await browser.storage.local.get({ setupCheck: null }));
+  } catch {
+    return;
+  }
+  if (check && check.outcome !== "fail") {
+    element.hidden = true;
+    return;
+  }
+  element.textContent = check
+    ? "Setup check failed. Open Settings → Check setup."
+    : "Setup has not been checked. Open Settings → Check setup.";
+  element.hidden = false;
+}
+
+renderSetupWarning();

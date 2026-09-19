@@ -4,6 +4,7 @@ const { redactText } = DownerRedact;
 const { trimLogEntries } = DownerJobLogs;
 
 const outputElement = document.getElementById("output-dir");
+const ffmpegPathElement = document.getElementById("ffmpeg-path");
 const threadsElement = document.getElementById("ffmpeg-threads");
 const conflictElement = document.getElementById("on-conflict");
 const titleNamingElement = document.getElementById("name-from-title");
@@ -76,12 +77,14 @@ const DEFAULT_NAME_FROM_TITLE = false;
 
 browser.storage.local.get({
   outputDir: "",
+  ffmpegPath: "",
   ffmpegThreads: null,
   onConflict: DEFAULT_ON_CONFLICT,
   nameFromTitle: DEFAULT_NAME_FROM_TITLE
 }).then((settings) => {
   titleNamingElement.checked = settings.nameFromTitle === true;
   outputElement.value = settings.outputDir;
+  ffmpegPathElement.value = settings.ffmpegPath || "";
   threadsElement.value = Number.isInteger(settings.ffmpegThreads) ? settings.ffmpegThreads : "";
   // An unknown stored value falls back rather than being offered: the host
   // refuses a policy it does not understand.
@@ -101,6 +104,7 @@ document.getElementById("save").addEventListener("click", async () => {
   }
   await browser.storage.local.set({
     outputDir: outputElement.value.trim(),
+    ffmpegPath: ffmpegPathElement.value.trim(),
     ffmpegThreads,
     onConflict: conflictElement.value,
     nameFromTitle: titleNamingElement.checked
@@ -132,4 +136,107 @@ browser.runtime.sendMessage({ type: "get-download-statuses" }).then((response) =
     logsByJob.set(jobId, entries);
   }
   renderLogs();
+});
+
+/**
+ * Render one setup check.
+ *
+ * The outcome vocabulary is the host's (`pass`, `warn`, `fail`) and is not
+ * reinterpreted here: a warning is a real third state, not a soft failure. See
+ * `src/diagnostics.rs`.
+ */
+function renderCheck(check) {
+  const item = document.createElement("li");
+  item.className = `check check-${check.outcome}`;
+
+  const title = document.createElement("p");
+  title.className = "check-title";
+  title.textContent = `${OUTCOME_LABELS[check.outcome] || check.outcome} ${check.title}`;
+  item.append(title);
+
+  const detail = document.createElement("p");
+  detail.className = "check-detail";
+  detail.textContent = check.detail;
+  item.append(detail);
+
+  if (check.remedy) {
+    const remedy = document.createElement("p");
+    remedy.className = "check-remedy";
+    remedy.textContent = check.remedy;
+    item.append(remedy);
+  }
+  return item;
+}
+
+const OUTCOME_LABELS = { pass: "OK", warn: "Warning", fail: "Failed" };
+
+function renderSetupReport(report) {
+  resultsElement.textContent = "";
+
+  const summary = document.createElement("p");
+  summary.className = "check-summary";
+  summary.textContent =
+    `downer ${report.host_version} (protocol ${report.protocol_version}) on ${report.platform}`;
+  resultsElement.append(summary);
+
+  const list = document.createElement("ul");
+  list.className = "checks";
+  for (const check of report.checks || []) {
+    list.append(renderCheck(check));
+  }
+  resultsElement.append(list);
+}
+
+/**
+ * Turn a native-messaging connection failure into something to do about it.
+ *
+ * This is the case the Settings panel exists for: when the host is not
+ * registered there is no host to ask, so the remediation has to be written
+ * here rather than coming back from `status`.
+ */
+function disconnectRemedy(message) {
+  const text = String(message || "");
+  if (/no such native application/i.test(text)) {
+    return "Firefox has no registration for the native host. Install it with `downer install-host`.";
+  }
+  if (/permission denied|access/i.test(text)) {
+    return "Firefox found the registration but could not run it. Re-run `downer install-host`, and check the launcher is executable.";
+  }
+  return "Could not reach the native host. Install or re-register it with `downer install-host`.";
+}
+
+function renderSetupFailure(error) {
+  resultsElement.textContent = "";
+  resultsElement.append(
+    renderCheck({
+      name: "host_connection",
+      title: "Native host reachable",
+      outcome: "fail",
+      detail: String(error && error.message ? error.message : error),
+      remedy: disconnectRemedy(error && error.message ? error.message : error)
+    })
+  );
+}
+
+const checkButton = document.getElementById("check-setup");
+const resultsElement = document.getElementById("setup-results");
+
+checkButton.addEventListener("click", async () => {
+  checkButton.disabled = true;
+  resultsElement.textContent = "Checking…";
+  try {
+    const response = await browser.runtime.sendMessage({
+      type: "check-setup",
+      outputDir: outputElement.value.trim() || null,
+      ffmpegPath: ffmpegPathElement.value.trim() || null
+    });
+    if (!response || !response.ok) {
+      throw new Error((response && response.error) || "The native host did not answer.");
+    }
+    renderSetupReport(response.status);
+  } catch (error) {
+    renderSetupFailure(error);
+  } finally {
+    checkButton.disabled = false;
+  }
 });

@@ -90,6 +90,22 @@ pub enum Command {
     InstallHost(InstallHostArgs),
     /// Remove the native messaging host registration.
     UninstallHost(UninstallHostArgs),
+    /// Check that everything a download needs is in place.
+    Doctor(DoctorArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct DoctorArgs {
+    /// Check this FFmpeg instead of the one the native host would choose.
+    #[arg(long, value_name = "PATH")]
+    pub ffmpeg: Option<PathBuf>,
+
+    /// Also check that this directory can be written to.
+    ///
+    /// Omitted, the directory check is skipped rather than run against a guess:
+    /// a guess that passes says nothing about the directory downloads use.
+    #[arg(long, value_name = "DIR")]
+    pub dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Parser)]

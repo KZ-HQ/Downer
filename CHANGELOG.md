@@ -12,6 +12,19 @@ The Rust package and the Firefox extension share one product version; see
 
 ### Added
 
+- `downer doctor` and a **Check setup** panel on the extension's Settings page,
+  both reporting the same checks: the native host is registered with Firefox
+  and its launcher exists, FFmpeg runs and is new enough, and the download
+  directory can be written to. Each check says what was found and, when
+  something is wrong, what to do about it. `doctor` exits `6` on a failure and
+  `0` on a warning, because a warning means downloads still work. The host
+  answers a new `status` command; the handshake is unchanged, so no protocol
+  version bump. See `docs/adr/0009-setup-diagnostics.md`.
+- An **FFmpeg path** setting on the Settings page, sent with each download.
+  Firefox starts the native host with a minimal environment, so a `PATH` or
+  `DOWNER_FFMPEG` set in a shell cannot reach it.
+- A compact warning in the popup when the setup has never been checked or the
+  last check failed.
 - Rust CLI `downer URL [options]` that downloads one HTTP(S) source or media
   URL per invocation through FFmpeg, with stream-copy remuxing for direct
   files and segmented streams.

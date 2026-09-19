@@ -3,14 +3,47 @@
   "protocol_version": 1,
   "legacy_protocol_version": 0,
   "max_message_bytes": 1048576,
-  "commands": ["hello", "download", "pause", "resume", "cancel", "hls-info"],
-  "event_types": ["hello", "ack", "progress", "log", "terminal", "rejected", "control-error"],
+  "commands": [
+    "hello",
+    "download",
+    "pause",
+    "resume",
+    "cancel",
+    "hls-info",
+    "status"
+  ],
+  "event_types": [
+    "hello",
+    "ack",
+    "progress",
+    "log",
+    "terminal",
+    "rejected",
+    "control-error",
+    "status"
+  ],
   "job_states": {
-    "active": ["starting", "downloading", "paused", "cancelling"],
-    "terminal": ["completed", "failed", "cancelled"],
-    "extension_only": ["preparing", "interrupted"]
+    "active": [
+      "starting",
+      "downloading",
+      "paused",
+      "cancelling"
+    ],
+    "terminal": [
+      "completed",
+      "failed",
+      "cancelled"
+    ],
+    "extension_only": [
+      "preparing",
+      "interrupted"
+    ]
   },
-  "connection_states": ["ready", "rejected", "control-error"],
+  "connection_states": [
+    "ready",
+    "rejected",
+    "control-error"
+  ],
   "error_codes": [
     "invalid_request",
     "unsupported_command",
@@ -22,7 +55,24 @@
     "download_failed",
     "cancelled"
   ],
-  "capabilities": ["pause_resume", "hls_info"],
-  "on_conflict_policies": ["fail", "rename", "overwrite"],
-  "default_on_conflict": "rename"
+  "capabilities": [
+    "pause_resume",
+    "hls_info"
+  ],
+  "on_conflict_policies": [
+    "fail",
+    "rename",
+    "overwrite"
+  ],
+  "default_on_conflict": "rename",
+  "check_outcomes": [
+    "pass",
+    "warn",
+    "fail"
+  ],
+  "check_names": [
+    "host_registration",
+    "ffmpeg",
+    "output_directory"
+  ]
 }

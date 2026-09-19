@@ -80,3 +80,15 @@ label.checkbox input {
   margin: 0;
   width: auto;
 }
+
+/* Setup checks. The three outcomes are the host's vocabulary (src/diagnostics.rs);
+   a warning reads as distinct from a failure because it means "works, but". */
+.checks { list-style: none; margin: 8px 0 0; padding: 0; }
+.check { margin: 0 0 8px; padding: 8px 10px; border-left: 3px solid #999; background: #f6f6f6; }
+.check-pass { border-left-color: #2e7d32; }
+.check-warn { border-left-color: #b8860b; background: #fff8e1; }
+.check-fail { border-left-color: #c62828; background: #fdecea; }
+.check-title { margin: 0; font-weight: 600; }
+.check-detail { margin: 2px 0 0; font-family: monospace; font-size: 12px; word-break: break-all; }
+.check-remedy { margin: 4px 0 0; font-size: 12px; }
+.check-summary { margin: 8px 0 0; font-size: 12px; color: #555; }
