@@ -103,11 +103,19 @@ impl Home {
         self.data_dir().join("downer").join("bin").join("downer")
     }
 
+    /// macOS has one `Application Support` directory for both data and config,
+    /// which is what `dirs` reports and therefore where the host writes; only
+    /// Linux splits them.
+    fn config_dir(&self) -> PathBuf {
+        if cfg!(target_os = "macos") {
+            self.data_dir()
+        } else {
+            self.path().join(".config")
+        }
+    }
+
     fn config_path(&self) -> PathBuf {
-        self.path()
-            .join(".config")
-            .join("downer")
-            .join("config.json")
+        self.config_dir().join("downer").join("config.json")
     }
 }
 

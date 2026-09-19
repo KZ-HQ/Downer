@@ -1570,7 +1570,15 @@ fn no_host_event_carries_a_url_query_from_a_real_ffmpeg() {
 /// Written by hand rather than by running the installer, so a failure here is
 /// about *reading* the configuration; `tests/host_install.rs` covers writing it.
 fn write_host_config(home: &Path, ffmpeg: &Path) {
-    let directory = home.join(".config").join("downer");
+    // macOS keeps config and data in one `Application Support` directory, which
+    // is what `dirs` reports and therefore where the host reads from.
+    let directory = if cfg!(target_os = "macos") {
+        home.join("Library")
+            .join("Application Support")
+            .join("downer")
+    } else {
+        home.join(".config").join("downer")
+    };
     fs::create_dir_all(&directory).expect("config directory");
     fs::write(
         directory.join("config.json"),
