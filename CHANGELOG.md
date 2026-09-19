@@ -113,7 +113,7 @@ The Rust package and the Firefox extension share one product version; see
   when the repository is moved or deleted. Uninstall removes the manifest, the
   launcher and the config, and the copied binary with `--binary`; removing
   something already gone is not an error. See
-  [`docs/adr/0006-relocatable-native-host-installation.md`](docs/adr/0006-relocatable-native-host-installation.md).
+  [`docs/adr/0008-relocatable-native-host-installation.md`](docs/adr/0008-relocatable-native-host-installation.md).
 - `downer install-host --ffmpeg PATH`, recording an FFmpeg path in
   `~/.config/downer/config.json` for the native host to use. Firefox launches
   the host with a minimal environment, so `DOWNER_FFMPEG` is not something a

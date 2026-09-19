@@ -1,4 +1,4 @@
-# ADR-0006: Install the native host from the binary, not from the checkout
+# ADR-0008: Install the native host from the binary, not from the checkout
 
 * Status: Accepted
 * Date: 2026-09-19

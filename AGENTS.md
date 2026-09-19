@@ -74,9 +74,8 @@ contract, ADR-0002 cookie scoping and argv exposure, ADR-0003 where URL
 redaction happens, ADR-0004 the output collision policy, ADR-0005 the
 default output name, ADR-0006 FFmpeg version detection, ADR-0007 the
 structured FFmpeg command model, and ADR-0008 relocatable native host
-installation; KEI-63
-backfills the decisions already embodied in the code and adds the rest of the
-documentation set.
+installation; KEI-63 backfills the decisions already embodied in the code and
+adds the rest of the documentation set.
 
 Any change to the native messaging protocol, the host process model, the
 FFmpeg command layer, discovery ownership, or control semantics requires an

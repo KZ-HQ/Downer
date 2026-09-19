@@ -3,7 +3,7 @@
 #
 # This is a thin wrapper now: `downer install-host` does the work, and it lives
 # in the binary so a user who installed Downer without the repository can run it
-# too (see docs/adr/0006-relocatable-native-host-installation.md). `--dev`
+# too (see docs/adr/0008-relocatable-native-host-installation.md). `--dev`
 # registers the freshly built binary where it sits in `target/release`, which is
 # what a checkout wants — reinstalling after `cargo build --release` is not
 # needed — and labels the manifest so an unexpected registration is easy to

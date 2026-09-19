@@ -737,7 +737,7 @@ fn progress_response(
 /// --ffmpeg`: Firefox launches the host with a minimal environment, so a user
 /// whose FFmpeg is somewhere unusual has no environment variable to set and
 /// needs the installer to have written it down (see
-/// `docs/adr/0006-relocatable-native-host-installation.md`). Only then the
+/// `docs/adr/0008-relocatable-native-host-installation.md`). Only then the
 /// Homebrew locations and a bare `ffmpeg` resolved against whatever PATH the
 /// browser happened to pass down.
 fn ffmpeg_path() -> PathBuf {

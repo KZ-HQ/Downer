@@ -15,7 +15,7 @@
 //! launcher supplies the flag, so the host is still entered through exactly the
 //! documented command line (`docs/adr/0001-native-messaging-protocol.md`).
 //!
-//! See `docs/adr/0006-relocatable-native-host-installation.md`.
+//! See `docs/adr/0008-relocatable-native-host-installation.md`.
 
 use std::{
     fs,
