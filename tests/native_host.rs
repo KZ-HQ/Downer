@@ -80,7 +80,7 @@ struct NativeHost {
 
 impl NativeHost {
     fn start(ffmpeg: &Path) -> Self {
-        let mut child = Command::new(assert_cmd::cargo::cargo_bin("downer"))
+        let child = Command::new(assert_cmd::cargo::cargo_bin("downer"))
             .arg("--native-host")
             .env("DOWNER_FFMPEG", ffmpeg)
             .stdin(Stdio::piped())
@@ -88,6 +88,10 @@ impl NativeHost {
             .stderr(Stdio::null())
             .spawn()
             .expect("native host starts");
+        Self::from_child(child)
+    }
+
+    fn from_child(mut child: Child) -> Self {
         let stdin = child.stdin.take().expect("native host stdin is piped");
         let mut stdout = child.stdout.take().expect("native host stdout is piped");
         let (sender, events) = mpsc::channel();
@@ -105,6 +109,30 @@ impl NativeHost {
             stdin: Some(stdin),
             events,
         }
+    }
+
+    /// A host left to discover FFmpeg on its own, under a temporary `HOME`.
+    ///
+    /// This is the one situation the rest of the suite deliberately avoids:
+    /// every other test pins FFmpeg with `DOWNER_FFMPEG`. Discovery is what
+    /// Firefox actually exercises — it launches the host with a minimal
+    /// environment and no override — so the config file `downer install-host
+    /// --ffmpeg` writes is tested the way it will be used.
+    fn start_discovering(home: &Path, ffmpeg_override: Option<&Path>) -> Self {
+        let mut command = Command::new(assert_cmd::cargo::cargo_bin("downer"));
+        command
+            .arg("--native-host")
+            .env("HOME", home)
+            .env_remove("DOWNER_FFMPEG")
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_DATA_HOME")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        if let Some(path) = ffmpeg_override {
+            command.env("DOWNER_FFMPEG", path);
+        }
+        Self::from_child(command.spawn().expect("native host starts"))
     }
 
     fn send(&mut self, request: &Value) {
@@ -1534,5 +1562,85 @@ fn no_host_event_carries_a_url_query_from_a_real_ffmpeg() {
     assert!(
         error.contains(&format!("http://{}/v.mp4?…", origin.authority())),
         "the host reported a failure with no usable URL in it: {error}"
+    );
+}
+
+/// Write the host configuration `downer install-host --ffmpeg` produces.
+///
+/// Written by hand rather than by running the installer, so a failure here is
+/// about *reading* the configuration; `tests/host_install.rs` covers writing it.
+fn write_host_config(home: &Path, ffmpeg: &Path) {
+    let directory = home.join(".config").join("downer");
+    fs::create_dir_all(&directory).expect("config directory");
+    fs::write(
+        directory.join("config.json"),
+        serde_json::to_vec_pretty(&json!({ "ffmpeg": ffmpeg })).expect("config serializes"),
+    )
+    .expect("config is written");
+}
+
+/// Firefox launches the host with a minimal environment and no `DOWNER_FFMPEG`,
+/// so an FFmpeg in an unusual place is only reachable through what the
+/// installer wrote down. KEI-57.
+#[test]
+fn the_host_uses_the_ffmpeg_recorded_at_install_time() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    fs::create_dir_all(&home).expect("home");
+    let ffmpeg = FakeFfmpeg::default().install(temp.path());
+    write_host_config(&home, &ffmpeg);
+    let output_dir = temp.path().join("downloads");
+
+    let mut host = NativeHost::start_discovering(&home, None);
+    host.send(&download_request(
+        "https://example.test/media/clip.mp4",
+        &output_dir,
+    ));
+
+    let (completed, _) = host.wait_for_state("completed");
+    assert_envelope(&completed, "terminal");
+    assert!(
+        temp.path().join("finished").is_file(),
+        "the configured FFmpeg is the one that ran"
+    );
+}
+
+/// The environment override predates the config file and every test and script
+/// uses it, so it keeps winning.
+#[test]
+fn downer_ffmpeg_overrides_the_recorded_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    fs::create_dir_all(&home).expect("home");
+    let configured = temp.path().join("configured");
+    fs::create_dir_all(&configured).expect("configured directory");
+    // Fails if it ever runs, so a download that completes proves it did not.
+    FakeFfmpeg {
+        exit_code: 1,
+        ..FakeFfmpeg::default()
+    }
+    .install(&configured);
+    write_host_config(&home, &configured.join("fake-ffmpeg"));
+
+    let overriding = temp.path().join("overriding");
+    fs::create_dir_all(&overriding).expect("overriding directory");
+    let ffmpeg = FakeFfmpeg::default().install(&overriding);
+    let output_dir = temp.path().join("downloads");
+
+    let mut host = NativeHost::start_discovering(&home, Some(&ffmpeg));
+    host.send(&download_request(
+        "https://example.test/media/clip.mp4",
+        &output_dir,
+    ));
+
+    let (completed, _) = host.wait_for_state("completed");
+    assert_envelope(&completed, "terminal");
+    assert!(
+        overriding.join("finished").is_file(),
+        "DOWNER_FFMPEG chose the FFmpeg"
+    );
+    assert!(
+        !configured.join("finished").is_file(),
+        "the configured FFmpeg never ran"
     );
 }

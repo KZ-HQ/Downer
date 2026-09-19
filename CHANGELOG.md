@@ -106,6 +106,19 @@ The Rust package and the Firefox extension share one product version; see
   `CLAUDE_CODE_REMOTE` is exactly `true`, which only a cloud session VM sets,
   so a checkout on a contributor's own machine installs nothing;
   `DOWNER_SKIP_BROWSER_INSTALL=1` turns it off in a cloud session as well.
+- `downer install-host` and `downer uninstall-host`, which register and remove
+  the Firefox native messaging host from the binary itself. Installation copies
+  the binary to a stable per-user location (`--link` registers it where it is)
+  and points Firefox at a generated launcher, so the registration keeps working
+  when the repository is moved or deleted. Uninstall removes the manifest, the
+  launcher and the config, and the copied binary with `--binary`; removing
+  something already gone is not an error. See
+  [`docs/adr/0006-relocatable-native-host-installation.md`](docs/adr/0006-relocatable-native-host-installation.md).
+- `downer install-host --ffmpeg PATH`, recording an FFmpeg path in
+  `~/.config/downer/config.json` for the native host to use. Firefox launches
+  the host with a minimal environment, so `DOWNER_FFMPEG` is not something a
+  user can set for it; the recorded path is used unless `DOWNER_FFMPEG` does
+  override it.
 
 ### Changed
 
@@ -118,6 +131,10 @@ The Rust package and the Firefox extension share one product version; see
   changes; the one argv difference is that a controlled download no longer
   passes a redundant `-loglevel error` before `-loglevel info`. See
   `docs/adr/0007-structured-ffmpeg-command-model.md`.
+- The native host registration no longer points into the repository checkout.
+  `scripts/install_native_host.sh` is now a thin development wrapper around
+  `downer install-host --dev`, and `scripts/native-host.sh` is gone: the
+  launcher Firefox runs is generated at install time.
 - A download whose media URL has no useful filename is now named `video.mp4`
   rather than after the source page's title. A fixed default is predictable,
   where a derived one varies with the site, the login state and the locale.

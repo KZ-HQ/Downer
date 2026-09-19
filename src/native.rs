@@ -730,9 +730,22 @@ fn progress_response(
     }
 }
 
+/// Which FFmpeg this host runs.
+///
+/// `DOWNER_FFMPEG` still wins, because it is the override every test and every
+/// script already uses. Then the path recorded by `downer install-host
+/// --ffmpeg`: Firefox launches the host with a minimal environment, so a user
+/// whose FFmpeg is somewhere unusual has no environment variable to set and
+/// needs the installer to have written it down (see
+/// `docs/adr/0006-relocatable-native-host-installation.md`). Only then the
+/// Homebrew locations and a bare `ffmpeg` resolved against whatever PATH the
+/// browser happened to pass down.
 fn ffmpeg_path() -> PathBuf {
     if let Some(path) = std::env::var_os("DOWNER_FFMPEG") {
         return PathBuf::from(path);
+    }
+    if let Some(path) = crate::host::configured_ffmpeg() {
+        return path;
     }
     for path in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"] {
         let path = PathBuf::from(path);

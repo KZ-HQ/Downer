@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod error;
 pub mod ffmpeg;
+pub mod host;
 pub mod native;
 pub mod output;
 pub mod redact;
@@ -99,8 +100,18 @@ fn normalize_cookie(raw: &str) -> Option<String> {
 
 /// Run one download and return an error that the binary can map to a stable exit code.
 pub fn run(cli: Cli) -> DownerResult<()> {
+    if let Some(command) = cli.command {
+        return run_command(command);
+    }
     let cookie = resolve_cookie(&cli)?;
-    let media = scraper::resolve_media(&cli.url, &cli.user_agent, cookie.as_deref())?;
+    // clap keeps the URL required unless a subcommand takes its place, so this
+    // is unreachable with a parsed `Cli`; `expect` says so rather than inventing
+    // an error case that no input can reach.
+    let url = cli
+        .url
+        .as_deref()
+        .expect("clap requires a URL unless a subcommand is given");
+    let media = scraper::resolve_media(url, &cli.user_agent, cookie.as_deref())?;
     let options = DownloadOptions {
         output: cli.output,
         dir: cli.dir,
@@ -114,6 +125,57 @@ pub fn run(cli: Cli) -> DownerResult<()> {
         quiet: false,
     };
     download_resolved(media, &options, Hooks::default()).map(|_| ())
+}
+
+fn run_command(command: cli::Command) -> DownerResult<()> {
+    match command {
+        cli::Command::InstallHost(args) => {
+            let report = host::install(&host::InstallOptions {
+                link: args.link,
+                dev: args.dev,
+                ffmpeg: args.ffmpeg,
+            })?;
+            print_install_report(&report);
+            Ok(())
+        }
+        cli::Command::UninstallHost(args) => {
+            let report = host::uninstall(&host::UninstallOptions {
+                binary: args.binary,
+            })?;
+            if report.removed.is_empty() {
+                println!("No native host registration found; nothing to remove.");
+            } else {
+                for path in &report.removed {
+                    println!("Removed {}", path.display());
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn print_install_report(report: &host::InstallReport) {
+    println!("Registered native host: {}", report.manifest.display());
+    if report.copied {
+        println!("Installed binary: {}", report.binary.display());
+    } else {
+        println!("Using binary in place: {}", report.binary.display());
+    }
+    println!("Launcher: {}", report.launcher.display());
+    if let Some(ffmpeg) = &report.ffmpeg {
+        println!("FFmpeg: {}", ffmpeg.display());
+    }
+    if report.dev {
+        println!(
+            "Development registration: it stops working if {} is rebuilt elsewhere, moved, or deleted.",
+            report.binary.display()
+        );
+    }
+    // KEI-59 adds `downer doctor`; until then the extension's own connection is
+    // the check, and saying so beats pointing at a command that does not exist.
+    println!(
+        "Verify from Firefox: open the Downer popup on a page with media and start a download."
+    );
 }
 
 /// Optional callbacks for a download.
@@ -278,7 +340,9 @@ pub fn outdated_ffmpeg_warning(version: ffmpeg::FfmpegVersion) -> String {
 
 pub fn exit_code(error: &DownerError) -> i32 {
     match error {
-        DownerError::InvalidUrl(_) | DownerError::CookieSource(_) => INVALID_INPUT_EXIT,
+        DownerError::InvalidUrl(_)
+        | DownerError::CookieSource(_)
+        | DownerError::HostArgument(_) => INVALID_INPUT_EXIT,
         DownerError::OutputExists(_)
         | DownerError::OutputPath(_)
         | DownerError::OutputDirectory(_) => OUTPUT_EXIT,
@@ -290,6 +354,6 @@ pub fn exit_code(error: &DownerError) -> i32 {
         | DownerError::SourceFetchFailed { .. }
         | DownerError::MediaNotFound(_) => MEDIA_FAILURE_EXIT,
         DownerError::OutputIo(_) => OUTPUT_EXIT,
-        DownerError::NativeIo(_) => 1,
+        DownerError::NativeIo(_) | DownerError::Host(_) => 1,
     }
 }

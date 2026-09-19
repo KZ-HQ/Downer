@@ -88,11 +88,53 @@ the selected download. The native host defaults to the operating system's
 Downloads directory; configure another path from the extension's Settings
 page if needed.
 
-Firefox native messaging requires the extension ID in the native-host manifest
-to match the ID in `extension/manifest.json`. `make extension-install` handles
-this on macOS and Linux. The native host searches Homebrew's standard FFmpeg
-locations and then `PATH`; set `DOWNER_FFMPEG` if FFmpeg is installed
-elsewhere.
+### Installing the native host
+
+Firefox reaches the downloader through a native messaging host: a manifest in a
+per-user directory naming a program Firefox may launch, and the extension ID
+allowed to talk to it. `downer` registers itself:
+
+```sh
+cargo install --path .    # or use a released binary
+downer install-host
+```
+
+That copies the binary to a stable per-user location (`~/.local/share/downer/`
+on Linux, `~/Library/Application Support/downer/` on macOS) unless it is
+already somewhere durable such as `~/.cargo/bin`, writes a small launcher
+beside it, and points the Firefox manifest at the launcher. **The registration
+does not depend on this repository**, so the checkout can be moved or deleted
+afterwards. `downer install-host --link` registers the running binary where it
+is instead of copying it, which is right for a binary you keep in a fixed place
+yourself.
+
+Firefox launches the native host with a minimal environment, so `DOWNER_FFMPEG`
+is not available to it. If FFmpeg is somewhere the host would not look — it
+searches Homebrew's standard locations and then `PATH` — record it at install
+time:
+
+```sh
+downer install-host --ffmpeg /opt/ffmpeg/bin/ffmpeg
+```
+
+The path is stored in `~/.config/downer/config.json` (macOS:
+`~/Library/Application Support/downer/config.json`) and used unless
+`DOWNER_FFMPEG` overrides it.
+
+To reverse all of it:
+
+```sh
+downer uninstall-host             # manifest, launcher, and config
+downer uninstall-host --binary    # and the copied binary
+```
+
+Windows is not supported: it registers native hosts in the registry, and
+pause/resume use Unix signals.
+
+For development, `make extension-install` (part of `make extension`) builds the
+release binary and runs `downer install-host --dev`, which registers that build
+where it sits in `target/release` and labels the manifest as a development
+registration. Rebuilding is then enough; reinstalling is not needed.
 
 After choosing a media URL, the popup immediately shows a preparing or
 downloading state. For HLS, it reads the selected playlist through the source
