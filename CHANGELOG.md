@@ -89,6 +89,23 @@ The Rust package and the Firefox extension share one product version; see
   origin, whose segment URLs carry a token in their query string, so redaction
   can be checked end to end through a real browser and a real FFmpeg. Its
   request log prints paths with the query replaced, never the token.
+- Automated end-to-end tests against a real, headless Firefox in `tests/e2e/`:
+  they install `extension/` as a temporary add-on, assert that Firefox loads
+  the manifest and the background scripts, exchange messages with the
+  background script, and scan the shared `tests/fixtures/pages/` HTML through
+  an injected content script, asserting what the jsdom tests assert of the same
+  fixtures. The harness speaks WebDriver to geckodriver directly and adds no
+  dependency. `make extension-browser` installs Firefox and geckodriver from
+  conda-forge — the one source reachable from a network-restricted container,
+  as `docs/e2e-firefox.md` explains — `make extension-e2e` runs the tests, and
+  a separate CI job does both. They are not part of `make check`, which still
+  needs no browser, and they skip rather than fail when none is installed.
+- `scripts/session_start.sh`, registered in `.claude/settings.json` as a
+  SessionStart hook, so a Claude Code cloud session starts with that browser
+  already installed. It exits before touching anything unless
+  `CLAUDE_CODE_REMOTE` is exactly `true`, which only a cloud session VM sets,
+  so a checkout on a contributor's own machine installs nothing;
+  `DOWNER_SKIP_BROWSER_INSTALL=1` turns it off in a cloud session as well.
 
 ### Changed
 

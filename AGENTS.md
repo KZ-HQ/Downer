@@ -84,9 +84,17 @@ ADR.
 - `src/`: Rust CLI, FFmpeg process layer, scraper, output handling, and native host.
 - `extension/`: Firefox WebExtension files, popup, Settings page, background worker,
   content script, and native messaging protocol.
-- `scripts/`: native host installation and launcher scripts.
-- `.claude/settings.json`: Claude Code project settings. It pre-approves the
-  Linear MCP tools so agent sessions do not prompt for routine issue and
+- `scripts/`: native host installation and launcher scripts,
+  `install_test_browser.sh`, which installs the Firefox and geckodriver the
+  end-to-end tests drive, and `session_start.sh`, the SessionStart hook that
+  runs it in a Claude Code cloud session and nowhere else.
+- `.claude/settings.json`: Claude Code project settings. It registers
+  `scripts/session_start.sh` as a SessionStart hook, so a cloud session starts
+  with the end-to-end browser installed; that script exits immediately unless
+  `CLAUDE_CODE_REMOTE` is `true`, so pulling this repository onto your own
+  machine installs nothing (`docs/e2e-firefox.md` has the details, and
+  `DOWNER_SKIP_BROWSER_INSTALL=1` turns it off in the cloud too). It also
+  pre-approves the Linear MCP tools so agent sessions do not prompt for routine issue and
   comment updates, while still asking before any MCP delete. Permission rules
   match on the MCP **server name as configured in that session**, which varies
   by how Linear was connected, so the allow list carries every spelling seen so
@@ -96,7 +104,8 @@ ADR.
   change needs a fresh session, and if an organization sets a claude.ai
   connector tool to `ask`, allow rules for it never take effect.
 - `docs/`: `protocol.md`, the native messaging contract implemented by
-  `src/native.rs` and `extension/task-protocol.js`, and `adr/`, the
+  `src/native.rs` and `extension/task-protocol.js`, `e2e-firefox.md`, how the
+  real-Firefox tests work and where their browser comes from, and `adr/`, the
   architecture decision records.
 - `tests/`: CLI and native-host integration tests (`tests/cli.rs`,
   `tests/native_host.rs`), the extension's Node tests (`tests/extension/`),
@@ -173,9 +182,10 @@ validation. Record the outcome in the Linear handoff comment.
 job runs on `ubuntu-latest` and `macos-latest` and executes exactly what you
 run locally — `make check`, then `cargo build --release --locked` and
 `make extension-package` — and uploads the release binary and
-`dist/downer-firefox.zip` as run artifacts. A separate `msrv` job builds
-against the `rust-version` declared in `Cargo.toml`, so the declared minimum
-stays honest. FFmpeg is deliberately not installed in CI; tests generate fake
+`dist/downer-firefox.zip` as run artifacts. An `e2e` job installs Firefox and geckodriver with
+`make extension-browser` and runs `make extension-e2e`. A separate `msrv` job
+builds against the `rust-version` declared in `Cargo.toml`, so the declared
+minimum stays honest. FFmpeg is deliberately not installed in CI; tests generate fake
 FFmpeg executables instead. The tests that need a real one —
 `tests/cookie_scope.rs`, `tests/log_redaction.rs`, and the real-FFmpeg tests at
 the end of `tests/native_host.rs` — skip loudly when none is present, printing a
@@ -184,7 +194,8 @@ them locally with `-- --nocapture` and record the result.
 
 **CI must be green before an issue moves to In Review.** If a change needs a
 new check, add it to `make check` rather than to the workflow, so local runs
-and CI cannot drift apart.
+and CI cannot drift apart. The end-to-end tests are the one deliberate
+exception: they need a browser that `make check` cannot assume.
 
 The root `package.json` is development-only tooling (`web-ext`); the extension
 itself ships without dependencies, and `node_modules/` is not tracked.
@@ -201,7 +212,25 @@ a `jsdom` window with a stubbed `browser` API, and
 `tests/extension/content-dom.test.js` and `tests/extension/popup-dom.test.js`
 assert on the resulting DOM. That harness is not Firefox: it does not cover real
 WebExtension APIs, content-script injection, or native messaging over a real
-port, so a change to those still wants a manual pass in the browser.
+port.
+
+`tests/e2e/` covers the first two in a real, headless Firefox: it installs
+`extension/` as a temporary add-on, checks that Firefox loads the manifest and
+the background scripts, exchanges messages with the background script, and
+scans the same `tests/fixtures/pages/` HTML through an injected content script,
+asserting what the jsdom tests assert. Where the two disagree, the browser is
+right. Run them with:
+
+```sh
+make extension-browser   # once: installs Firefox and geckodriver
+make extension-e2e
+```
+
+They are not part of `make check`, because a plain checkout has no browser; CI
+runs them in a separate `e2e` job. `docs/e2e-firefox.md` explains the harness,
+the environment variables that point it at an existing Firefox, and why the
+browser is installed from conda-forge. Native messaging over a real port is
+still not covered, so a change there wants a manual pass in the browser.
 
 `jsdom` is development-only tooling, like `web-ext`; the extension itself still
 ships with no dependencies.
