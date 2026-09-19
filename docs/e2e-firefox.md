@@ -14,6 +14,15 @@ make extension-e2e       # run the end-to-end tests
 `make check` deliberately does not run them, because a plain checkout has no
 browser. CI runs them in a separate job.
 
+One of them, `native-download.test.mjs`, goes further than the browser and needs
+more than CI has:
+
+```sh
+make extension-ffmpeg    # once: install an FFmpeg 7.1+ beside the browser
+make extension-install   # once: register the native messaging host
+make extension-e2e-native
+```
+
 ## What the tests cover
 
 - Firefox accepts `extension/manifest.json` and loads the background scripts.
@@ -26,8 +35,35 @@ browser. CI runs them in a separate job.
   the same fixtures. Where the two disagree, the browser is right and the jsdom
   expectation is the bug.
 
-FFmpeg and the native messaging host are not involved: `download-media` is the
-only message that reaches them, and it is not exercised.
+`smoke.test.mjs` stops at the browser: FFmpeg and the native messaging host are
+not involved, because `download-media` is the only message that reaches them.
+
+`native-download.test.mjs` is the other half, and covers the rest of the path —
+the content script's `document.title`, the popup's `download-media` message, the
+background script, `runtime.connectNative`, the Rust host, FFmpeg, and the file
+that lands on disk. It exists because KEI-60's acceptance criterion lives at the
+end of that path: two pages whose playlists are both `index.m3u8` must produce
+two distinct, title-based filenames. Everything below the browser is covered by
+unit and integration tests; only a real Gecko can show that the title survives
+the trip. It also pins the rename sequence, the Settings collision policy, and
+that a download which fails before FFmpeg writes leaves no file behind.
+
+### What that test needs, and why it skips
+
+It needs three things a plain checkout does not have: a registered native host
+(`make extension-install`), an FFmpeg 7.1+ (`make extension-ffmpeg` — anything
+older cannot run the HLS path at all, see KEI-81), and a release binary. CI has
+none of them, and `AGENTS.md` keeps FFmpeg out of CI deliberately, so the test
+detects each one and **skips out loud**, printing a `SKIP:` line naming what is
+missing and the command that supplies it. That is the same contract
+`tests/cookie_scope.rs` follows, and for the same reason: a check that quietly
+does nothing is worse than one that does not run.
+
+The playlists come from `tests/fixtures/protected_site.py`, whose
+`/media/index.m3u8` route exists for this test. Every other playlist it serves
+has a distinctive stem, which would never reach the title-naming code — so
+before that route existed, a run could look healthy while exercising none of
+what it claimed to.
 
 ## How the harness works
 
@@ -50,7 +86,7 @@ Two details are worth knowing before adding a test:
   APIs. From there, tests drive pages with `browser.tabs`, the same way the
   popup does.
 
-## Why the browser comes from conda-forge
+## Why the browser, and the FFmpeg, come from conda-forge
 
 `scripts/install_test_browser.sh` installs Firefox and geckodriver from
 conda-forge, which repackages Mozilla's official build. That is an odd choice
@@ -65,9 +101,15 @@ the alternatives do not work everywhere the tests need to run.
 - Playwright's Firefox is a patched build served from `cdn.playwright.dev`, and
   Playwright cannot install Firefox extensions at all.
 
-Nothing outside these tests uses conda. The install lands in
-`/opt/downer-browser` (override with `DOWNER_BROWSER_PREFIX`) and the script is
-idempotent, so re-running it costs nothing.
+`scripts/install_test_ffmpeg.sh` is the companion, for the same reason in a
+different shape: Ubuntu 24.04 ships FFmpeg 6.1.1, which cannot run an HLS
+download, and conda-forge serves a current one from that same single host. It
+shares the micromamba the browser installer bootstraps, installs into its own
+environment under the same prefix, and never touches the system FFmpeg.
+
+Nothing outside these tests uses conda. Both installs land in
+`/opt/downer-browser` (override with `DOWNER_BROWSER_PREFIX`) and both scripts
+are idempotent, so re-running them costs nothing.
 
 An existing Firefox works too. The tests take `FIREFOX_BIN` and
 `GECKODRIVER_BIN`, and fall back to whatever is on `PATH`:

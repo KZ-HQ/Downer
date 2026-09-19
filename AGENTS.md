@@ -214,23 +214,39 @@ assert on the resulting DOM. That harness is not Firefox: it does not cover real
 WebExtension APIs, content-script injection, or native messaging over a real
 port.
 
-`tests/e2e/` covers the first two in a real, headless Firefox: it installs
-`extension/` as a temporary add-on, checks that Firefox loads the manifest and
-the background scripts, exchanges messages with the background script, and
-scans the same `tests/fixtures/pages/` HTML through an injected content script,
-asserting what the jsdom tests assert. Where the two disagree, the browser is
-right. Run them with:
+`tests/e2e/` covers all three in a real, headless Firefox. `smoke.test.mjs`
+installs `extension/` as a temporary add-on, checks that Firefox loads the
+manifest and the background scripts, exchanges messages with the background
+script, and scans the same `tests/fixtures/pages/` HTML through an injected
+content script, asserting what the jsdom tests assert. Where the two disagree,
+the browser is right.
+
+`native-download.test.mjs` goes the rest of the way — the content script's
+`document.title`, the popup's `download-media` message, the background script,
+`runtime.connectNative`, the Rust host, FFmpeg, and the file on disk — so
+native messaging over a real port is covered, and so is the output naming rule
+above, whose acceptance criterion only exists at the end of that path. Run them
+with:
 
 ```sh
 make extension-browser   # once: installs Firefox and geckodriver
 make extension-e2e
+
+make extension-ffmpeg    # once more, for the native download test
+make extension-install   # once: registers the native messaging host
+make extension-e2e-native
 ```
 
 They are not part of `make check`, because a plain checkout has no browser; CI
-runs them in a separate `e2e` job. `docs/e2e-firefox.md` explains the harness,
-the environment variables that point it at an existing Firefox, and why the
-browser is installed from conda-forge. Native messaging over a real port is
-still not covered, so a change there wants a manual pass in the browser.
+runs them in a separate `e2e` job. The native download test additionally needs a
+registered native host and an FFmpeg 7.1+, which CI does not have and is not
+meant to, so **it detects each prerequisite and skips out loud with a `SKIP:`
+line** rather than failing or passing vacuously — the same contract
+`tests/cookie_scope.rs` follows. A green `e2e` job is therefore not evidence for
+it; run it locally and record the result, as with the other skipping suites.
+`docs/e2e-firefox.md` explains the harness, the environment variables that point
+it at an existing Firefox, and why the browser and that FFmpeg are installed
+from conda-forge.
 
 `jsdom` is development-only tooling, like `web-ext`; the extension itself still
 ships with no dependencies.
