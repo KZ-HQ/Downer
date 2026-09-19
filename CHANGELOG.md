@@ -100,6 +100,12 @@ The Rust package and the Firefox extension share one product version; see
   as `docs/e2e-firefox.md` explains — `make extension-e2e` runs the tests, and
   a separate CI job does both. They are not part of `make check`, which still
   needs no browser, and they skip rather than fail when none is installed.
+- `scripts/session_start.sh`, registered in `.claude/settings.json` as a
+  SessionStart hook, so a Claude Code cloud session starts with that browser
+  already installed. It exits before touching anything unless
+  `CLAUDE_CODE_REMOTE` is exactly `true`, which only a cloud session VM sets,
+  so a checkout on a contributor's own machine installs nothing;
+  `DOWNER_SKIP_BROWSER_INSTALL=1` turns it off in a cloud session as well.
 
 ### Changed
 

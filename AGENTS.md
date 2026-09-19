@@ -84,11 +84,17 @@ ADR.
 - `src/`: Rust CLI, FFmpeg process layer, scraper, output handling, and native host.
 - `extension/`: Firefox WebExtension files, popup, Settings page, background worker,
   content script, and native messaging protocol.
-- `scripts/`: native host installation and launcher scripts, and
+- `scripts/`: native host installation and launcher scripts,
   `install_test_browser.sh`, which installs the Firefox and geckodriver the
-  end-to-end tests drive.
-- `.claude/settings.json`: Claude Code project settings. It pre-approves the
-  Linear MCP tools so agent sessions do not prompt for routine issue and
+  end-to-end tests drive, and `session_start.sh`, the SessionStart hook that
+  runs it in a Claude Code cloud session and nowhere else.
+- `.claude/settings.json`: Claude Code project settings. It registers
+  `scripts/session_start.sh` as a SessionStart hook, so a cloud session starts
+  with the end-to-end browser installed; that script exits immediately unless
+  `CLAUDE_CODE_REMOTE` is `true`, so pulling this repository onto your own
+  machine installs nothing (`docs/e2e-firefox.md` has the details, and
+  `DOWNER_SKIP_BROWSER_INSTALL=1` turns it off in the cloud too). It also
+  pre-approves the Linear MCP tools so agent sessions do not prompt for routine issue and
   comment updates, while still asking before any MCP delete. Permission rules
   match on the MCP **server name as configured in that session**, which varies
   by how Linear was connected, so the allow list carries every spelling seen so

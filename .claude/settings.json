@@ -11,5 +11,18 @@
     "ask": [
       "mcp__*__delete_*"
     ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR\"/scripts/session_start.sh"
+          }
+        ]
+      }
+    ]
   }
 }

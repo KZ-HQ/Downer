@@ -81,17 +81,36 @@ geckodriver 0.36 or newer is required, for `--allow-system-access`.
 ## Claude Code cloud sessions
 
 Cloud sessions run Ubuntu 24.04 as root with the **Trusted** network access
-level, which allows `conda.anaconda.org` but not Mozilla's hosts, so the script
-above is exactly what such a session needs. Put it in the environment's setup
-script, where the filesystem snapshot keeps the result for later sessions:
+level, which allows `conda.anaconda.org` but not Mozilla's hosts, so the
+installer above is exactly what such a session needs.
 
-```bash
-cd /home/user/Downer && ./scripts/install_test_browser.sh
-```
+`.claude/settings.json` registers `scripts/session_start.sh` as a
+[SessionStart hook](https://code.claude.com/docs/en/hooks#sessionstart), which
+runs it. A hook was the right place rather than the environment's setup script
+for two reasons: the setup script provisions the VM before Claude Code starts,
+and what it writes is captured in a filesystem snapshot reused by later
+sessions in that environment — whatever repository they check out — so a setup
+script has no business reaching into a clone. The hook runs after the clone
+exists, with `$CLAUDE_PROJECT_DIR` pointing at it.
 
-It finishes in seconds, well inside the five-minute setup budget. If the
-repository is checked out somewhere else, or you want the browser regardless of
-the checkout, inline the script's body instead; it needs only `curl` and `tar`.
+A hook in a repository runs wherever Claude Code runs, including on a
+contributor's own machine, so `scripts/session_start.sh` exits 0 in silence
+before touching anything unless `CLAUDE_CODE_REMOTE` is exactly `true`. A cloud
+session VM sets that variable; it is never `true` locally. Set
+`DOWNER_SKIP_BROWSER_INSTALL=1` to turn the install off in a cloud session too.
+An install failure is reported and swallowed, because a session must not fail
+to start over a missing test browser.
 
-A session that did not get the browser at startup can install it mid-session
-with `make extension-browser`, but that install is lost when the session ends.
+Because the installer returns early when the browser is already there, the hook
+costs a fraction of a second on a session whose environment snapshot kept
+`/opt/downer-browser`, and a few seconds on one that did not. Nothing it does
+reaches outside that prefix: no system package manager, no file in the
+repository.
+
+Two limits worth knowing. A session with several repositories does not load
+hooks from any repository's `.claude/settings.json`, so the browser will be
+missing there; run `make extension-browser`. And a mid-session install is lost
+when the session ends. To have every session start from a snapshot that
+already contains the browser, put the body of `scripts/install_test_browser.sh`
+in the environment's setup script as well — it needs only `curl` and `tar`, and
+must not depend on the checkout.
