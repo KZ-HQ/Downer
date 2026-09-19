@@ -62,7 +62,7 @@ extension correlates acknowledgements. The extension generates request IDs as
 | --- | --- | --- |
 | `hello` | — | `request_id` |
 | `status` | — | `request_id`, `output_dir`, `ffmpeg` |
-| `download` | `url` | `job_id`, `request_id`, `source_url`, `output_dir`, `title`, `on_conflict`, `overwrite`, `cookie`, `user_agent`, `threads`, `total_segments`, `total_duration_ms` |
+| `download` | `url` | `job_id`, `request_id`, `source_url`, `output_dir`, `title`, `on_conflict`, `overwrite`, `cookie`, `user_agent`, `threads`, `total_segments`, `total_duration_ms`, `playlist_text`, `ffmpeg` |
 | `pause` | `job_id` | `request_id` |
 | `resume` | `job_id` | `request_id` |
 | `cancel` | `job_id` | `request_id` |
@@ -83,6 +83,16 @@ Notes:
   values are never logged, by either side.
 * `total_segments` / `total_duration_ms` on `download` seed HLS progress before
   FFmpeg starts; `hls-info` supplies them later for an already-running job.
+* `playlist_text` is the playlist the extension fetched **in the page's
+  context**, sent instead of the totals it used to compute itself. The division
+  is deliberate: the extension fetches, because only there is the page's session
+  — cookies, Referer, service-worker tokens — and a challenged CDN answers
+  nothing else; the host parses, because one implementation should decide what a
+  playlist means. The host reads it for the segment totals and, for a master, for
+  the rendition to download, and so makes no request of its own. Absent, the host
+  fetches as it always has, including the `../playlist.m3u8` fallback, so a
+  playlist the extension could not reach still gets its chance. See
+  [ADR-0011](adr/0011-one-playlist-parser.md).
 * `title` is the source page's title, used to name the output file when the
   media URL's own filename stem is generic (`index`, `playlist`, `master`,
   `download`, `video`, `media`, or digits only). **It is opt-in and absent by

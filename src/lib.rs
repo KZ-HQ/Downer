@@ -48,6 +48,12 @@ pub struct DownloadOptions {
     pub cookie: Option<String>,
     pub threads: Option<u16>,
     pub quiet: bool,
+    /// The playlist the caller already fetched, when it had the session to do
+    /// so. Supplying it skips the host's own fetch entirely — the extension
+    /// fetches in the page's context, which is the one context a challenged CDN
+    /// answers (KEI-87). Absent, the host fetches for itself as before. See
+    /// `docs/adr/0011-one-playlist-parser.md`.
+    pub playlist_text: Option<String>,
 }
 
 impl DownloadOptions {
@@ -128,6 +134,8 @@ pub fn run(cli: Cli) -> DownerResult<()> {
         cookie,
         threads: cli.threads,
         quiet: false,
+        // The CLI has no browser session to fetch with, so the host fetches.
+        playlist_text: None,
     };
     download_resolved(media, &options, Hooks::default()).map(|_| ())
 }
@@ -287,7 +295,16 @@ pub fn download_resolved(
     // is fetched, and the same one lands on disk. Best-effort by design: an
     // unresolvable playlist falls back to the URL as given, which is what this
     // did before. See ADR-0010.
-    let input = if is_hls(url.as_str()) {
+    let input = if !is_hls(url.as_str()) {
+        url.clone()
+    } else if let Some(text) = options.playlist_text.as_deref() {
+        // Already fetched by whoever had the session; parsing it here is what
+        // keeps one implementation of what a playlist means.
+        match scraper::parse_playlist(text, url) {
+            scraper::Playlist::Master { variant } => variant.unwrap_or_else(|| url.clone()),
+            scraper::Playlist::Media(_) | scraper::Playlist::Unusable => url.clone(),
+        }
+    } else {
         scraper::resolve_variant(
             url,
             &options.user_agent,
@@ -295,8 +312,6 @@ pub fn download_resolved(
             options.cookie.as_deref(),
         )
         .unwrap_or_else(|| url.clone())
-    } else {
-        url.clone()
     };
     if !options.quiet && input != *url {
         println!("Selected rendition: {input}");

@@ -1121,6 +1121,48 @@ fn malformed_json_is_rejected_without_a_job_id() {
 /// The checks themselves live in `src/diagnostics.rs` and are unit-tested
 /// there; what this pins is the wire shape — that every check carries a name,
 /// an outcome from the documented set, and a remedy whenever it is not a pass.
+/// KEI-51: a playlist the extension fetched is parsed by the host, not refetched.
+///
+/// The segment totals arrive without the host making any request, which is the
+/// point: the extension has the page's session and the host does not, so the
+/// text it fetched is the only one readable on a challenged CDN (KEI-87). What
+/// this pins is the wire contract — `playlist_text` in, totals out.
+#[test]
+fn a_supplied_playlist_yields_totals_without_a_fetch() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg::default().install(temp.path());
+    let mut host = NativeHost::start(&ffmpeg);
+
+    // An unroutable host: any attempt to fetch this would fail, so totals can
+    // only have come from the text.
+    host.send(&json!({
+        "command": "download",
+        "protocol_version": 1,
+        "job_id": "supplied-playlist",
+        "request_id": "supplied-playlist-start",
+        "url": "http://127.0.0.1:1/media/video.m3u8",
+        "output_dir": temp.path().join("downloads"),
+        "playlist_text": "#EXTM3U\n#EXTINF:2.0,\nseg0.ts\n#EXTINF:2.0,\nseg1.ts\n#EXT-X-ENDLIST\n",
+    }));
+
+    let mut totals = None;
+    for _ in 0..40 {
+        let event = host.next_event();
+        if event["total_segments"].is_number() {
+            totals = Some((
+                event["total_segments"].clone(),
+                event["total_duration_ms"].clone(),
+            ));
+            break;
+        }
+        if event["type"] == json!("terminal") {
+            break;
+        }
+    }
+    let (segments, _) = totals.expect("the supplied playlist produced segment totals");
+    assert_eq!(segments, json!(2), "both #EXTINF lines were counted");
+}
+
 #[test]
 fn status_reports_every_check_with_an_outcome_and_a_remedy() {
     let temp = tempfile::tempdir().unwrap();

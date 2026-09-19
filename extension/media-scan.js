@@ -2,7 +2,7 @@
  * Media candidate detection for the content script.
  *
  * The scan itself is pure and importable from Node (same `module.exports` guard
- * as `extension/hls.js`), so `tests/extension/media-scan.test.js` can drive it
+ * as `extension/task-protocol.js`), so `tests/extension/media-scan.test.js` can drive it
  * over HTML fixtures. `extension/content.js` is the thin DOM adapter that feeds
  * it the live page; it touches the `browser` global at load and is not
  * importable.

@@ -3,7 +3,7 @@
  * a job can be in, which transitions are legal, and which states are terminal.
  *
  * Pure and importable from Node (same `module.exports` guard as
- * `extension/hls.js`), so every transition can be tested directly.
+ * `extension/task-protocol.js`), so every transition can be tested directly.
  *
  * Two vocabularies meet here, and the distinction matters:
  *

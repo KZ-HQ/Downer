@@ -18,7 +18,7 @@
  * The decision is recorded in `docs/adr/0003-redact-urls-in-logs.md`.
  *
  * Pure and importable from Node, with the same `module.exports` guard as
- * `extension/hls.js`.
+ * `extension/task-protocol.js`.
  */
 var DownerRedact = (() => {
   const QUERY_PLACEHOLDER = "?…";

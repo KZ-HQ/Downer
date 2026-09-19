@@ -63,13 +63,6 @@ const { trimLogEntries, logStorageKey, jobIdFromLogKey } = DownerJobLogs;
 /** The job fields that can carry a URL, and so must be redacted before storage. */
 const REDACTED_JOB_FIELDS = ["error", "controlError", "metadataError"];
 
-const {
-  matchingVariant,
-  highestBandwidthVariant,
-  parentPlaylistUrl,
-  parseHlsInfo
-} = DownerHls;
-
 /**
  * Restore persisted jobs, reconciling any that were still active when the
  * browser closed. Native ports do not survive a restart and `nativeTasks` starts
@@ -163,37 +156,26 @@ async function fetchPlaylistForSession(tabId, url, referrer, sourceUrl) {
   }
 }
 
-async function hlsSegmentInfo(url, sourceUrl, tabId) {
-  let firstError;
+/**
+ * Fetch a playlist in the page's context and hand back its text.
+ *
+ * KEI-51: the extension fetches, the host parses. Only this context carries the
+ * page's session — cookies, Referer, service-worker tokens — which is the one a
+ * challenged CDN answers (KEI-87), so fetching cannot move to the host. Reading
+ * the result can, and has: `src/scraper.rs::parse_playlist` is now the only
+ * implementation of what a playlist means.
+ *
+ * Returning `null` is not a failure. The host fetches for itself when no text
+ * arrives, including the `../playlist.m3u8` fallback this used to duplicate, so
+ * a playlist the extension cannot reach still gets its chance.
+ */
+async function playlistTextForSession(url, sourceUrl, tabId) {
   try {
-    let playlist = await fetchPlaylistForSession(tabId, url, sourceUrl, sourceUrl);
-    const variant = highestBandwidthVariant(playlist.text, playlist.url);
-    if (variant) {
-      playlist = await fetchPlaylistForSession(tabId, variant, playlist.url, sourceUrl);
-    }
-    const info = parseHlsInfo(playlist.text);
-    if (info) return info;
-  } catch (error) {
-    firstError = error;
+    const playlist = await fetchPlaylistForSession(tabId, url, sourceUrl, sourceUrl);
+    return playlist.text || null;
+  } catch (_) {
+    return null;
   }
-
-  const parentUrl = parentPlaylistUrl(url);
-  if (parentUrl && parentUrl !== url) {
-    try {
-      const master = await fetchPlaylistForSession(tabId, parentUrl, sourceUrl, sourceUrl);
-      const variant = matchingVariant(master.text, master.url, url);
-      const playlist = variant
-        ? await fetchPlaylistForSession(tabId, variant, master.url, sourceUrl)
-        : master;
-      const info = parseHlsInfo(playlist.text);
-      if (info) return info;
-    } catch (error) {
-      firstError = firstError || error;
-    }
-  }
-
-  if (firstError) throw firstError;
-  throw new Error("No HLS segments found in the playlist");
 }
 
 /**
@@ -444,21 +426,16 @@ async function runDownload(message, jobId) {
       nameFromTitle: DEFAULT_NAME_FROM_TITLE
     });
     const cookie = await cookieHeader(message.url);
-    let playlistInfo = null;
-    if (message.url.toLowerCase().includes(".m3u8")) {
-      try {
-        playlistInfo = await hlsSegmentInfo(message.url, message.sourceUrl, message.tabId);
-      } catch (error) {
-        updateJob(jobId, { metadataError: error.message || String(error) });
-      }
-      if (playlistInfo) {
-        updateJob(jobId, {
-          completedSegments: 0,
-          totalSegments: playlistInfo.totalSegments,
-          percent: 0,
-          metadataError: null
-        });
-      }
+    // Fetched here because only this context has the page's session; read by
+    // the host, which owns what a playlist means. Totals come back as a
+    // progress event rather than being computed twice.
+    const playlistText = message.url.toLowerCase().includes(".m3u8")
+      ? await playlistTextForSession(message.url, message.sourceUrl, message.tabId)
+      : null;
+    if (message.url.toLowerCase().includes(".m3u8") && !playlistText) {
+      updateJob(jobId, {
+        metadataError: "Could not fetch the playlist from the page; the host will try."
+      });
     }
     const native = await nativeDownload({
       command: "download",
@@ -486,8 +463,7 @@ async function runDownload(message, jobId) {
       threads: Number.isInteger(settings.ffmpegThreads) && settings.ffmpegThreads > 0
         ? settings.ffmpegThreads
         : null,
-      total_segments: playlistInfo?.totalSegments,
-      total_duration_ms: playlistInfo?.totalDurationMs
+      playlist_text: playlistText
     }, jobId);
     const response = await native.completion;
     if (response?.state === "cancelled") {

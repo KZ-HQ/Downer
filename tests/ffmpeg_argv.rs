@@ -69,6 +69,7 @@ fn argv_for(case: Case) -> Vec<String> {
         cookie: None,
         threads: case.threads,
         quiet: true,
+        playlist_text: None,
     };
 
     let control = ProcessControl::new();

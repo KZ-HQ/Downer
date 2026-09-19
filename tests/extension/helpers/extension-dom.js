@@ -4,7 +4,7 @@
  * Loads the real, shipped extension files into a jsdom window.
  *
  * `extension/content.js` and `extension/popup.js` touch the `browser` global and
- * the DOM at load, so they cannot be `require()`d the way `hls.js`,
+ * the DOM at load, so they cannot be `require()`d the way `task-protocol.js`,
  * `media-scan.js`, and `job-view.js` can. They can, however, be evaluated inside
  * a window that already has a document and a stubbed `browser` — which is what
  * this does. Nothing here re-implements or copies extension code: the files
@@ -411,7 +411,6 @@ async function loadBackground({ downloadJobs = [], storage: initialStorage = {},
     "redact.js",
     "job-logs.js",
     "task-protocol.js",
-    "hls.js",
     "background.js"
   ]) {
     dom.window.eval(extensionSource(file));
