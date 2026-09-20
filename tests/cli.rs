@@ -882,3 +882,62 @@ fn an_old_ffmpeg_keeps_its_headline_and_loses_the_chatter() {
         "and the cause is still there: {stderr}"
     );
 }
+
+/// KEI-90: `doctor` says whose download directory it is reporting.
+///
+/// The command line writes to the working directory; the extension writes to
+/// the desktop's download folder. `doctor` is what people run to debug the
+/// *extension*, so reporting one number with no label invites reading it as the
+/// other.
+#[cfg(unix)]
+#[test]
+fn doctor_distinguishes_the_command_lines_directory_from_the_extensions() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let fake = fake_ffmpeg(temp.path(), false);
+
+    let output = Command::cargo_bin("downer")
+        .unwrap()
+        .arg("doctor")
+        .arg("--ffmpeg")
+        .arg(&fake)
+        .env("HOME", &home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_DATA_HOME")
+        .output()
+        .expect("doctor runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("note: this is the command line's directory"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&home.join("Downloads").display().to_string()),
+        "and it names the extension's, resolved the same way a download does: {stdout}"
+    );
+}
+
+/// With `--dir` there is nothing to confuse: the user named the directory.
+#[cfg(unix)]
+#[test]
+fn doctor_with_an_explicit_directory_does_not_add_the_note() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake = fake_ffmpeg(temp.path(), false);
+
+    let output = Command::cargo_bin("downer")
+        .unwrap()
+        .arg("doctor")
+        .arg("--dir")
+        .arg(temp.path())
+        .arg("--ffmpeg")
+        .arg(&fake)
+        .output()
+        .expect("doctor runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("note: this is the command line's"),
+        "{stdout}"
+    );
+}

@@ -10,8 +10,17 @@
     <h1>Downer settings</h1>
     <label>
       Output directory (optional)
-      <input id="output-dir" type="text" placeholder="Defaults to your Downloads folder">
+      <input id="output-dir" type="text" placeholder="Leave blank for the default">
     </label>
+    <!--
+      The placeholder used to promise "your Downloads folder", which was not
+      true everywhere: the default comes from the desktop's own download
+      directory, and on Linux without XDG user-directory configuration there
+      isn't one. Rather than make a different promise, the panel below states
+      the directory the host actually resolved — the only answer that is right
+      on every machine. See KEI-90.
+    -->
+    <p class="hint">Blank uses your desktop's download folder, or <code>~/Downloads</code> where it has none. <strong>Check setup</strong> below names the exact directory, and creates it on the first download if it isn't there yet.</p>
     <label>
       FFmpeg path (optional)
       <input id="ffmpeg-path" type="text" placeholder="Leave blank to let the host find FFmpeg">

@@ -194,3 +194,17 @@ test("KEI-65: keeping part-written files is off by default and round-trips", asy
   const stored = await loadOptions({ settings: { keepPartial: true } });
   assert.equal(stored.field("keep-partial").checked, true);
 });
+
+test("KEI-90: the output directory field does not promise a folder that may not exist", async () => {
+  // The placeholder used to say "Defaults to your Downloads folder". On Linux
+  // without XDG user-directory configuration there is no such folder, and the
+  // host was falling back to its own working directory — so the promise was
+  // untrue exactly where it mattered.
+  const page = await loadOptions({});
+  const field = page.field("output-dir");
+  assert.equal(field.placeholder, "Leave blank for the default");
+  assert.ok(
+    !field.placeholder.includes("Downloads folder"),
+    "the placeholder must not promise a specific folder"
+  );
+});

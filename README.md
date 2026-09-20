@@ -216,6 +216,25 @@ downer 'https://example.com/live/index.m3u8' --dir ./downloads --name 'Episode 4
 downer 'https://example.com/live/index.m3u8' --dir ./downloads --on-conflict fail
 ```
 
+### Where downloads go
+
+The **command line** writes to the current directory unless `--dir` or
+`--output` says otherwise. That is the normal thing for a command-line tool and
+is unchanged.
+
+The **extension** writes to the directory set on the Settings page. Left blank —
+the default — the native host uses your desktop's own download directory, or
+`~/Downloads` where the desktop has none. Linux only reports a download
+directory when XDG user-directory configuration is present
+(`~/.config/user-dirs.dirs`), which minimal installs and containers often lack;
+`~/Downloads` is what Firefox itself falls back to there, so downloads land
+beside the browser's rather than somewhere this project invented. The directory
+is created on first use.
+
+**Check setup** on the Settings page names the exact directory the host
+resolved, including when it does not exist yet. That is the answer to trust: it
+comes from the host, not from a guess about your platform.
+
 ### Output names and collisions
 
 By default, an inferred filename is written to the current directory. URL

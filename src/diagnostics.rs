@@ -11,7 +11,7 @@
 
 use std::{
     fmt,
-    path::Path,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -282,25 +282,75 @@ fn ffmpeg_check(path: &Path, version: Option<ffmpeg::FfmpegVersion>) -> Check {
 /// Existence and permission bits are not the question — whether a file can be
 /// created is. This writes a uniquely named probe file and removes it, so it
 /// answers the real question without disturbing anything already there.
+///
+/// A directory that does not exist **yet** is not a failure. A download creates
+/// its output directory (`output::resolve_output_path` calls `create_dir_all`),
+/// so reporting "not a directory" would tell the user something is wrong with a
+/// setup that works — and on a Linux machine with no XDG configuration, where
+/// the default is a `~/Downloads` nobody has created, that is the *ordinary*
+/// case rather than a corner of it. The check walks up to the nearest existing
+/// ancestor and asks the same question there, which is what decides whether the
+/// download's `create_dir_all` will succeed. See KEI-90.
 fn output_directory_check(directory: &Path) -> Check {
     const NAME: &str = "output_directory";
     const TITLE: &str = "Download directory writable";
+
+    if !directory.exists() {
+        let Some(existing) = nearest_existing_ancestor(directory) else {
+            return Check::fail(
+                NAME,
+                TITLE,
+                format!(
+                    "{} does not exist and neither does any parent of it",
+                    directory.display()
+                ),
+                "Choose an existing directory on the Settings page.".to_string(),
+            );
+        };
+        if !existing.is_dir() {
+            return Check::fail(
+                NAME,
+                TITLE,
+                format!(
+                    "{} cannot be created: {} is a file",
+                    directory.display(),
+                    existing.display()
+                ),
+                "Choose a directory whose parents are directories, on the Settings page."
+                    .to_string(),
+            );
+        }
+        return match writable(&existing) {
+            Ok(()) => Check::pass(
+                NAME,
+                TITLE,
+                format!("{} (will be created)", directory.display()),
+            ),
+            Err(error) => Check::fail(
+                NAME,
+                TITLE,
+                format!(
+                    "{} does not exist and cannot be created: {} is not writable ({error})",
+                    directory.display(),
+                    existing.display()
+                ),
+                "Choose a directory you can write to on the Settings page, or fix its permissions."
+                    .to_string(),
+            ),
+        };
+    }
 
     if !directory.is_dir() {
         return Check::fail(
             NAME,
             TITLE,
             format!("{} is not a directory", directory.display()),
-            "Choose an existing directory on the Settings page, or create this one.".to_string(),
+            "Choose a directory rather than a file on the Settings page.".to_string(),
         );
     }
 
-    let probe = directory.join(format!(".downer-write-check-{}", probe_suffix()));
-    match std::fs::write(&probe, b"") {
-        Ok(()) => {
-            let _ = std::fs::remove_file(&probe);
-            Check::pass(NAME, TITLE, directory.display().to_string())
-        }
+    match writable(directory) {
+        Ok(()) => Check::pass(NAME, TITLE, directory.display().to_string()),
         Err(error) => Check::fail(
             NAME,
             TITLE,
@@ -309,6 +359,27 @@ fn output_directory_check(directory: &Path) -> Check {
                 .to_string(),
         ),
     }
+}
+
+/// Write a uniquely named probe file and remove it.
+fn writable(directory: &Path) -> std::io::Result<()> {
+    let probe = directory.join(format!(".downer-write-check-{}", probe_suffix()));
+    std::fs::write(&probe, b"")?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
+}
+
+/// The closest ancestor of `directory` that exists, including itself.
+///
+/// By existence, not by being a directory. An ancestor that exists as a *file*
+/// blocks `create_dir_all` for everything under it, so skipping past it to the
+/// next directory up would report a writable parent for a path that can never
+/// be created.
+fn nearest_existing_ancestor(directory: &Path) -> Option<PathBuf> {
+    directory
+        .ancestors()
+        .find(|ancestor| ancestor.exists())
+        .map(Path::to_path_buf)
 }
 
 /// A suffix unlikely to collide with a concurrent check or a real file.
@@ -338,13 +409,87 @@ mod tests {
         );
     }
 
+    /// KEI-90 reverses this: a directory that does not exist *yet* used to fail.
+    ///
+    /// A download creates its output directory, so the old answer reported a
+    /// problem with a setup that works — and once the default became
+    /// `~/Downloads` on a machine with no XDG configuration, that became the
+    /// ordinary case rather than a corner of it. What the check must still
+    /// answer is whether the download's `create_dir_all` will succeed, which is
+    /// a question about the nearest existing ancestor.
     #[test]
-    fn a_missing_directory_fails_with_something_to_do() {
+    fn a_directory_that_does_not_exist_yet_passes_and_says_so() {
         let temp = tempfile::tempdir().unwrap();
         let check = output_directory_check(&temp.path().join("not-created"));
-        assert_eq!(check.outcome, Outcome::Fail);
-        assert!(check.detail.contains("not a directory"));
+        assert_eq!(check.outcome, Outcome::Pass, "{check:?}");
+        assert!(check.detail.contains("will be created"), "{check:?}");
+    }
+
+    /// Several levels deep, as `~/Downloads` is from `/`.
+    #[test]
+    fn a_directory_several_levels_from_anything_existing_still_passes() {
+        let temp = tempfile::tempdir().unwrap();
+        let check = output_directory_check(&temp.path().join("a").join("b").join("c"));
+        assert_eq!(check.outcome, Outcome::Pass, "{check:?}");
+    }
+
+    /// The case that must still fail, and it must not be reached by walking
+    /// *past* the thing in the way. A file blocks `create_dir_all` for
+    /// everything beneath it however writable the directory above it is — and
+    /// unlike a permission bit, root cannot ignore it, so this asserts on every
+    /// machine rather than skipping.
+    #[test]
+    fn a_missing_directory_under_a_file_fails_rather_than_finding_a_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocker = temp.path().join("in-the-way");
+        std::fs::write(&blocker, b"").unwrap();
+
+        let check = output_directory_check(&blocker.join("downloads"));
+        assert_eq!(check.outcome, Outcome::Fail, "{check:?}");
+        assert!(check.detail.contains("is a file"), "{check:?}");
         assert!(check.remedy.is_some(), "a failure always says what to do");
+
+        // And the claim the check makes is true.
+        assert!(
+            std::fs::create_dir_all(blocker.join("downloads")).is_err(),
+            "the check must agree with what a download would find"
+        );
+    }
+
+    /// An unwritable parent fails too, where permission bits can be felt.
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_directory_under_an_unwritable_parent_fails_with_something_to_do() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let locked = temp.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let check = output_directory_check(&locked.join("downloads"));
+        // Running as root defeats the permission bits, so this asserts the
+        // distinction only where it can exist — the convention this file
+        // already uses for `an_unwritable_directory_fails_…`.
+        let root_ignores_permissions = std::fs::create_dir(locked.join("probe")).is_ok();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if root_ignores_permissions {
+            return;
+        }
+
+        assert_eq!(check.outcome, Outcome::Fail, "{check:?}");
+        assert!(check.detail.contains("cannot be created"), "{check:?}");
+        assert!(check.remedy.is_some(), "a failure always says what to do");
+    }
+
+    /// A path that exists but is a file is still wrong, and says so distinctly.
+    #[test]
+    fn a_path_that_is_a_file_fails_as_a_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("not-a-directory");
+        std::fs::write(&file, b"").unwrap();
+        let check = output_directory_check(&file);
+        assert_eq!(check.outcome, Outcome::Fail, "{check:?}");
+        assert!(check.detail.contains("is not a directory"), "{check:?}");
     }
 
     #[cfg(unix)]

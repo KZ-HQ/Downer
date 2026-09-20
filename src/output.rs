@@ -106,6 +106,54 @@ fn has_nonempty_authority(raw: &str) -> bool {
         .is_some_and(|authority| !authority.is_empty())
 }
 
+/// Where a download goes when the client named no directory.
+///
+/// The browser extension leaves this empty by default, so this is the **normal
+/// path**, not an edge case.
+///
+/// `dirs::download_dir()` is the right answer wherever the desktop has one. On
+/// macOS it always resolves. On Linux it reads XDG user-directory configuration
+/// (`~/.config/user-dirs.dirs`) and returns `None` without it — absent on
+/// minimal installs, containers, and any system without `xdg-user-dirs`. This
+/// was not hypothetical: the KEI-59 integration test had to write that file by
+/// hand before a default directory could be found at all, and `downer doctor`
+/// on such a machine reported the process's working directory as the place
+/// downloads go.
+///
+/// `$HOME/Downloads` is the fallback, created on first use like any other
+/// output directory. It is what Firefox itself uses on Linux without XDG, so a
+/// user's downloads land beside their browser's rather than somewhere this
+/// project invented.
+///
+/// `None` only when there is no home directory either. On Unix `dirs::home_dir`
+/// reads `$HOME` and falls back to the passwd entry, so this is rare — measured:
+/// a host started with `HOME` unset still resolved `/root/Downloads`. It is
+/// nonetheless the one case that cannot be decided, and the caller refuses
+/// rather than guessing. The previous guess was `.`, the host process's working
+/// directory, inherited from however Firefox was started (`/` from a desktop
+/// launcher), so a download could land somewhere the user did not choose and
+/// would not think to look. See KEI-90.
+pub fn default_download_dir() -> Option<PathBuf> {
+    resolve_default_download_dir(dirs::download_dir(), dirs::home_dir())
+}
+
+/// The rule itself, with its two inputs passed in.
+///
+/// Split out so the `None` case can be tested at all: it depends on the
+/// developer's machine having no XDG configuration *and* no home directory,
+/// which is not something a test can arrange.
+fn resolve_default_download_dir(
+    desktop: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    desktop.or_else(|| home.map(|home| home.join("Downloads")))
+}
+
+/// What to tell a client that has no configured directory and no `$HOME`.
+pub const NO_DEFAULT_DIRECTORY: &str =
+    "no download directory is configured and no default could be found; \
+     set one in the extension's Settings page, or pass --dir";
+
 pub fn resolve_output_path(
     url: &Url,
     output: Option<&Path>,
@@ -674,6 +722,28 @@ mod tests {
                 "{policy:?} must refuse a directory"
             );
         }
+    }
+
+    /// KEI-90: the three cases, including the one a developer's machine cannot
+    /// produce.
+    #[test]
+    fn the_default_download_directory_prefers_the_desktops_answer() {
+        // Whatever the desktop says, even when it is not named "Downloads" —
+        // a localised XDG entry is the user's real folder.
+        assert_eq!(
+            resolve_default_download_dir(
+                Some(PathBuf::from("/home/me/Téléchargements")),
+                Some(PathBuf::from("/home/me"))
+            ),
+            Some(PathBuf::from("/home/me/Téléchargements"))
+        );
+        // No XDG configuration: beside the browser's own default, not `.`.
+        assert_eq!(
+            resolve_default_download_dir(None, Some(PathBuf::from("/home/me"))),
+            Some(PathBuf::from("/home/me/Downloads"))
+        );
+        // Neither: undecidable, and the caller refuses instead of guessing.
+        assert_eq!(resolve_default_download_dir(None, None), None);
     }
 
     #[test]

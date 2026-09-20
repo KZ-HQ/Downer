@@ -344,7 +344,7 @@ fn status_response(
     // that downloads "can be written where you asked" untrue by default.
     let directory = output_dir
         .map(Path::to_path_buf)
-        .or_else(dirs::download_dir);
+        .or_else(crate::output::default_download_dir);
     let report = crate::diagnostics::run(directory.as_deref(), ffmpeg);
     NativeResponse {
         event_type: EVENT_STATUS,
@@ -801,14 +801,16 @@ fn download(
         referer,
         user_agent: user_agent.clone(),
     };
+    // Refused rather than guessed at. The old fallback was `.` — the host
+    // process's working directory, inherited from however Firefox was started —
+    // so a download could land somewhere the user never chose. See KEI-90.
+    let dir = request
+        .output_dir
+        .or_else(crate::output::default_download_dir)
+        .ok_or_else(|| DownerError::OutputPath(crate::output::NO_DEFAULT_DIRECTORY.to_string()))?;
     let options = DownloadOptions {
         output: None,
-        dir: Some(
-            request
-                .output_dir
-                .or_else(dirs::download_dir)
-                .unwrap_or_else(|| PathBuf::from(".")),
-        ),
+        dir: Some(dir),
         overwrite: request.overwrite,
         on_conflict: request.on_conflict,
         naming: NamingHints::new(request.title),

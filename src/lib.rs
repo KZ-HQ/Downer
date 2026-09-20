@@ -227,6 +227,20 @@ fn run_doctor(args: &cli::DoctorArgs) -> DownerResult<()> {
         if let Some(remedy) = &check.remedy {
             println!("      → {remedy}");
         }
+        // Said against the check it is about, not merely after the last line
+        // printed. `doctor` is the command people run to debug the *extension*,
+        // and with no `--dir` the directory it checks is the command line's —
+        // the working directory — not the one the extension uses. The two
+        // differ by design (KEI-90); identical output for different answers
+        // would be worse than a sentence.
+        if check.name == "output_directory" && args.dir.is_none() {
+            println!(
+                "      note: this is the command line's directory. The extension uses {}",
+                output::default_download_dir()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "no default — set one on its Settings page".to_string())
+            );
+        }
     }
     println!();
 
