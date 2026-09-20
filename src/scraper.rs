@@ -461,22 +461,40 @@ pub fn resolve_variant(
     cookie: Option<&str>,
     requested: Option<&RenditionChoice>,
 ) -> Option<VariantChoice> {
+    match fetch_playlist(url, user_agent, referer, cookie)? {
+        Playlist::Master(master) => master.choose(requested),
+        Playlist::Media(_) | Playlist::Unusable => None,
+    }
+}
+
+/// Fetch the playlist at `url` and read it.
+///
+/// For a caller that needs what a playlist *declares* rather than which variant
+/// to download — `--list` enumerating renditions, above all. It is the same
+/// fetch and the same parser [`resolve_variant`] uses, deliberately: listing a
+/// playlist and then downloading from it must not be able to disagree about
+/// what it says (ADR-0011).
+///
+/// `None` for every failure, like `resolve_variant`: a problem here costs the
+/// bandwidth the resolution would have saved and nothing else — the download
+/// falls back to the URL as given — so it is dropped rather than reported. The
+/// *segment count* probe reports its problems, because there the user is owed
+/// an explanation for a blank row.
+pub fn fetch_playlist(
+    url: &Url,
+    user_agent: &str,
+    referer: Option<&Url>,
+    cookie: Option<&str>,
+) -> Option<Playlist> {
     let client = Client::builder()
         .redirect(Policy::limited(10))
         .connect_timeout(VARIANT_CONNECT_TIMEOUT)
         .timeout(VARIANT_TIMEOUT)
         .build()
         .ok()?;
-    // A problem here costs the bandwidth this resolution would have saved and
-    // nothing else — the download falls back to the URL as given — so it is
-    // dropped rather than reported. The *segment count* probe reports its
-    // problems, because there the user is owed an explanation for a blank row.
     let (playlist, base_url) =
         fetch_hls_playlist(&client, url, user_agent, referer, cookie).ok()?;
-    match parse_playlist(&playlist, &base_url) {
-        Playlist::Master(master) => master.choose(requested),
-        Playlist::Media(_) | Playlist::Unusable => None,
-    }
+    Some(parse_playlist(&playlist, &base_url))
 }
 
 /// Whether a playlist lists variant streams rather than segments.
@@ -628,17 +646,68 @@ fn parse_hls_info(playlist: &str) -> Option<HlsInfo> {
     })
 }
 
+/// Every media URL a source offers, and where they were found.
+///
+/// The list `resolve_media` takes the first of. KEI-62 needs the rest of it —
+/// `--list` prints them and `--select`/`--media` picks one — so the discovery
+/// that was folded into `resolve_media` is now a step of its own. There is
+/// still one implementation: `resolve_media` calls this and keeps the first
+/// URL, which is what it always did.
+#[derive(Debug, Clone)]
+pub struct SourceMedia {
+    /// Media URLs, playlists first. Never empty: a source offering nothing is
+    /// [`DownerError::MediaNotFound`] rather than an empty list, so a caller
+    /// cannot mistake "found none" for "did not look".
+    pub urls: Vec<Url>,
+    /// The source page these were found in, once redirects settled. `None` when
+    /// `raw` was already a media URL and no page was fetched. It is also the
+    /// `Referer` the media requests need.
+    pub referer: Option<Url>,
+}
+
+impl SourceMedia {
+    /// The URL the candidates were discovered from: the source page when one
+    /// was fetched, the media URL itself when it was given directly.
+    pub fn source(&self) -> &Url {
+        self.referer.as_ref().unwrap_or(&self.urls[0])
+    }
+}
+
 pub fn resolve_media(
     raw: &str,
     user_agent: &str,
     cookie: Option<&str>,
 ) -> DownerResult<ResolvedMedia> {
+    let source = resolve_source(raw, user_agent, cookie)?;
+    Ok(ResolvedMedia {
+        // `urls` is never empty, so the first is always there.
+        url: source
+            .urls
+            .into_iter()
+            .next()
+            .expect("SourceMedia is never empty"),
+        referer: source.referer,
+        user_agent: user_agent.to_string(),
+    })
+}
+
+/// Find everything `raw` offers: the URL itself when it is already media, or
+/// every media URL its source page references.
+///
+/// The discovery half of [`resolve_media`], which is this plus "keep the
+/// first". Split out for KEI-62 so `--list` can print the rest and
+/// `--select`/`--media` can pick from it, without a second scan of the page
+/// that could disagree with the one a download does.
+pub fn resolve_source(
+    raw: &str,
+    user_agent: &str,
+    cookie: Option<&str>,
+) -> DownerResult<SourceMedia> {
     let input = validate_url(raw)?;
     if is_media_url(&input) {
-        return Ok(ResolvedMedia {
-            url: input,
+        return Ok(SourceMedia {
+            urls: vec![input],
             referer: None,
-            user_agent: user_agent.to_string(),
         });
     }
 
@@ -693,15 +762,14 @@ pub fn resolve_media(
             status: Some(status.as_u16()),
             message: error.to_string(),
         })?;
-    let media_url = extract_media_urls(&html, &final_url)
-        .into_iter()
-        .next()
-        .ok_or_else(|| DownerError::MediaNotFound(final_url.to_string()))?;
+    let urls = extract_media_urls(&html, &final_url);
+    if urls.is_empty() {
+        return Err(DownerError::MediaNotFound(final_url.to_string()));
+    }
 
-    Ok(ResolvedMedia {
-        url: media_url,
+    Ok(SourceMedia {
+        urls,
         referer: Some(final_url),
-        user_agent: user_agent.to_string(),
     })
 }
 
@@ -896,6 +964,20 @@ pub enum MediaKind {
     File,
 }
 
+impl MediaKind {
+    /// The word for this kind, as `tests/fixtures/media-extensions.json` lists
+    /// it and the extension's candidates already carry it. The CLI's `--list`
+    /// output uses it too rather than inventing a third vocabulary for the same
+    /// three things.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hls => "hls",
+            Self::Dash => "dash",
+            Self::File => "file",
+        }
+    }
+}
+
 /// The final extension of the URL's **path**, lowercased, with its dot.
 ///
 /// The query and fragment are excluded, and only the last extension counts.
@@ -1019,6 +1101,17 @@ mod tests {
         };
         assert_eq!(listed("media_extensions"), MEDIA_EXTENSIONS.to_vec());
         assert_eq!(listed("playlist_extensions"), PLAYLIST_EXTENSIONS.to_vec());
+        // The kind names are vocabulary too. `MediaKind::as_str` puts them on
+        // the CLI's `--json` surface (KEI-62), where renaming one silently
+        // would break a script as surely as renaming a protocol term.
+        assert_eq!(
+            listed("kinds"),
+            vec![
+                MediaKind::Hls.as_str(),
+                MediaKind::Dash.as_str(),
+                MediaKind::File.as_str()
+            ]
+        );
     }
 
     #[test]

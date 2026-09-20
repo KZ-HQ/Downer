@@ -184,6 +184,7 @@ session can find the right file without opening it.
 | `src/native.rs` | The native messaging host: framing, handshake, workers, progress, control. |
 | `src/ffmpeg.rs` | Invokes FFmpeg without a shell, parses `-progress`, captures stderr, pause/resume signals. |
 | `src/scraper.rs` | Resolves source-page media URLs and parses HLS playlists. The only playlist parser. |
+| `src/discovery.rs` | The candidate list behind `--list`, `--select`/`--media` and `--json`. Assembles what `scraper` answers; decides nothing about media itself. |
 | `src/output.rs` | URL validation, filename inference and sanitizing, the `OnConflict` policy. |
 | `src/host.rs` | Native-host registration: manifest, launcher, durable binary location, recorded FFmpeg path. |
 

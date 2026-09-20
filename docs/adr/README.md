@@ -33,10 +33,11 @@ control semantics.
 | [0017](0017-manifest-v2-persistent-background-page.md) | Manifest V2 with a persistent background page | Accepted |
 | [0018](0018-stable-cli-exit-codes.md) | Exit codes classify the failure and are part of the CLI contract | Accepted |
 | [0019](0019-native-host-as-a-mode-of-the-cli.md) | The native host is a mode of the CLI binary | Accepted |
+| [0020](0020-json-output-is-a-cli-interface.md) | `--json` output is a public interface, versioned in the document | Accepted |
 
 ## Reading them together
 
-Four threads run through the set, and a record is usually easier to understand
+Five threads run through the set, and a record is usually easier to understand
 beside the others on its thread.
 
 **The browser boundary.** 0001 (the wire contract) → 0019 (which program speaks
@@ -53,6 +54,10 @@ before FFmpeg sees it) → 0011 (who fetches a playlist, who parses it) → 0014
 **Downloads as processes.** 0015 (there is a process at all) → 0016 (we block
 on it rather than await it) → 0013 (one download per host process) → 0012 (what
 we can promise by signalling it).
+
+**What a script may rely on.** 0018 (the exit codes classify the failure) →
+0020 (`--json` describes the success), which makes the same promise about the
+other half of what a caller reads.
 
 Records 0015–0019 were written after the fact, under KEI-63, for decisions that
 had been embodied in the code since before this directory existed. They

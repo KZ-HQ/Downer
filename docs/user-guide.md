@@ -224,6 +224,118 @@ Nothing is ever overwritten without being asked. The reasoning is in
 [ADR-0004](adr/0004-output-naming-and-collision-policy.md) and
 [ADR-0005](adr/0005-default-output-name-over-derived-one.md).
 
+## Listing what a URL offers
+
+A page usually references more than one downloadable thing, and Downer takes
+the first it finds. `--list` shows the whole list instead, and exits without
+downloading anything:
+
+```sh
+downer 'https://example.com/watch/video' --list
+```
+
+```
+Source: https://example.com/watch/video
+
+  1  hls    https://cdn.example.com/media/master.m3u8
+       720p  900 kbps  avc1.64001f  (default)  + separate audio
+       360p  400 kbps  avc1.4d401e  + separate audio
+  2  file   https://cdn.example.com/media/trailer.mp4
+
+Download one with --select N, or name it with --media URL.
+```
+
+Playlists come first, then plain files. Under a master playlist are the
+renditions it declares, best first, labelled the way `--rendition` takes them —
+so a line of that output can be typed straight back in. A `.mpd` candidate is
+marked **experimental**: DASH is recognised but has never been put through
+FFmpeg end to end.
+
+`--list` exits `0` when it found something and `5` when the page offers no
+media at all, which is what downloading it would have done.
+
+### Downloading one that is not the first
+
+```sh
+downer 'https://example.com/watch/video' --select 2
+downer 'https://example.com/watch/video' --media 'https://cdn.example.com/media/trailer.mp4'
+```
+
+`--select` takes the number `--list` printed, counting from 1. `--media` takes
+the URL. Either one naming something the page does not offer **stops the run**
+rather than falling back to the first candidate — a page whose markup changed
+since you listed it is when that happens, and the remedy is to list it again.
+
+Without `--select` or `--media`, nothing changes: the first candidate is
+downloaded, exactly as before.
+
+## Machine-readable output
+
+`--json` replaces the prose with one JSON document on stdout. It applies to
+`--list`:
+
+```sh
+downer 'https://example.com/watch/video' --list --json
+```
+
+```json
+{
+  "schema_version": 1,
+  "source": "https://example.com/watch/video",
+  "candidates": [
+    {
+      "index": 1,
+      "url": "https://cdn.example.com/media/master.m3u8",
+      "kind": "hls",
+      "experimental": false,
+      "renditions": [
+        {
+          "url": "https://cdn.example.com/media/high.m3u8",
+          "bandwidth": 900000,
+          "width": 1280,
+          "height": 720,
+          "codecs": "avc1.64001f",
+          "audio_url": "https://cdn.example.com/media/audio.m3u8",
+          "default": true
+        }
+      ]
+    }
+  ]
+}
+```
+
+and to the result of a download:
+
+```sh
+downer 'https://example.com/video.mp4' --json --dir ./downloads
+```
+
+```json
+{
+  "schema_version": 1,
+  "url": "https://example.com/video.mp4",
+  "path": "/home/you/downloads/video.mp4",
+  "engine": "ffmpeg",
+  "bytes": 48291043,
+  "elapsed_ms": 18422
+}
+```
+
+`kind` is `hls`, `dash` or `file`. `elapsed_ms` is how long the download took,
+not how long the video is. `renditions` is absent unless the candidate is a
+master playlist, and `bytes` is absent if the finished file could not be
+measured — so read both defensively.
+
+**This output is a stable interface.** Field names and types will not change
+under you; `schema_version` is bumped if they ever have to, and new fields may
+be added without bumping it. The reasoning, including why failures are
+deliberately *not* JSON, is in
+[ADR-0020](adr/0020-json-output-is-a-cli-interface.md).
+
+A **failure** writes its message to stderr and exits with the code below,
+whether or not `--json` was given. That is the machine-readable form a failure
+already has, and it is why there is no error document to parse.
+
 ## Choosing a quality
 
 A master playlist lists several renditions of the same video. Without
@@ -337,7 +449,8 @@ Use `downer --help` for all options.
 | `6` | A failing setup check from `downer doctor` |
 
 They are a stable part of the interface
-([ADR-0018](adr/0018-stable-cli-exit-codes.md)).
+([ADR-0018](adr/0018-stable-cli-exit-codes.md)). `--list` uses the same ones: it
+exits `0` having downloaded nothing, and `5` when the URL offers no media.
 
 ## What Downer does not do
 

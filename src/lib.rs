@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod diagnostics;
+pub mod discovery;
 pub mod error;
 pub mod failure;
 pub mod ffmpeg;
@@ -149,7 +150,34 @@ pub fn run(cli: Cli) -> DownerResult<()> {
         .url
         .as_deref()
         .expect("clap requires a URL unless a subcommand is given");
-    let media = scraper::resolve_media(url, &cli.user_agent, cookie.as_deref())?;
+
+    if cli.list {
+        let listing = discovery::list(url, &cli.user_agent, cookie.as_deref())?;
+        if cli.json {
+            println!("{}", discovery::to_json(&listing));
+        } else {
+            print!("{}", discovery::listing_text(&listing));
+        }
+        return Ok(());
+    }
+
+    // An unselected download resolves exactly as it always did, down to making
+    // the same requests: `resolve_media` keeps the first candidate without the
+    // caller ever seeing the list. Only a `--select` or `--media` needs the
+    // whole list, so only those pay for assembling it.
+    let media = match (cli.select, cli.media.as_deref()) {
+        (None, None) => scraper::resolve_media(url, &cli.user_agent, cookie.as_deref())?,
+        (select, media) => {
+            let source = scraper::resolve_source(url, &cli.user_agent, cookie.as_deref())?;
+            ResolvedMedia {
+                url: discovery::select(&source, select.map(|n| n as usize), media)?,
+                referer: source.referer,
+                user_agent: cli.user_agent.clone(),
+            }
+        }
+    };
+    let chosen = media.url.clone();
+    let json = cli.json;
     let options = DownloadOptions {
         output: cli.output,
         dir: cli.dir,
@@ -160,7 +188,10 @@ pub fn run(cli: Cli) -> DownerResult<()> {
         user_agent: cli.user_agent,
         cookie,
         threads: cli.threads,
-        quiet: false,
+        // `--json` puts one document on stdout and nothing else, so the running
+        // commentary has to go. FFmpeg's own progress is unaffected: it goes to
+        // stderr under `Reporting::Cli`.
+        quiet: json,
         // The CLI has no browser session to fetch with, so the host fetches.
         playlist_text: None,
         rendition: cli.rendition,
@@ -169,7 +200,25 @@ pub fn run(cli: Cli) -> DownerResult<()> {
         // would do nothing. See ADR-0012.
         keep_partial: true,
     };
-    download_resolved(media, &options, Hooks::default()).map(|_| ())
+    let started = std::time::Instant::now();
+    let path = download_resolved(media, &options, Hooks::default())?;
+    if json {
+        println!(
+            "{}",
+            discovery::to_json(&discovery::DownloadReport {
+                schema_version: discovery::SCHEMA_VERSION,
+                url: chosen.to_string(),
+                path: path.display().to_string(),
+                engine: discovery::ENGINE,
+                // Read from the finished file rather than counted as it was
+                // written: FFmpeg owns the writing, and the file on disk is the
+                // only number that is not an estimate.
+                bytes: std::fs::metadata(&path).map(|meta| meta.len()).ok(),
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            })
+        );
+    }
+    Ok(())
 }
 
 fn run_command(command: cli::Command) -> DownerResult<()> {
@@ -533,6 +582,11 @@ pub fn exit_code(error: &DownerError) -> i32 {
         DownerError::InvalidUrl(_)
         | DownerError::CookieSource(_)
         | DownerError::HostArgument(_) => INVALID_INPUT_EXIT,
+        // Beside `VariantNotOffered`, not with the input errors above: asking
+        // for a candidate the source does not offer is the same failure as
+        // asking for a rendition it does not declare, one level up. Splitting
+        // them across two codes would make the number depend on which kind of
+        // choice was named. No new code, so ADR-0018 stands unamended.
         DownerError::OutputExists(_)
         | DownerError::OutputPath(_)
         | DownerError::OutputDirectory(_) => OUTPUT_EXIT,
@@ -543,6 +597,7 @@ pub fn exit_code(error: &DownerError) -> i32 {
         DownerError::FfmpegFailed { .. }
         | DownerError::SourceFetchFailed { .. }
         | DownerError::MediaNotFound(_)
+        | DownerError::CandidateNotOffered(_)
         | DownerError::VariantNotOffered(_) => MEDIA_FAILURE_EXIT,
         DownerError::SetupCheckFailed => SETUP_EXIT,
         DownerError::OutputIo(_) => OUTPUT_EXIT,
