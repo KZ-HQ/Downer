@@ -2445,3 +2445,93 @@ fn a_failure_leads_with_the_cause_not_ffmpegs_configuration() {
         "detail renders as lines: {error}"
     );
 }
+
+/// KEI-90: a download with no configured directory lands beside the browser's
+/// own, not in whatever directory Firefox happened to be started from.
+///
+/// The host used to fall back to `.` when the desktop had no download folder
+/// configured — its own working directory, inherited through the launcher,
+/// which is `/` for a desktop-launcher start. The Settings placeholder promised
+/// "your Downloads folder" the whole time.
+///
+/// `start_discovering` clears the XDG variables and points `HOME` at a temp
+/// directory with no `user-dirs.dirs`, which is exactly the Linux machine this
+/// was reported on.
+#[test]
+fn a_download_with_no_configured_directory_lands_in_the_default_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let ffmpeg = FakeFfmpeg::default().install(temp.path());
+    let mut host = NativeHost::start_discovering(&home, Some(&ffmpeg));
+
+    let mut request = download_request("https://example.test/video.mp4", Path::new("unused"));
+    request["job_id"] = json!("job-default-dir");
+    // The case under test: the extension leaves this empty by default.
+    request.as_object_mut().unwrap().remove("output_dir");
+    host.send(&request);
+
+    let (completed, _) = host.wait_for_state("completed");
+    assert_envelope(&completed, "terminal");
+    let path = PathBuf::from(
+        completed["path"]
+            .as_str()
+            .expect("completed carries a path"),
+    );
+    assert_eq!(
+        path,
+        home.join("Downloads").join("video.mp4"),
+        "no XDG configuration must not mean the working directory"
+    );
+    assert!(path.exists(), "and the directory was created for it");
+}
+
+/// The setup check reports the directory a download would really use, so the
+/// panel and the download cannot disagree.
+#[test]
+fn the_setup_check_reports_the_same_default_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let ffmpeg = FakeFfmpeg::default().install(temp.path());
+    let mut host = NativeHost::start_discovering(&home, Some(&ffmpeg));
+
+    host.send(&json!({"command": "status", "protocol_version": 1, "request_id": "s1"}));
+    let (status, _) = host.wait_for(|event| event["type"] == json!("status"));
+    let checks = status["status"]["checks"]
+        .as_array()
+        .expect("status carries checks");
+    let directory = checks
+        .iter()
+        .find(|check| check["name"] == json!("output_directory"))
+        .expect("an output_directory check");
+    assert_eq!(directory["outcome"], json!("pass"), "{directory}");
+    // A `~/Downloads` nobody has created yet is not a problem — a download
+    // creates it — so the panel says so rather than reporting a failed setup
+    // that works. The directory it names is still the one a download uses.
+    assert_eq!(
+        directory["detail"],
+        json!(format!(
+            "{} (will be created)",
+            home.join("Downloads").display()
+        )),
+        "{directory}"
+    );
+
+    // And once it exists, the note goes.
+    fs::create_dir_all(home.join("Downloads")).unwrap();
+    let mut host = NativeHost::start_discovering(&home, Some(&ffmpeg));
+    host.send(&json!({"command": "status", "protocol_version": 1, "request_id": "s2"}));
+    let (status, _) = host.wait_for(|event| event["type"] == json!("status"));
+    let directory = status["status"]["checks"]
+        .as_array()
+        .expect("status carries checks")
+        .iter()
+        .find(|check| check["name"] == json!("output_directory"))
+        .expect("an output_directory check")
+        .clone();
+    assert_eq!(
+        PathBuf::from(directory["detail"].as_str().expect("a detail")),
+        home.join("Downloads")
+    );
+}

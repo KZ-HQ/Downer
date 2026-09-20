@@ -146,6 +146,27 @@ The Rust package and the Firefox extension share one product version; see
   user can set for it; the recorded path is used unless `DOWNER_FFMPEG` does
   override it.
 
+### Fixed
+
+- **A download with no configured directory could land somewhere you never
+  chose.** The native host fell back to `.` — its own working directory,
+  inherited from however Firefox was started, so `/` from a desktop launcher —
+  whenever the desktop reported no download directory. On Linux that is any
+  machine without XDG user-directory configuration, which minimal installs and
+  containers often lack, while the Settings placeholder promised "your
+  Downloads folder" regardless. The default is now the desktop's own download
+  directory, or `~/Downloads` where there is none, created on first use; a host
+  with no home directory at all refuses rather than guessing. `downer doctor`
+  on this machine reported `/home/user/downer` as the download directory before
+  the change.
+- **Check setup no longer reports a failed setup that works.** A download
+  creates its output directory, but the directory check called a
+  not-yet-created one "not a directory" — which, once the default became
+  `~/Downloads`, was the ordinary case on a fresh Linux machine. It now asks
+  whether the directory can be *created*, says "(will be created)" when it
+  cannot yet be written to because it is not there, and still fails when a file
+  is in the way or a parent is unwritable.
+
 ### Changed
 
 - **A running download always shows evidence that it is running, and a stopped

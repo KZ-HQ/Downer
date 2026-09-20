@@ -77,6 +77,15 @@ Notes:
   what would let a long-lived host be introduced later without a protocol
   break, since every event and control command already names its job.
 * `url` and `source_url` must be `http://` or `https://`.
+* `output_dir` is where the download is written. **Absent means the desktop's
+  own download directory**, or `$HOME/Downloads` where the desktop has none —
+  on Linux that is any machine without XDG user-directory configuration, which
+  is the common case in containers and minimal installs. The directory is
+  created if it does not exist. A host with no home directory either refuses
+  the download rather than guessing; it used to fall back to its own working
+  directory, inherited from however Firefox was started. `status` reports the
+  same resolved directory, so the Settings panel and a download cannot
+  disagree. See KEI-90.
 * `ffmpeg` on `download` and `status` names the FFmpeg the user chose on the
   Settings page. Absent, the host discovers one as it always has
   (`DOWNER_FFMPEG`, then the install-time configuration, then the usual paths).
