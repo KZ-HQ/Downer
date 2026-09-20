@@ -76,13 +76,14 @@ test("what the host said it could do is kept, not discarded after the handshake"
   const { jobId } = await startedRequest(background);
   const { jobs } = await background.send({ type: "get-download-statuses" });
   const job = jobs.find((entry) => entry.id === jobId);
-  assert.deepEqual(job.capabilities, { pause_resume: true, hls_info: true });
-  for (const capability of Object.keys(job.capabilities)) {
-    assert.ok(
-      PROTOCOL.capabilities.includes(capability),
-      `${capability} is listed in tests/fixtures/protocol.json`
-    );
-  }
+  // Driven by the shared vocabulary rather than a literal, so a capability
+  // added to the protocol without the client keeping it fails here — which is
+  // the same drift check `tests/native_host.rs` makes on the host's side.
+  assert.deepEqual(
+    job.capabilities,
+    Object.fromEntries(PROTOCOL.capabilities.map((capability) => [capability, true])),
+    "what the handshake reported survives onto the job"
+  );
 });
 
 test("KEI-86: a metadata problem reaches the job as an explanation, not a failure", async () => {

@@ -59,6 +59,11 @@ pub enum Reply {
         content_type: &'static str,
         body: String,
     },
+    /// A body that is not text. Served byte for byte.
+    Bytes {
+        content_type: &'static str,
+        body: Vec<u8>,
+    },
     /// `302` to this absolute URL.
     Redirect(String),
     /// An arbitrary status with extra headers, for the answers a CDN gives that
@@ -76,6 +81,15 @@ pub enum Reply {
 impl Reply {
     pub fn text(content_type: &'static str, body: impl Into<String>) -> Self {
         Self::Body {
+            content_type,
+            body: body.into(),
+        }
+    }
+
+    /// A binary body, for the cases that need FFmpeg to actually decode
+    /// something rather than fail on text — real HLS segments, above all.
+    pub fn bytes(content_type: &'static str, body: impl Into<Vec<u8>>) -> Self {
+        Self::Bytes {
             content_type,
             body: body.into(),
         }
@@ -227,7 +241,20 @@ fn serve(
         .expect("received log is not poisoned")
         .push(request);
 
+    // Built as bytes because a `Bytes` reply's body is not UTF-8; every other
+    // arm renders a string and is appended as its own bytes.
+    let mut binary: Option<(String, Vec<u8>)> = None;
     let response = match reply {
+        Some(Reply::Bytes { content_type, body }) => {
+            binary = Some((
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nAccept-Ranges: none\r\n\r\n",
+                    body.len()
+                ),
+                body,
+            ));
+            String::new()
+        }
         Some(Reply::Body { content_type, body }) => format!(
             "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nAccept-Ranges: none\r\n\r\n{body}",
             body.len()
@@ -254,7 +281,12 @@ fn serve(
         None => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
     };
 
-    let _ = stream.write_all(response.as_bytes());
+    if let Some((headers, body)) = binary {
+        let _ = stream.write_all(headers.as_bytes());
+        let _ = stream.write_all(&body);
+    } else {
+        let _ = stream.write_all(response.as_bytes());
+    }
     let _ = stream.flush();
     let _ = stream.shutdown(Shutdown::Write);
 }

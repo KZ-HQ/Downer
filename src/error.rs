@@ -14,6 +14,14 @@ pub enum DownerError {
         message: String,
     },
     MediaNotFound(String),
+    /// A rendition was asked for that the master playlist does not declare.
+    ///
+    /// Refused rather than quietly replaced with the default. The whole point
+    /// of naming a rendition is to get that one, so downloading a different
+    /// quality instead would be the illusion of choice KEI-61 removes. It
+    /// happens when a live master is repackaged between being listed and being
+    /// chosen, and the remedy is to look again.
+    VariantNotOffered(String),
     /// A cookie could not be read from the requested source. The message names
     /// the source, never the value.
     CookieSource(String),
@@ -72,6 +80,10 @@ impl fmt::Display for DownerError {
             Self::MediaNotFound(source) => write!(
                 f,
                 "no supported m3u8 or video media URL was found in source page: {source}"
+            ),
+            Self::VariantNotOffered(url) => write!(
+                f,
+                "the playlist does not offer that rendition: {url} (it may have changed since it was listed; look again)"
             ),
             Self::CookieSource(message) => write!(f, "could not read cookie: {message}"),
             Self::NativeIo(error) => write!(f, "native messaging I/O error: {error}"),

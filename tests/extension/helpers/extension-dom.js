@@ -132,7 +132,7 @@ function loadContentScript(fixtureName, {
  * Load `popup.html` with the real `job-view.js` and `popup.js`, wired to a
  * stubbed background. Returns the window plus readers for what the user sees.
  */
-async function loadPopup({ candidates = [], sourceUrl = "https://example.test/files/index.html", pageTitle = "fixture", jobs = [], sessionJobIds = [], tabUrl = sourceUrl } = {}) {
+async function loadPopup({ candidates = [], sourceUrl = "https://example.test/files/index.html", pageTitle = "fixture", jobs = [], sessionJobIds = [], tabUrl = sourceUrl, playlists = {} } = {}) {
   const dom = new JSDOM(extensionSource("popup.html"), {
     url: "moz-extension://downer-test/popup.html",
     runScripts: "outside-only",
@@ -145,6 +145,9 @@ async function loadPopup({ candidates = [], sourceUrl = "https://example.test/fi
       if (message?.type === "get-download-statuses") return { jobs, sessionJobIds };
       if (message?.type === "control-download") return { ok: true };
       if (message?.type === "download-media") return { ok: true, jobId: "new-job", state: "starting" };
+      // What the host answers `playlist-info` with, keyed by playlist URL. An
+      // unlisted URL answers nothing, which is the host-too-old path.
+      if (message?.type === "inspect-playlist") return playlists[message.url];
       return undefined;
     },
     tabs: {
@@ -188,6 +191,32 @@ async function loadPopup({ candidates = [], sourceUrl = "https://example.test/fi
           cancel: { hidden: cancel.hidden, disabled: cancel.disabled }
         };
       }),
+    /** The collapsed "other candidates" section, or null when it is hidden. */
+    otherCandidates: () => {
+      const details = document.getElementById("other-candidates");
+      if (details.hidden) return null;
+      return {
+        summary: document.getElementById("other-candidates-summary").textContent,
+        urls: [...document.querySelectorAll("#other-media-list .url")].map(
+          (node) => node.textContent
+        )
+      };
+    },
+    /** The rendition picker on the nth listed candidate, or null when absent. */
+    picker: (index = 0) => {
+      const item = [...document.querySelectorAll("#media-list li")][index];
+      const variants = item.querySelector(".variants");
+      if (!variants || variants.hidden) return null;
+      const select = variants.querySelector("select");
+      return {
+        note: variants.querySelector(".variant-note").textContent,
+        options: [...select.options].map((option) => option.textContent),
+        selected: select.value,
+        choose(value) {
+          select.value = value;
+        }
+      };
+    },
     /** Press the Download button on the nth listed candidate. */
     async download(index = 0) {
       const item = [...document.querySelectorAll("#media-list li")][index];
@@ -301,7 +330,7 @@ async function loadOptions({ jobs = [], logs = {}, settings = {}, setupResponse 
  * exactly as `docs/protocol.md` specifies and then hands the test `emit`, which
  * delivers any event the host could send.
  */
-function nativePortStub({ protocolVersion = 1 } = {}) {
+function nativePortStub({ protocolVersion = 1, capabilities, playlistInfo } = {}) {
   const messageListeners = [];
   const disconnectListeners = [];
   const posted = [];
@@ -322,7 +351,23 @@ function nativePortStub({ protocolVersion = 1 } = {}) {
             state: "ready",
             request_id: message.request_id,
             host_version: "test",
-            capabilities: { pause_resume: true, hls_info: true }
+            capabilities: capabilities || {
+              pause_resume: true,
+              hls_info: true,
+              playlist_info: true
+            }
+          })
+        );
+      }
+      if (message?.command === "playlist-info") {
+        queueMicrotask(() =>
+          emit({
+            protocol_version: protocolVersion,
+            type: "playlist-info",
+            ok: true,
+            state: "ready",
+            request_id: message.request_id,
+            ...(playlistInfo || { playlist_kind: "unusable", renditions: [] })
           })
         );
       }
@@ -344,7 +389,7 @@ function nativePortStub({ protocolVersion = 1 } = {}) {
  * logs live under their own `downloadLogs:<jobId>` keys (KEI-55); `writes()`
  * counts `set` calls, which is what the batching test asserts a bound on.
  */
-async function loadBackground({ downloadJobs = [], storage: initialStorage = {}, native = false } = {}) {
+async function loadBackground({ downloadJobs = [], storage: initialStorage = {}, native = false, nativeOptions = {}, playlistText = null } = {}) {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
     url: "moz-extension://downer-test/background.html",
     runScripts: "outside-only",
@@ -394,7 +439,7 @@ async function loadBackground({ downloadJobs = [], storage: initialStorage = {},
       ...(native
         ? {
             connectNative: () => {
-              const stub = nativePortStub();
+              const stub = nativePortStub(nativeOptions);
               ports.push(stub);
               return stub.port;
             }
@@ -402,7 +447,16 @@ async function loadBackground({ downloadJobs = [], storage: initialStorage = {},
         : {})
     },
     cookies: { getAll: async () => [] },
-    notifications: { create: async () => undefined }
+    notifications: { create: async () => undefined },
+    // The content script's in-page playlist fetch. Absent text throws, which
+    // is the "could not fetch in the page's session" path.
+    tabs: {
+      sendMessage: async (tabId, message) => {
+        if (message?.type !== "fetch-playlist") return undefined;
+        if (!playlistText) throw new Error("no page fetch available");
+        return { text: playlistText, url: message.url };
+      }
+    }
   };
 
   // Loaded in manifest order.

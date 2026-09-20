@@ -1,8 +1,30 @@
 {
-  "comment": "Single source of truth for the file extensions treated as media. src/scraper.rs (is_media_url, is_playlist_url) and extension/media-scan.js (MEDIA_EXTENSIONS) each keep their own literal, and both test suites assert against this file, so the two cannot drift without failing. Matching is a case-insensitive substring test on the whole URL, not a suffix test, because query strings and CDN path segments routinely follow the extension. See docs/adr/0011-one-playlist-parser.md.",
+  "comment": "Single source of truth for media detection. src/scraper.rs (MEDIA_EXTENSIONS, media_kind) and extension/media-scan.js (MEDIA_EXTENSIONS, mediaKind) each keep their own literal, and both test suites assert against this file, so the two cannot drift. See docs/adr/0011-one-playlist-parser.md.",
+  "matching": "KEI-61 replaced a case-insensitive substring test over the whole URL with the final extension of the URL PATH, query and fragment excluded. The substring test matched .mp4 in '?next=.mp4' and in 'poster.mp4.jpg', and .ts in most of a modern site's TypeScript. Signed URLs still match, because an extension lives in the path: '/video.m3u8?token=...' has one.",
   "media_extensions": [
     ".m3u8", ".mpd", ".mp4", ".webm", ".mov", ".m4v", ".mkv", ".avi",
     ".flv", ".ts", ".mpeg", ".mpg", ".ogg", ".ogv", ".3gp"
   ],
-  "playlist_extensions": [".m3u8", ".mpd"]
+  "playlist_extensions": [".m3u8", ".mpd"],
+  "kinds": ["hls", "dash", "file"],
+  "segment_rule": "A .ts path is media only when its filename stem carries a digit, the way a packager names segments (seg-001.ts, video32.ts) and hand-written TypeScript does not (main.ts). A segment beside its own playlist is collapsed into it, so this decides only the rare segment with no playlist in sight.",
+  "detection_cases": [
+    { "url": "https://cdn.test/v/master.m3u8", "kind": "hls", "why": "a plain playlist" },
+    { "url": "https://cdn.test/v/master.m3u8?token=abc&exp=1", "kind": "hls", "why": "a signed playlist: the extension is in the path" },
+    { "url": "https://cdn.test/v/MASTER.M3U8", "kind": "hls", "why": "extensions are matched case-insensitively" },
+    { "url": "https://cdn.test/v/manifest.mpd", "kind": "dash", "why": "DASH is classified, and labelled experimental" },
+    { "url": "https://cdn.test/v/movie.mp4", "kind": "file", "why": "a media file" },
+    { "url": "https://cdn.test/v/clip.webm#t=10", "kind": "file", "why": "a fragment is not part of the path" },
+    { "url": "https://cdn.test/v/high/seg-001.ts", "kind": "file", "why": "a packager-named segment" },
+    { "url": "https://cdn.test/v/video32.ts", "kind": "file", "why": "a packager-named segment without a separator" },
+    { "url": "https://app.test/src/main.ts", "kind": null, "why": "TypeScript source: no digit in the stem" },
+    { "url": "https://app.test/assets/app.tsx", "kind": null, "why": ".tsx is not .ts" },
+    { "url": "https://app.test/assets/index.ts", "kind": null, "why": "TypeScript entry point" },
+    { "url": "https://app.test/fonts.ts/inter.woff2", "kind": null, "why": "a directory named like an extension is not the filename's" },
+    { "url": "https://app.test/go?next=.mp4", "kind": null, "why": "the query is not the path" },
+    { "url": "https://cdn.test/thumbs/poster.mp4.jpg", "kind": null, "why": "only the last extension counts" },
+    { "url": "https://cdn.test/v/", "kind": null, "why": "no filename at all" },
+    { "url": "https://cdn.test/v/playlist", "kind": null, "why": "no extension at all" },
+    { "url": "https://cdn.test/v/cover.jpg", "kind": null, "why": "not media" }
+  ]
 }

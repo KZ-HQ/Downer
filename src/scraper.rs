@@ -115,12 +115,7 @@ pub fn hls_info_with_timeout(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Playlist {
     /// Lists renditions rather than segments.
-    Master {
-        /// The rendition a download should use, absent when resolving would be
-        /// unsafe — a master carrying audio as a separate rendition loses it if
-        /// only the video variant is taken (ADR-0010).
-        variant: Option<Url>,
-    },
+    Master(MasterPlaylist),
     /// Lists segments: how many, and how long altogether.
     Media(HlsInfo),
     /// Not a playlist this can use — no variants and no segments. A challenge
@@ -129,19 +124,189 @@ pub enum Playlist {
     Unusable,
 }
 
+/// One `#EXT-X-STREAM-INF` variant stream.
+///
+/// KEI-61 keeps the whole list rather than only the winner. `select_variant`
+/// used to fold the parse and the choice into one pass and return a single URL,
+/// so a picker had nothing to offer; the choice is now made over this list by
+/// [`MasterPlaylist::choose`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rendition {
+    pub url: Url,
+    /// `BANDWIDTH`, or `0` when the master omits it. Required by the HLS
+    /// specification, so `0` means a malformed master rather than a free one.
+    pub bandwidth: u64,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub codecs: Option<String>,
+    /// The `AUDIO` group this variant names, when its audio is carried outside
+    /// the variant stream.
+    pub audio_group: Option<String>,
+}
+
+impl Rendition {
+    /// Pixels, for ordering. `None` when the master declares no `RESOLUTION`.
+    fn pixels(&self) -> Option<u64> {
+        Some(u64::from(self.width?) * u64::from(self.height?))
+    }
+}
+
+/// One `#EXT-X-MEDIA:TYPE=AUDIO` rendition that names a `URI`.
+///
+/// Only audio. A `SUBTITLES` rendition is deliberately not modelled: measured
+/// on FFmpeg 9.0.2, mapping a WebVTT rendition into an MP4 fails outright
+/// (`Could not find tag for codec webvtt`), and a master's own subtitle
+/// rendition is not written either — so it is neither usable nor a loss. See
+/// `docs/adr/0014-pair-a-rendition-with-its-audio.md`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioRendition {
+    pub url: Url,
+    pub group_id: String,
+    pub name: Option<String>,
+    pub language: Option<String>,
+    pub default: bool,
+}
+
+/// What a download should hand FFmpeg for one chosen rendition.
+///
+/// `audio` is `Some` only when the master carries the audio outside the video
+/// variant, in which case both must be given to FFmpeg together or the audio is
+/// silently lost — the defect ADR-0010 guarded against by declining, and which
+/// ADR-0014 fixes by pairing instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariantChoice {
+    pub video: Url,
+    pub audio: Option<Url>,
+}
+
+/// Which rendition a caller wants, when they want a particular one.
+///
+/// The extension names an exact URL, because the popup listed them and knows
+/// them. A person at a terminal does not, so the CLI's `--rendition` also
+/// takes the words and numbers they would actually type. Both land here so one
+/// rule resolves them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenditionChoice {
+    /// The highest bandwidth — what an unchosen download already gets.
+    Best,
+    /// The lowest bandwidth the master declares.
+    Worst,
+    /// A declared `RESOLUTION` height, as in `720p`.
+    Height(u32),
+    /// An exact variant URL, as the popup and the protocol carry it.
+    Exact(Url),
+}
+
+impl std::str::FromStr for RenditionChoice {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let value = value.trim();
+        if value.eq_ignore_ascii_case("best") {
+            return Ok(Self::Best);
+        }
+        if value.eq_ignore_ascii_case("worst") {
+            return Ok(Self::Worst);
+        }
+        // `720p`, `720`, or `1280x720` — whichever the person read off the
+        // player. Only the height is matched: it is what distinguishes the
+        // renditions anybody chooses between.
+        let height = value.trim_end_matches(['p', 'P']);
+        let height = height.rsplit_once(['x', 'X']).map_or(height, |(_, h)| h);
+        if let Ok(height) = height.parse::<u32>() {
+            return Ok(Self::Height(height));
+        }
+        if let Ok(url) = Url::parse(value) {
+            if matches!(url.scheme(), "http" | "https") {
+                return Ok(Self::Exact(url));
+            }
+        }
+        Err(format!(
+            "expected best, worst, a height such as 720p, or an http(s) variant URL, got {value:?}"
+        ))
+    }
+}
+
+/// A parsed master playlist: every rendition it declares, best first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MasterPlaylist {
+    /// Sorted by declared bandwidth, then by frame area — **never** by
+    /// position. KEI-89 measured that `#EXT-X-STREAM-INF` order is the
+    /// publisher's: in the master it found, the first variant was the lowest.
+    pub renditions: Vec<Rendition>,
+    pub audio: Vec<AudioRendition>,
+}
+
+impl MasterPlaylist {
+    /// The rendition used when the caller chose none: the highest bandwidth,
+    /// which is the rule `select_variant` has always applied, so an unchosen
+    /// download is byte-for-byte what it was before (KEI-89's criterion).
+    pub fn default_rendition(&self) -> Option<&Rendition> {
+        self.renditions.first()
+    }
+
+    /// The rendition at `url`, if this master declares one.
+    pub fn rendition(&self, url: &Url) -> Option<&Rendition> {
+        self.renditions
+            .iter()
+            .find(|rendition| rendition.url == *url)
+    }
+
+    /// The audio to pair with `rendition`, when the master carries it
+    /// separately.
+    ///
+    /// A variant names its group; within that group the `DEFAULT=YES`
+    /// rendition wins, and failing that the first declared. That is what a
+    /// player does, and — measured — what FFmpeg already picks when handed the
+    /// master, so pairing changes which *requests* are made and not which audio
+    /// lands in the file.
+    pub fn audio_for(&self, rendition: &Rendition) -> Option<&AudioRendition> {
+        let group = rendition.audio_group.as_deref()?;
+        let mut in_group = self
+            .audio
+            .iter()
+            .filter(|audio| audio.group_id == group)
+            .peekable();
+        let first = *in_group.peek()?;
+        Some(
+            self.audio
+                .iter()
+                .find(|audio| audio.group_id == group && audio.default)
+                .unwrap_or(first),
+        )
+    }
+
+    /// Resolve `requested` — or the default — into the inputs a download needs.
+    ///
+    /// `None` when this master declares no rendition at all, or when
+    /// `requested` names one it does not declare. The second case is refused
+    /// rather than quietly replaced with the default: a chosen quality that
+    /// silently becomes another one is the illusion KEI-61 exists to remove.
+    pub fn choose(&self, requested: Option<&RenditionChoice>) -> Option<VariantChoice> {
+        let rendition = match requested {
+            None | Some(RenditionChoice::Best) => self.default_rendition()?,
+            // The list is sorted best-first, so the worst is the last.
+            Some(RenditionChoice::Worst) => self.renditions.last()?,
+            Some(RenditionChoice::Height(height)) => self
+                .renditions
+                .iter()
+                .find(|rendition| rendition.height == Some(*height))?,
+            Some(RenditionChoice::Exact(url)) => self.rendition(url)?,
+        };
+        Some(VariantChoice {
+            video: rendition.url.clone(),
+            audio: self.audio_for(rendition).map(|audio| audio.url.clone()),
+        })
+    }
+}
+
 /// Read a playlist that somebody else fetched.
 ///
 /// `base_url` is the URL the text came from, after redirects, because variant
 /// URIs are relative to it.
 pub fn parse_playlist(text: &str, base_url: &Url) -> Playlist {
     if is_master_playlist(text) {
-        return Playlist::Master {
-            variant: if declares_separate_renditions(text) {
-                None
-            } else {
-                select_variant(text, base_url, None)
-            },
-        };
+        return Playlist::Master(parse_master(text, base_url));
     }
     match parse_hls_info(text) {
         Some(info) => Playlist::Media(info),
@@ -149,11 +314,134 @@ pub fn parse_playlist(text: &str, base_url: &Url) -> Playlist {
     }
 }
 
+/// Read every `#EXT-X-STREAM-INF` variant and every audio `#EXT-X-MEDIA`.
+fn parse_master(text: &str, base_url: &Url) -> MasterPlaylist {
+    let mut renditions = Vec::new();
+    let mut audio = Vec::new();
+    let mut pending: Option<Vec<(String, String)>> = None;
+
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(attributes) = line.strip_prefix("#EXT-X-MEDIA:") {
+            let attributes = parse_attributes(attributes);
+            if attribute(&attributes, "TYPE")
+                .is_none_or(|value| !value.eq_ignore_ascii_case("AUDIO"))
+            {
+                continue;
+            }
+            let (Some(uri), Some(group_id)) = (
+                attribute(&attributes, "URI"),
+                attribute(&attributes, "GROUP-ID"),
+            ) else {
+                continue;
+            };
+            let Ok(url) = base_url.join(uri) else {
+                continue;
+            };
+            audio.push(AudioRendition {
+                url,
+                group_id: group_id.to_string(),
+                name: attribute(&attributes, "NAME").map(str::to_string),
+                language: attribute(&attributes, "LANGUAGE").map(str::to_string),
+                default: attribute(&attributes, "DEFAULT")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("YES")),
+            });
+        } else if let Some(attributes) = line.strip_prefix("#EXT-X-STREAM-INF:") {
+            pending = Some(parse_attributes(attributes));
+        } else if !line.starts_with('#') && !line.is_empty() {
+            // A URI line belongs to the `#EXT-X-STREAM-INF` above it, and to
+            // nothing if there was none.
+            let Some(attributes) = pending.take() else {
+                continue;
+            };
+            let Ok(url) = base_url.join(line) else {
+                continue;
+            };
+            let (width, height) = attribute(&attributes, "RESOLUTION")
+                .and_then(parse_resolution)
+                .map_or((None, None), |(w, h)| (Some(w), Some(h)));
+            renditions.push(Rendition {
+                url,
+                bandwidth: attribute(&attributes, "BANDWIDTH")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0),
+                width,
+                height,
+                codecs: attribute(&attributes, "CODECS").map(str::to_string),
+                audio_group: attribute(&attributes, "AUDIO").map(str::to_string),
+            });
+        }
+    }
+
+    // Best first, by what the master *declares*. Sorting is stable, so two
+    // renditions a master describes identically keep its order; anything it
+    // distinguishes is ordered by that, never by where it was written.
+    renditions.sort_by(|left, right| {
+        right
+            .bandwidth
+            .cmp(&left.bandwidth)
+            .then(right.pixels().cmp(&left.pixels()))
+    });
+    MasterPlaylist { renditions, audio }
+}
+
+/// Split an HLS attribute list into pairs.
+///
+/// Splitting on `,` is not enough: `CODECS="avc1.64001f,mp4a.40.2"` carries one
+/// inside quotes, and the naive split this replaces read that master's `AUDIO`
+/// and `RESOLUTION` as nonsense. Quoted values are returned unquoted.
+fn parse_attributes(line: &str) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    let mut quoted = false;
+    let mut field = String::new();
+    for character in line.chars() {
+        match character {
+            '"' => {
+                quoted = !quoted;
+                field.push(character);
+            }
+            ',' if !quoted => {
+                push_attribute(&mut pairs, &field);
+                field.clear();
+            }
+            _ => field.push(character),
+        }
+    }
+    push_attribute(&mut pairs, &field);
+    pairs
+}
+
+fn push_attribute(pairs: &mut Vec<(String, String)>, field: &str) {
+    let Some((name, value)) = field.trim().split_once('=') else {
+        return;
+    };
+    pairs.push((
+        name.trim().to_ascii_uppercase(),
+        value.trim().trim_matches('"').to_string(),
+    ));
+}
+
+fn attribute<'a>(pairs: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    pairs
+        .iter()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value.as_str())
+}
+
+/// `1280x720` as declared by `RESOLUTION`.
+fn parse_resolution(value: &str) -> Option<(u32, u32)> {
+    let (width, height) = value.split_once(['x', 'X'])?;
+    Some((width.trim().parse().ok()?, height.trim().parse().ok()?))
+}
+
 /// The media playlist an HLS input actually means.
 ///
 /// `Some` only when `url` is a **master** playlist: the chosen variant's URL,
 /// by the same highest-bandwidth rule the segment count uses, so the rendition
 /// downloaded is the rendition counted.
+///
+/// `requested` names a rendition explicitly. `None` takes the default, which
+/// is the highest bandwidth as it has always been.
 ///
 /// `None` means "use `url` as given" and covers every other case — a media
 /// playlist, a playlist that could not be fetched, one that could not be
@@ -171,7 +459,8 @@ pub fn resolve_variant(
     user_agent: &str,
     referer: Option<&Url>,
     cookie: Option<&str>,
-) -> Option<Url> {
+    requested: Option<&RenditionChoice>,
+) -> Option<VariantChoice> {
     let client = Client::builder()
         .redirect(Policy::limited(10))
         .connect_timeout(VARIANT_CONNECT_TIMEOUT)
@@ -185,30 +474,9 @@ pub fn resolve_variant(
     let (playlist, base_url) =
         fetch_hls_playlist(&client, url, user_agent, referer, cookie).ok()?;
     match parse_playlist(&playlist, &base_url) {
-        Playlist::Master { variant } => variant,
+        Playlist::Master(master) => master.choose(requested),
         Playlist::Media(_) | Playlist::Unusable => None,
     }
-}
-
-/// Does this master serve any rendition as its own playlist, outside the
-/// variant streams?
-///
-/// `#EXT-X-MEDIA` with a `URI` is how a master declares audio (or subtitles)
-/// carried separately from the video, which a `#EXT-X-STREAM-INF` then
-/// references by group. Resolving such a master to its video variant would hand
-/// FFmpeg the video alone and **silently lose the audio** — measured: the master
-/// yields video+audio, the variant alone yields video only.
-///
-/// `select_variant` reads only `#EXT-X-STREAM-INF`, so it cannot express "this
-/// one plus that audio". Rather than guess, this declines to resolve and the
-/// master is used as before: the download is wasteful, which is this
-/// optimisation's own problem, instead of wrong, which would be a new one. See
-/// `docs/adr/0010-resolve-hls-master-playlists.md`.
-fn declares_separate_renditions(playlist: &str) -> bool {
-    playlist.lines().any(|line| {
-        let line = line.trim();
-        line.starts_with("#EXT-X-MEDIA:") && line.contains("URI=")
-    })
 }
 
 /// Whether a playlist lists variant streams rather than segments.
@@ -234,8 +502,17 @@ fn hls_info_from_playlist(
 ) -> Result<HlsInfo, PlaylistProblem> {
     let (playlist, base_url) = fetch_hls_playlist(client, url, user_agent, referer, cookie)?;
     let playlist = if is_master_playlist(&playlist) {
-        let variant = select_variant(&playlist, &base_url, preferred_variant)
-            .ok_or(PlaylistProblem::NoSegments)?;
+        // The `../playlist.m3u8` fallback asks the parent master about the URL
+        // the user gave: if it lists it, that is the rendition to count, and
+        // otherwise the default one.
+        let master = parse_master(&playlist, &base_url);
+        let preferred = preferred_variant
+            .filter(|url| master.rendition(url).is_some())
+            .map(|url| RenditionChoice::Exact(url.clone()));
+        let variant = master
+            .choose(preferred.as_ref())
+            .ok_or(PlaylistProblem::NoSegments)?
+            .video;
         match fetch_hls_playlist(client, &variant, user_agent, referer, cookie) {
             Ok((text, _)) => text,
             // Retried with the master as Referer, as before.
@@ -326,34 +603,6 @@ fn request_failure(error: &reqwest::Error) -> String {
         return "too many redirects".to_string();
     }
     "the request failed".to_string()
-}
-
-fn select_variant(playlist: &str, base_url: &Url, preferred_variant: Option<&Url>) -> Option<Url> {
-    let mut bandwidth = 0_u64;
-    let mut selected = None;
-    let mut preferred = None;
-    for line in playlist.lines() {
-        let line = line.trim();
-        if let Some(attributes) = line.strip_prefix("#EXT-X-STREAM-INF:") {
-            bandwidth = attributes
-                .split(',')
-                .find_map(|attribute| attribute.strip_prefix("BANDWIDTH="))
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(0);
-        } else if !line.starts_with('#') && !line.is_empty() {
-            let candidate = base_url.join(line).ok()?;
-            if preferred_variant.is_some_and(|variant| variant == &candidate) {
-                preferred = Some(candidate.clone());
-            }
-            if selected
-                .as_ref()
-                .is_none_or(|(_, current)| bandwidth > *current)
-            {
-                selected = Some((candidate, bandwidth));
-            }
-        }
-    }
-    preferred.or_else(|| selected.map(|(url, _)| url))
 }
 
 fn parse_hls_info(playlist: &str) -> Option<HlsInfo> {
@@ -490,6 +739,9 @@ pub fn extract_media_urls(html: &str, base: &Url) -> Vec<Url> {
             }
         }
     }
+    // A segment listed beside its own playlist is not a second thing to
+    // download; see `collapse_segments`.
+    collapse_segments(&mut urls);
     urls.sort_by_key(|url| if is_playlist_url(url) { 0 } else { 1 });
     urls
 }
@@ -629,19 +881,111 @@ pub const MEDIA_EXTENSIONS: [&str; 15] = [
 /// The subset of [`MEDIA_EXTENSIONS`] that names a playlist rather than a file.
 pub const PLAYLIST_EXTENSIONS: [&str; 2] = [".m3u8", ".mpd"];
 
-/// Substring, not suffix: query strings and CDN path segments routinely follow
-/// the extension, and a suffix test would miss every signed URL.
-fn has_extension(url: &Url, extensions: &[&str]) -> bool {
-    let value = url.as_str().to_ascii_lowercase();
-    extensions.iter().any(|extension| value.contains(extension))
+/// What a URL is, as far as its own shape can say.
+///
+/// Mirrored by `mediaKind` in `extension/media-scan.js`; the case table in
+/// `tests/fixtures/media-extensions.json` is asserted by both suites, so the
+/// two cannot drift (ADR-0011's arrangement).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaKind {
+    /// An HLS playlist: a master or a media playlist, not yet distinguished.
+    Hls,
+    /// A DASH manifest. Listed, but not validated against FFmpeg — see KEI-61.
+    Dash,
+    /// A media file FFmpeg can be pointed at directly.
+    File,
+}
+
+/// The final extension of the URL's **path**, lowercased, with its dot.
+///
+/// The query and fragment are excluded, and only the last extension counts.
+/// This replaces a substring test over the whole URL, which matched `.mp4` in
+/// `?next=.mp4` and in `poster.mp4.jpg`, and `.ts` in most of a modern site's
+/// TypeScript. The signed URLs the old comment worried about still match:
+/// `/video.m3u8?token=…` has the extension in its path, which is where an
+/// extension lives. See KEI-61.
+fn path_extension(url: &Url) -> Option<String> {
+    let filename = url.path().rsplit('/').next()?;
+    if filename.is_empty() {
+        return None;
+    }
+    let (_, extension) = filename.rsplit_once('.')?;
+    (!extension.is_empty()).then(|| format!(".{}", extension.to_ascii_lowercase()))
+}
+
+/// Does this filename look like an HLS segment rather than a source file?
+///
+/// `.ts` is both MPEG-TS and TypeScript, and on a modern site the TypeScript is
+/// far more common. A segment is named by a packager and carries an index —
+/// `seg-001.ts`, `video32.ts`, `media_1.ts` — where hand-written source does
+/// not: `main.ts`, `app.ts`, `index.ts`. A digit in the stem is therefore the
+/// test. It is a heuristic and is allowed to be: a `.ts` beside its playlist is
+/// collapsed into it by [`collapse_segments`] anyway, so this decides only the
+/// rare segment with no playlist in sight.
+fn looks_like_segment(filename: &str) -> bool {
+    filename
+        .rsplit_once('.')
+        .is_some_and(|(stem, _)| stem.chars().any(|character| character.is_ascii_digit()))
+}
+
+pub fn media_kind(url: &Url) -> Option<MediaKind> {
+    let extension = path_extension(url)?;
+    match extension.as_str() {
+        ".m3u8" => Some(MediaKind::Hls),
+        ".mpd" => Some(MediaKind::Dash),
+        ".ts" => {
+            let filename = url.path().rsplit('/').next().unwrap_or_default();
+            looks_like_segment(filename).then_some(MediaKind::File)
+        }
+        other if MEDIA_EXTENSIONS.contains(&other) => Some(MediaKind::File),
+        _ => None,
+    }
 }
 
 fn is_playlist_url(url: &Url) -> bool {
-    has_extension(url, &PLAYLIST_EXTENSIONS)
+    matches!(media_kind(url), Some(MediaKind::Hls | MediaKind::Dash))
 }
 
 fn is_media_url(url: &Url) -> bool {
-    has_extension(url, &MEDIA_EXTENSIONS)
+    media_kind(url).is_some()
+}
+
+/// The part of a path up to and including its last `/`.
+fn directory(url: &Url) -> String {
+    let path = url.path();
+    match path.rfind('/') {
+        Some(index) => path[..=index].to_string(),
+        None => "/".to_string(),
+    }
+}
+
+/// Drop segment URLs that belong to a playlist already in the list.
+///
+/// A player fetches a playlist and then its segments, so `performance` reports
+/// both and the popup used to show `seg-001.ts` beside the playlist that lists
+/// it. A segment is not separately downloadable in any useful sense, so when
+/// the playlist it sits under is present the segment is noise. "Under" is by
+/// origin and directory prefix: a master at `/master.m3u8` covers
+/// `/high/video1.ts`, and a playlist on another host covers nothing.
+pub fn collapse_segments(urls: &mut Vec<Url>) {
+    let playlists: Vec<(String, String)> = urls
+        .iter()
+        .filter(|url| is_playlist_url(url))
+        .map(|url| (url.origin().ascii_serialization(), directory(url)))
+        .collect();
+    if playlists.is_empty() {
+        return;
+    }
+    urls.retain(|url| {
+        if path_extension(url).as_deref() != Some(".ts") {
+            return true;
+        }
+        let origin = url.origin().ascii_serialization();
+        let folder = directory(url);
+        !playlists.iter().any(|(playlist_origin, playlist_folder)| {
+            *playlist_origin == origin && folder.starts_with(playlist_folder)
+        })
+    });
 }
 
 #[cfg(test)]
@@ -910,20 +1254,174 @@ mod tests {
         );
     }
 
+    const SEPARATE_AUDIO_MASTER: &str =
+        include_str!("../tests/fixtures/hls/master-separate-audio.m3u8");
+    const SUBTITLES_ONLY_MASTER: &str =
+        include_str!("../tests/fixtures/hls/master-subtitles-only.m3u8");
+
+    fn master_of(text: &str) -> MasterPlaylist {
+        let base = Url::parse("https://example.test/master.m3u8").unwrap();
+        match parse_playlist(text, &base) {
+            Playlist::Master(master) => master,
+            other => panic!("expected a master, got {other:?}"),
+        }
+    }
+
     #[test]
     fn hls_variant_selection_tolerates_indentation() {
-        let playlist = MASTER_PLAYLIST;
-        let base = Url::parse("https://example.test/master.m3u8").unwrap();
+        let master = master_of(MASTER_PLAYLIST);
         assert_eq!(
-            select_variant(playlist, &base, None).unwrap().as_str(),
+            master.choose(None).unwrap().video.as_str(),
             "https://example.test/high/video.m3u8"
         );
         let preferred = Url::parse("https://example.test/low/video.m3u8").unwrap();
         assert_eq!(
-            select_variant(playlist, &base, Some(&preferred))
+            master
+                .choose(Some(&RenditionChoice::Exact(preferred.clone())))
                 .unwrap()
+                .video
                 .as_str(),
             preferred.as_str()
         );
+    }
+
+    /// Publisher order is not quality order. KEI-89 measured a master whose
+    /// first variant was its lowest, so position must never decide.
+    #[test]
+    fn renditions_are_ordered_by_what_the_master_declares_not_by_position() {
+        let master = master_of(SEPARATE_AUDIO_MASTER);
+        assert_eq!(
+            master
+                .renditions
+                .iter()
+                .map(|rendition| rendition.bandwidth)
+                .collect::<Vec<_>>(),
+            [900_000, 200_000],
+            "the fixture lists the low rendition first, on purpose"
+        );
+        let best = master.default_rendition().unwrap();
+        assert_eq!(best.width, Some(1280));
+        assert_eq!(best.height, Some(720));
+        assert_eq!(best.codecs.as_deref(), Some("avc1.64001f,mp4a.40.2"));
+    }
+
+    /// The comma inside `CODECS="…"` used to split the attribute list, which
+    /// made every attribute after it unreadable — including `AUDIO`, the one
+    /// that decides whether audio is carried separately at all.
+    #[test]
+    fn a_quoted_comma_does_not_split_the_attribute_list() {
+        let master = master_of(SEPARATE_AUDIO_MASTER);
+        let best = master.default_rendition().unwrap();
+        assert_eq!(best.audio_group.as_deref(), Some("aud"));
+    }
+
+    /// The ADR-0014 pairing: a chosen rendition arrives with its audio, so
+    /// FFmpeg gets both and the sound is not lost.
+    #[test]
+    fn a_rendition_is_paired_with_the_default_audio_of_its_group() {
+        let master = master_of(SEPARATE_AUDIO_MASTER);
+        let chosen = master.choose(None).unwrap();
+        assert_eq!(
+            chosen.video.as_str(),
+            "https://example.test/high/video.m3u8"
+        );
+        assert_eq!(
+            chosen.audio.as_ref().map(Url::as_str),
+            Some("https://example.test/audio/en.m3u8"),
+            "DEFAULT=YES wins within the group, not declaration order"
+        );
+
+        // And the low rendition, which no route could reach with sound before.
+        let low = Url::parse("https://example.test/low/video.m3u8").unwrap();
+        let chosen = master
+            .choose(Some(&RenditionChoice::Exact(low.clone())))
+            .unwrap();
+        assert_eq!(chosen.video, low);
+        assert_eq!(
+            chosen.audio.as_ref().map(Url::as_str),
+            Some("https://example.test/audio/en.m3u8")
+        );
+    }
+
+    /// ADR-0014 narrows ADR-0010's guard. A master whose only separately
+    /// declared rendition is subtitles resolves normally: measured, the variant
+    /// alone writes exactly what the master writes, at half the segments.
+    #[test]
+    fn a_subtitles_only_master_resolves_without_a_paired_audio() {
+        let master = master_of(SUBTITLES_ONLY_MASTER);
+        assert!(
+            master.audio.is_empty(),
+            "subtitles are not modelled as audio"
+        );
+        let chosen = master.choose(None).unwrap();
+        assert_eq!(
+            chosen.video.as_str(),
+            "https://example.test/high/video.m3u8"
+        );
+        assert_eq!(chosen.audio, None);
+    }
+
+    /// Naming a rendition the master does not declare is refused, not replaced
+    /// with the default: a quality that silently becomes another one is the
+    /// illusion KEI-61 removes.
+    #[test]
+    fn a_rendition_the_master_does_not_declare_is_not_silently_replaced() {
+        let master = master_of(SEPARATE_AUDIO_MASTER);
+        let absent = Url::parse("https://example.test/4k/video.m3u8").unwrap();
+        assert_eq!(master.choose(Some(&RenditionChoice::Exact(absent))), None);
+    }
+
+    /// The detection table is the shared fixture's, so the Rust and JavaScript
+    /// scanners cannot disagree about what counts as media.
+    #[test]
+    fn media_kinds_match_the_shared_case_table() {
+        const VOCABULARY: &str = include_str!("../tests/fixtures/media-extensions.json");
+        let shared: serde_json::Value = serde_json::from_str(VOCABULARY).unwrap();
+        let cases = shared["detection_cases"]
+            .as_array()
+            .expect("detection_cases is an array");
+        assert!(cases.len() >= 12, "the table is worth having");
+        for case in cases {
+            let raw = case["url"].as_str().expect("a case has a url");
+            let expected = case["kind"].as_str();
+            let url = Url::parse(raw).expect("a case URL parses");
+            let actual = media_kind(&url).map(|kind| match kind {
+                MediaKind::Hls => "hls",
+                MediaKind::Dash => "dash",
+                MediaKind::File => "file",
+            });
+            assert_eq!(
+                actual,
+                expected,
+                "{raw}: {}",
+                case["why"].as_str().unwrap_or_default()
+            );
+        }
+    }
+
+    /// A segment listed beside the playlist that lists it is not a second
+    /// thing to download.
+    #[test]
+    fn segments_collapse_into_a_playlist_that_covers_them() {
+        let mut urls = vec![
+            Url::parse("https://cdn.test/v/master.m3u8").unwrap(),
+            Url::parse("https://cdn.test/v/high/seg-001.ts").unwrap(),
+            Url::parse("https://cdn.test/v/high/seg-002.ts").unwrap(),
+            // Another host: this playlist covers nothing here.
+            Url::parse("https://other.test/clip-01.ts").unwrap(),
+        ];
+        collapse_segments(&mut urls);
+        assert_eq!(
+            urls.iter().map(Url::as_str).collect::<Vec<_>>(),
+            [
+                "https://cdn.test/v/master.m3u8",
+                "https://other.test/clip-01.ts"
+            ]
+        );
+
+        // With no playlist in the list, a segment is all there is, so it stays.
+        let mut alone = vec![Url::parse("https://cdn.test/v/seg-001.ts").unwrap()];
+        collapse_segments(&mut alone);
+        assert_eq!(alone.len(), 1);
     }
 }

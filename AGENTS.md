@@ -75,8 +75,11 @@ redaction happens, ADR-0004 the output collision policy, ADR-0005 the
 default output name, ADR-0006 FFmpeg version detection, ADR-0007 the
 structured FFmpeg command model, ADR-0008 relocatable native host
 installation, ADR-0009 setup diagnostics, and ADR-0010 resolving HLS master
-playlists, and ADR-0011 one playlist parser; KEI-63 backfills the decisions already embodied in the code and
-adds the rest of the documentation set.
+playlists, ADR-0011 one playlist parser, ADR-0012 control semantics, ADR-0013
+one download per host process, and ADR-0014 pairing a chosen rendition with its
+separately declared audio (which amends ADR-0010); KEI-63 backfills the
+decisions already embodied in the code and adds the rest of the documentation
+set.
 
 Any change to the native messaging protocol, the host process model, the
 FFmpeg command layer, discovery ownership, or control semantics requires an

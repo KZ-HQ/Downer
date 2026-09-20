@@ -50,6 +50,15 @@ fn argv_for(url: &str) -> Vec<String> {
 
 /// As `argv_for`, with a playlist the caller already fetched.
 fn argv_for_with_text(url: &str, playlist_text: Option<&str>) -> Vec<String> {
+    argv_for_choice(url, playlist_text, None).expect("the fake download runs")
+}
+
+/// As `argv_for_with_text`, naming a rendition explicitly (KEI-61).
+fn argv_for_choice(
+    url: &str,
+    playlist_text: Option<&str>,
+    rendition: Option<&str>,
+) -> Result<Vec<String>, downer::error::DownerError> {
     let temp = tempfile::tempdir().expect("a temporary directory");
     let fake = install_recording_fake(temp.path());
     let output = temp.path().join("out.mp4");
@@ -70,10 +79,29 @@ fn argv_for_with_text(url: &str, playlist_text: Option<&str>) -> Vec<String> {
         threads: None,
         quiet: true,
         playlist_text: playlist_text.map(str::to_string),
+        rendition: rendition.map(|raw| raw.parse().expect("a valid rendition selector")),
         keep_partial: true,
     };
-    downer::download_resolved(media, &options, Hooks::default()).expect("the fake download runs");
-    recorded(temp.path())
+    downer::download_resolved(media, &options, Hooks::default())?;
+    Ok(recorded(temp.path()))
+}
+
+/// Every `-i` value out of a recorded argv, in order.
+fn inputs_of(args: &[String]) -> Vec<String> {
+    args.iter()
+        .enumerate()
+        .filter(|(_, argument)| *argument == "-i")
+        .filter_map(|(at, _)| args.get(at + 1).cloned())
+        .collect()
+}
+
+/// Every `-map` value out of a recorded argv, in order.
+fn maps_of(args: &[String]) -> Vec<String> {
+    args.iter()
+        .enumerate()
+        .filter(|(_, argument)| *argument == "-map")
+        .filter_map(|(at, _)| args.get(at + 1).cloned())
+        .collect()
 }
 
 /// The `-i` value out of a recorded argv.
@@ -135,15 +163,15 @@ fn a_media_playlist_is_passed_through_unchanged() {
     );
 }
 
-/// A master whose audio is a separate rendition is left alone.
+/// A master whose audio is a separate rendition is resolved to **both**.
 ///
-/// Measured on FFmpeg 9.0.1: the master yields video **and** audio, the video
-/// variant alone yields video only. Resolving such a master would silently drop
-/// the audio track — a new defect, and worse than the waste this optimisation
-/// removes. `select_variant` reads only `#EXT-X-STREAM-INF` and cannot express
-/// "this video plus that audio", so the master is used as before.
+/// ADR-0010 declined here, because `select_variant` returned one URL and could
+/// not say "this video plus that audio": handing FFmpeg the variant alone
+/// silently lost the sound. ADR-0014 pairs them instead — measured on FFmpeg
+/// 9.0.2, the variant plus the audio playlist with `-map 0:v:0 -map 1:a:0`
+/// writes video and audio while fetching only the chosen rendition.
 #[test]
-fn a_master_with_separate_audio_is_not_resolved() {
+fn a_master_with_separate_audio_resolves_to_the_variant_and_its_audio() {
     let origin = HeaderRecorder::start("127.0.0.1");
     let video = origin.url("/media/v/video.m3u8");
     let audio = origin.url("/media/a/audio.m3u8");
@@ -157,13 +185,104 @@ fn a_master_with_separate_audio_is_not_resolved() {
         Reply::text("application/vnd.apple.mpegurl", master),
     );
 
-    let url = origin.url("/media/with-audio.m3u8");
-    let args = argv_for(&url);
+    let args = argv_for(&origin.url("/media/with-audio.m3u8"));
+    assert_eq!(inputs_of(&args), [video, audio], "{args:?}");
     assert_eq!(
-        input_of(&args),
-        url,
-        "the master is used as given, so FFmpeg still muxes the separate audio: {args:?}"
+        maps_of(&args),
+        ["0:v:0", "1:a:0"],
+        "input 0 is a media playlist, so 0:v:0 is unambiguous: {args:?}"
     );
+}
+
+/// Every input option is repeated before every `-i`.
+///
+/// FFmpeg applies `-headers`, `-cookies` and the segment-extension options to
+/// the *next* input only. Emitting them once would fetch the audio playlist
+/// without the session the video playlist needed, which on a cookie-gated CDN
+/// is a download that half works.
+#[test]
+fn each_input_carries_the_session_options() {
+    let origin = HeaderRecorder::start("127.0.0.1");
+    let video = origin.url("/media/v/video.m3u8");
+    let audio = origin.url("/media/a/audio.m3u8");
+    let master = format!(
+        "#EXTM3U\n\
+         #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"English\",DEFAULT=YES,URI=\"{audio}\"\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,AUDIO=\"aud\"\n{video}\n"
+    );
+    origin.route(
+        "/media/with-audio.m3u8",
+        Reply::text("application/vnd.apple.mpegurl", master),
+    );
+
+    let args = argv_for(&origin.url("/media/with-audio.m3u8"));
+    assert_eq!(
+        args.iter()
+            .filter(|argument| *argument == "-headers")
+            .count(),
+        2,
+        "{args:?}"
+    );
+    assert_eq!(
+        args.iter()
+            .filter(|argument| *argument == "-allowed_segment_extensions")
+            .count(),
+        2,
+        "{args:?}"
+    );
+}
+
+/// The choice KEI-61 adds: a named rendition is the one downloaded, and it
+/// still arrives with its audio.
+#[test]
+fn an_explicitly_chosen_rendition_is_the_one_downloaded() {
+    let origin = HeaderRecorder::start("127.0.0.1");
+    let low = origin.url("/media/low/video.m3u8");
+    let high = origin.url("/media/high/video.m3u8");
+    let audio = origin.url("/media/a/audio.m3u8");
+    let master = format!(
+        "#EXTM3U\n\
+         #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"English\",DEFAULT=YES,URI=\"{audio}\"\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=200000,RESOLUTION=320x180,AUDIO=\"aud\"\n{low}\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=1280x720,AUDIO=\"aud\"\n{high}\n"
+    );
+    origin.route(
+        "/media/master.m3u8",
+        Reply::text("application/vnd.apple.mpegurl", master),
+    );
+    let url = origin.url("/media/master.m3u8");
+
+    // Not choosing is unchanged: the highest bandwidth, as KEI-89 left it.
+    let args = argv_for(&url);
+    assert_eq!(inputs_of(&args), [high.clone(), audio.clone()], "{args:?}");
+
+    // Choosing the low rendition downloads the low rendition — with sound,
+    // which no route could reach before ADR-0014.
+    let args = argv_for_choice(&url, None, Some(&low)).expect("the fake download runs");
+    assert_eq!(inputs_of(&args), [low.clone(), audio], "{args:?}");
+}
+
+/// A rendition the master does not declare stops the download rather than
+/// quietly becoming the default one.
+#[test]
+fn a_rendition_that_is_not_offered_is_refused() {
+    let origin = HeaderRecorder::start("127.0.0.1");
+    let high = origin.url("/media/high/video.m3u8");
+    let master =
+        format!("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=1280x720\n{high}\n");
+    origin.route(
+        "/media/master.m3u8",
+        Reply::text("application/vnd.apple.mpegurl", master),
+    );
+
+    let absent = origin.url("/media/4k/video.m3u8");
+    let error = argv_for_choice(&origin.url("/media/master.m3u8"), None, Some(&absent))
+        .expect_err("an unoffered rendition is refused");
+    assert!(
+        matches!(error, downer::error::DownerError::VariantNotOffered(_)),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("does not offer that rendition"));
 }
 
 /// The safety property: resolution is best-effort.
@@ -278,4 +397,59 @@ fn supplied_text_that_is_not_a_playlist_falls_back() {
         Some("<!DOCTYPE html><title>Attention Required!</title>"),
     );
     assert_eq!(input_of(&args), url);
+}
+
+/// `--rendition` takes what a person would type, not only a URL they would
+/// have to find. The extension names an exact URL because the popup listed
+/// them; nobody at a terminal has that.
+#[test]
+fn a_rendition_selector_reads_the_words_a_person_would_type() {
+    use downer::scraper::RenditionChoice;
+
+    assert_eq!("best".parse(), Ok(RenditionChoice::Best));
+    assert_eq!("WORST".parse(), Ok(RenditionChoice::Worst));
+    assert_eq!("720p".parse(), Ok(RenditionChoice::Height(720)));
+    assert_eq!("720".parse(), Ok(RenditionChoice::Height(720)));
+    assert_eq!("1280x720".parse(), Ok(RenditionChoice::Height(720)));
+    assert_eq!(
+        "https://cdn.test/v/high.m3u8".parse(),
+        Ok(RenditionChoice::Exact(
+            url::Url::parse("https://cdn.test/v/high.m3u8").unwrap()
+        ))
+    );
+    // Not a scheme a download may use, so not a URL this accepts.
+    assert!("file:///etc/passwd".parse::<RenditionChoice>().is_err());
+    assert!("medium".parse::<RenditionChoice>().is_err());
+}
+
+#[test]
+fn a_rendition_selector_picks_by_height_and_by_worst() {
+    let origin = HeaderRecorder::start("127.0.0.1");
+    let low = origin.url("/media/low/video.m3u8");
+    let high = origin.url("/media/high/video.m3u8");
+    let master = format!(
+        "#EXTM3U\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=200000,RESOLUTION=320x180\n{low}\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=1280x720\n{high}\n"
+    );
+    origin.route(
+        "/media/master.m3u8",
+        Reply::text("application/vnd.apple.mpegurl", master),
+    );
+    let url = origin.url("/media/master.m3u8");
+
+    for (selector, expected) in [
+        ("best", &high),
+        ("worst", &low),
+        ("720p", &high),
+        ("180p", &low),
+    ] {
+        let args = argv_for_choice(&url, None, Some(selector)).expect("the fake download runs");
+        assert_eq!(&input_of(&args), expected, "--rendition {selector}");
+    }
+
+    // A height the master does not declare is refused, like any other
+    // rendition that is not on offer.
+    let error = argv_for_choice(&url, None, Some("1440p")).expect_err("not offered");
+    assert!(error.to_string().contains("1440p"), "{error}");
 }

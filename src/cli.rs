@@ -48,6 +48,15 @@ pub struct Cli {
     #[arg(long, value_name = "TITLE")]
     pub name: Option<String>,
 
+    /// Which rendition of an HLS master playlist to download.
+    ///
+    /// `best` (the default), `worst`, a height such as `720p` or `1280x720`,
+    /// or an exact variant URL. A rendition the playlist does not offer stops
+    /// the download rather than quietly becoming another one. Listing what a
+    /// playlist offers belongs to discovery output and is KEI-62's.
+    #[arg(long, value_name = "SELECTOR")]
+    pub rendition: Option<crate::scraper::RenditionChoice>,
+
     /// FFmpeg executable to invoke (default: ffmpeg on PATH).
     #[arg(long, value_name = "PATH", default_value = "ffmpeg")]
     pub ffmpeg: PathBuf,

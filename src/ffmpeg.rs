@@ -152,6 +152,15 @@ pub struct FfmpegInvocation {
     /// The media URL, passed to FFmpeg as a single argument so a shell can
     /// never see it; see `docs/adr/0002-cookie-scoping-and-argv-exposure.md`.
     pub input: String,
+    /// A second input carrying the audio, when the HLS master declares it
+    /// outside the video variant (`#EXT-X-MEDIA:TYPE=AUDIO` with a `URI`).
+    ///
+    /// Present, the two are muxed with explicit stream mapping. Absent, this is
+    /// the single-input invocation it has always been. Nothing else in this
+    /// project has a second input, so this is deliberately one optional audio
+    /// input rather than a general list: the shape says what it is for. See
+    /// `docs/adr/0014-pair-a-rendition-with-its-audio.md`.
+    pub audio_input: Option<String>,
     /// The `-headers` block, applied to every request for this input.
     pub headers: Option<String>,
     /// The newline-delimited Set-Cookie syntax FFmpeg takes as `-cookies`,
@@ -406,6 +415,7 @@ impl FfmpegInvocation {
         Self {
             program,
             input: input.to_string(),
+            audio_input: None,
             headers: None,
             cookies: None,
             hls_lenient: false,
@@ -440,26 +450,44 @@ impl FfmpegInvocation {
                 args.push(OsString::from("pipe:1"));
             }
         }
-        if self.hls_lenient {
-            args.push(OsString::from(SEGMENT_EXTENSION_OPTIONS[0]));
-            args.push(OsString::from("ALL"));
-            args.push(OsString::from(SEGMENT_EXTENSION_OPTIONS[1]));
-            args.push(OsString::from("0"));
+        // `-allowed_segment_extensions`, `-headers` and `-cookies` are *input*
+        // options: FFmpeg applies each to the next `-i` only. They are
+        // therefore emitted once per input, or the audio playlist would be
+        // fetched without the session that the video playlist needed.
+        for input in [Some(&self.input), self.audio_input.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            if self.hls_lenient {
+                args.push(OsString::from(SEGMENT_EXTENSION_OPTIONS[0]));
+                args.push(OsString::from("ALL"));
+                args.push(OsString::from(SEGMENT_EXTENSION_OPTIONS[1]));
+                args.push(OsString::from("0"));
+            }
+            if let Some(headers) = &self.headers {
+                args.push(OsString::from("-headers"));
+                args.push(OsString::from(headers));
+            }
+            if let Some(cookies) = &self.cookies {
+                args.push(OsString::from("-cookies"));
+                args.push(OsString::from(cookies));
+            }
+            args.push(OsString::from("-i"));
+            args.push(OsString::from(input));
         }
-        if let Some(headers) = &self.headers {
-            args.push(OsString::from("-headers"));
-            args.push(OsString::from(headers));
+        if self.audio_input.is_some() {
+            // Only with two inputs, and only then is it safe: input 0 is a
+            // *media* playlist with one video stream, so `0:v:0` is
+            // unambiguous. KEI-89 measured that the same option against a
+            // *master* silently picks the first variant, which was the lowest.
+            args.extend([
+                OsString::from("-map"),
+                OsString::from("0:v:0"),
+                OsString::from("-map"),
+                OsString::from("1:a:0"),
+            ]);
         }
-        if let Some(cookies) = &self.cookies {
-            args.push(OsString::from("-cookies"));
-            args.push(OsString::from(cookies));
-        }
-        args.extend([
-            OsString::from("-i"),
-            OsString::from(&self.input),
-            OsString::from("-c"),
-            OsString::from("copy"),
-        ]);
+        args.extend([OsString::from("-c"), OsString::from("copy")]);
         if let Some(threads) = self.threads {
             args.push(OsString::from("-threads"));
             args.push(OsString::from(threads.to_string()));
@@ -789,6 +817,7 @@ mod tests {
     fn segment_extension_options_follow_the_lenient_flag() {
         let lenient = FfmpegInvocation {
             input: "https://example.test/playlist.m3u8".to_string(),
+            audio_input: None,
             hls_lenient: true,
             ..plain()
         };

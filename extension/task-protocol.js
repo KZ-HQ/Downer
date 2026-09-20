@@ -97,6 +97,17 @@ var DownerTaskProtocol = (() => {
       return this.send("status", request, timeoutMs, false);
     }
 
+    /**
+     * Ask the host what a playlist offers (KEI-61).
+     *
+     * The extension fetched the text in the page's context; the host parses
+     * it, because ADR-0011 puts one implementation of what a playlist means in
+     * Rust. No I/O on the host side, so the handshake's timeout is right.
+     */
+    playlistInfo(request = {}, timeoutMs = 5000) {
+      return this.send("playlist-info", request, timeoutMs, false);
+    }
+
     start(request) {
       this.startRequestId = `${this.jobId}-start`;
       this.port.postMessage({

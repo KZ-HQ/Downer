@@ -13,6 +13,9 @@ const {
 
 const statusElement = document.getElementById("status");
 const listElement = document.getElementById("media-list");
+const otherListElement = document.getElementById("other-media-list");
+const otherCandidatesElement = document.getElementById("other-candidates");
+const otherSummaryElement = document.getElementById("other-candidates-summary");
 const helpElement = document.getElementById("help");
 const downloadStatusElement = document.getElementById("download-status");
 const rowsByJobId = new Map();
@@ -196,7 +199,79 @@ function renderDownloadStatus(job) {
   if (job.controlError) downloadStatusElement.textContent = job.controlError;
 }
 
-function addMediaRow(candidate, sourceUrl, tabId, title) {
+/**
+ * A bit rate a person can compare. `BANDWIDTH` is bits per second.
+ */
+function formatBitrate(bandwidth) {
+  if (!bandwidth) return "";
+  return bandwidth >= 1000000
+    ? `${(bandwidth / 1000000).toFixed(1)} Mbps`
+    : `${Math.round(bandwidth / 1000)} kbps`;
+}
+
+/**
+ * What one rendition is called in the picker.
+ *
+ * Height first, because "1080p" is how people choose. The bit rate is the
+ * tie-breaker between two renditions at one resolution, and the whole label
+ * falls back to the URL when a master declares neither — a row with no words
+ * on it would be a choice nobody can make.
+ */
+function renditionLabel(rendition) {
+  const parts = [];
+  if (rendition.height) parts.push(`${rendition.height}p`);
+  else if (rendition.width) parts.push(`${rendition.width} wide`);
+  const bitrate = formatBitrate(rendition.bandwidth);
+  if (bitrate) parts.push(bitrate);
+  return parts.join(" · ") || rendition.url;
+}
+
+/**
+ * Ask the background script what a playlist offers and, when it offers a real
+ * choice, build the picker.
+ *
+ * Silence is the fallback everywhere: a host too old to enumerate, a playlist
+ * that could not be fetched, a media playlist, or a master with one rendition
+ * all leave the row exactly as it was, and Download still works. A picker with
+ * nothing to decide is the thing this issue exists to remove, so it is never
+ * shown for the sake of showing something.
+ */
+async function offerRenditions(row, candidate, sourceUrl, tabId) {
+  if (candidate.kind !== "hls" && candidate.type !== "hls") return;
+  let info;
+  try {
+    info = await browser.runtime.sendMessage({
+      type: "inspect-playlist",
+      url: candidate.url,
+      sourceUrl,
+      tabId
+    });
+  } catch (_) {
+    return;
+  }
+  const renditions = (info?.ok && info.renditions) || [];
+  if (info?.kind !== "master" || renditions.length < 2) return;
+
+  for (const rendition of renditions) {
+    const option = document.createElement("option");
+    option.value = rendition.url;
+    option.textContent = renditionLabel(rendition);
+    if (rendition.default) option.selected = true;
+    row.select.append(option);
+  }
+  // The default is what an unchosen download already gets, so opening the
+  // popup and pressing Download is unchanged (KEI-89's criterion).
+  if (!renditions.some((rendition) => rendition.default)) {
+    row.select.selectedIndex = 0;
+  }
+  const separateAudio = renditions.some((rendition) => rendition.audio_url);
+  row.variantNote.textContent = separateAudio
+    ? `${renditions.length} qualities · audio is a separate track and is included`
+    : `${renditions.length} qualities`;
+  row.variants.hidden = false;
+}
+
+function addMediaRow(candidate, sourceUrl, tabId, title, target = listElement) {
   const item = document.createElement("li");
   const task = document.createElement("div");
   task.className = "task";
@@ -213,7 +288,28 @@ function addMediaRow(candidate, sourceUrl, tabId, title) {
   progress.hidden = true;
   progress.removeAttribute("value");
   meta.append(count, progress);
-  label.textContent = `${candidate.type.toUpperCase()}: ${candidate.url}`;
+  // `kind` distinguishes DASH, which used to be labelled VIDEO with no
+  // indication that nothing had ever validated it against FFmpeg.
+  const kind = (candidate.kind === "dash" ? "dash" : candidate.type || candidate.kind) || "file";
+  label.textContent = `${(kind === "file" ? "video" : kind).toUpperCase()}: ${candidate.url}`;
+  if (candidate.experimental) {
+    const badge = document.createElement("span");
+    badge.className = "experimental";
+    badge.textContent = "experimental";
+    label.append(badge);
+  }
+  // Hidden until the host says there is a choice; see `offerRenditions`.
+  const variants = document.createElement("div");
+  variants.className = "variants";
+  variants.hidden = true;
+  const variantLabel = document.createElement("label");
+  variantLabel.textContent = "Quality ";
+  const select = document.createElement("select");
+  select.className = "variant-select";
+  variantLabel.append(select);
+  const variantNote = document.createElement("span");
+  variantNote.className = "variant-note";
+  variants.append(variantLabel, variantNote);
   const button = document.createElement("button");
   button.textContent = "Download";
   const controls = document.createElement("span");
@@ -231,6 +327,9 @@ function addMediaRow(candidate, sourceUrl, tabId, title) {
     cancel,
     count,
     progress,
+    variants,
+    select,
+    variantNote,
     jobId: null,
     jobStartedAt: 0
   };
@@ -273,6 +372,9 @@ function addMediaRow(candidate, sourceUrl, tabId, title) {
         type: "download-media",
         url: candidate.url,
         sourceUrl,
+        // Only when a picker is showing. Absent, the host applies the same
+        // rule as before, so the one-click path is untouched.
+        variantUrl: variants.hidden ? null : select.value || null,
         // The page title names the file when the playlist URL is generic
         // (`index.m3u8` and friends); the host bounds and sanitises it.
         title,
@@ -292,9 +394,10 @@ function addMediaRow(candidate, sourceUrl, tabId, title) {
       downloadStatusElement.textContent = "Download failed. You can retry.";
     }
   });
-  task.append(label, meta, controls);
+  task.append(label, variants, meta, controls);
   item.append(task);
-  listElement.append(item);
+  target.append(item);
+  return row;
 }
 
 browser.runtime.onMessage.addListener((message) => {
@@ -371,10 +474,38 @@ async function scanActiveTab() {
       showStatus("No media URL found.");
       return;
     }
-    showStatus(`${candidates.length} media URL${candidates.length === 1 ? "" : "s"} found.`);
+    // A URL found only in the page text is weaker evidence than one the player
+    // actually loaded, so it is listed apart rather than ranked beside it.
+    const likely = candidates.filter((candidate) => candidate.confidence !== "inferred");
+    const others = candidates.filter((candidate) => candidate.confidence === "inferred");
+    const listed = likely.length ? likely : others;
+    const collapsed = likely.length ? others : [];
+
+    showStatus(`${listed.length} media URL${listed.length === 1 ? "" : "s"} found.`);
     helpElement.textContent = "HLS playlists are listed first when available.";
-    candidates.forEach((candidate) => addMediaRow(candidate, result.sourceUrl, tab.id, result.title));
+    const rows = listed.map((candidate) =>
+      addMediaRow(candidate, result.sourceUrl, tab.id, result.title)
+    );
+    for (const candidate of collapsed) {
+      addMediaRow(candidate, result.sourceUrl, tab.id, result.title, otherListElement);
+    }
+    if (collapsed.length) {
+      otherSummaryElement.textContent =
+        `${collapsed.length} other candidate${collapsed.length === 1 ? "" : "s"} found in the page text`;
+      otherCandidatesElement.hidden = false;
+    }
     await restoreDownloadStatuses();
+    // After the rows exist and their jobs are restored: enumerating asks the
+    // host, which is slower than rendering and must not hold the list up.
+    //
+    // One at a time. Each call opens its own short-lived native connection,
+    // the way `hello` and `status` do, and one host process per playlist at
+    // once is a cost nobody has measured — a page normally has one playlist
+    // after segments are collapsed into it, so serialising costs nothing in
+    // the usual case and bounds the unusual one.
+    for (const [index, candidate] of listed.entries()) {
+      await offerRenditions(rows[index], candidate, result.sourceUrl, tab.id);
+    }
   } catch (error) {
     showStatus("Could not inspect this page.");
     helpElement.textContent = error.message;

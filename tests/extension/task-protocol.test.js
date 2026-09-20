@@ -428,3 +428,75 @@ test("KEI-53: host_busy is a connection-level rejection, never a job state", () 
     "the vocabulary states the process model host_busy enforces"
   );
 });
+
+// ---------------------------------------------------------------------------
+// KEI-61: `playlist-info`, the command the rendition picker rests on.
+// ---------------------------------------------------------------------------
+
+test("playlistInfo sends the command the shared vocabulary names", async () => {
+  assert.ok(
+    protocol.commands.includes("playlist-info"),
+    "the command is in tests/fixtures/protocol.json, which the Rust suite reads too"
+  );
+  assert.ok(protocol.event_types.includes("playlist-info"));
+  assert.ok(protocol.capabilities.includes("playlist_info"));
+
+  const port = new FakePort();
+  const channel = new NativeTaskChannel(port, "job-1", () => {}, () => null);
+  const pending = channel.playlistInfo({
+    url: "https://cdn.test/v/master.m3u8",
+    playlist_text: "#EXTM3U\n"
+  });
+
+  const sent = port.posted.at(-1);
+  assert.equal(sent.command, "playlist-info");
+  assert.equal(sent.protocol_version, PROTOCOL_VERSION);
+  assert.equal(sent.url, "https://cdn.test/v/master.m3u8");
+  assert.equal(
+    sent.job_id,
+    undefined,
+    "enumerating a playlist is not about a job, so it names none"
+  );
+
+  port.messageListeners[0]({
+    protocol_version: PROTOCOL_VERSION,
+    type: "playlist-info",
+    ok: true,
+    state: "ready",
+    request_id: sent.request_id,
+    playlist_kind: "master",
+    renditions: [{ url: "https://cdn.test/v/high.m3u8", bandwidth: 1, default: true }]
+  });
+  const response = await pending;
+  assert.equal(response.playlist_kind, "master");
+  assert.equal(response.renditions.length, 1);
+  assert.ok(
+    protocol.playlist_kinds.includes(response.playlist_kind),
+    "the kind is in the shared vocabulary"
+  );
+});
+
+test("an unsupported_command rejection answers playlistInfo rather than hanging", async () => {
+  // A host built before KEI-61. The popup must degrade to no picker, which
+  // means this has to settle rather than time out. It settles the way every
+  // other command on this channel reports a refusal — resolved with
+  // `ok: false`, not thrown — and `inspectPlaylist` reads `ok` for exactly
+  // that reason.
+  const port = new FakePort();
+  const channel = new NativeTaskChannel(port, "job-1", () => {}, () => null);
+  const pending = channel.playlistInfo({ url: "https://cdn.test/v/master.m3u8" });
+  const sent = port.posted.at(-1);
+  port.messageListeners[0]({
+    protocol_version: PROTOCOL_VERSION,
+    type: "rejected",
+    ok: false,
+    state: "rejected",
+    request_id: sent.request_id,
+    error: "unsupported native command: playlist-info",
+    error_code: "unsupported_command"
+  });
+  const response = await pending;
+  assert.equal(response.ok, false);
+  assert.equal(response.error_code, "unsupported_command");
+  assert.equal(response.playlist_kind, undefined, "there is nothing to offer");
+});

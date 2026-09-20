@@ -493,6 +493,10 @@ async function runDownload(message, jobId) {
         ? settings.ffmpegThreads
         : null,
       playlist_text: playlistText,
+      // The rendition the user picked, when they picked one. Absent, the host
+      // applies the same highest-bandwidth rule as before, so the common path
+      // is unchanged (KEI-89's criterion). See docs/protocol.md.
+      variant_url: message.variantUrl || null,
       keep_partial: settings.keepPartial === true
     }, jobId);
     const response = await native.completion;
@@ -622,7 +626,64 @@ async function checkSetup(message) {
   }
 }
 
+/**
+ * Ask the host to enumerate what a playlist offers, so the popup can offer it.
+ *
+ * The division is ADR-0011's, unchanged: this side fetches, because only the
+ * page's context carries the session a challenged CDN answers, and the host
+ * parses, because one implementation decides what a playlist means. A picker
+ * that parsed here would be the second parser KEI-51 deleted.
+ *
+ * Every failure answers `{ ok: false }` rather than throwing. A popup that
+ * cannot enumerate shows no picker and the plain row still downloads — which
+ * is exactly the behaviour before KEI-61, and the same graceful path a host too
+ * old to know the command takes.
+ */
+async function inspectPlaylist(message) {
+  // Fetched again when the download starts rather than cached here, and
+  // deliberately: a live master can be repackaged between being listed and
+  // being chosen, and re-reading it is what turns that into an honest refusal
+  // instead of a stale rendition URL. The cost is one small text request.
+  const text = await playlistTextForSession(message.url, message.sourceUrl, message.tabId);
+  if (!text) return { ok: false, error: "Could not fetch the playlist from the page." };
+  const port = browser.runtime.connectNative(NATIVE_HOST);
+  const channel = new DownerTaskProtocol.NativeTaskChannel(
+    port,
+    "playlist-info",
+    () => {},
+    () => browser.runtime.lastError?.message
+  );
+  try {
+    const compatibility = DownerTaskProtocol.protocolCompatibility(await channel.hello());
+    if (!compatibility.ok) return { ok: false, error: compatibility.error };
+    if (compatibility.capabilities?.playlist_info === false) {
+      return { ok: false, error: "This host does not enumerate renditions." };
+    }
+    const response = await channel.playlistInfo({ url: message.url, playlist_text: text });
+    // A `rejected` event resolves this promise with `ok: false` rather than
+    // throwing — that is how every other command on this channel reports a
+    // refusal — so a host that does not know the command lands here, not in
+    // the catch. Either way the popup shows no picker.
+    if (!response?.ok) {
+      return { ok: false, error: response?.error || "The host could not read the playlist." };
+    }
+    return {
+      ok: true,
+      kind: response.playlist_kind,
+      renditions: response.renditions || [],
+      totalSegments: response.total_segments
+    };
+  } catch (error) {
+    return { ok: false, error: error.message || String(error) };
+  } finally {
+    channel.close("playlist inspection finished");
+  }
+}
+
 browser.runtime.onMessage.addListener((message) => {
+  if (message?.type === "inspect-playlist") {
+    return inspectPlaylist(message);
+  }
   if (message?.type === "download-media") {
     return Promise.resolve(beginDownload(message));
   }

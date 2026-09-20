@@ -38,6 +38,10 @@ const EVENT_LOG: &str = "log";
 const EVENT_TERMINAL: &str = "terminal";
 const EVENT_REJECTED: &str = "rejected";
 const EVENT_CONTROL_ERROR: &str = "control-error";
+/// The answer to `playlist-info`: what a playlist the extension fetched turned
+/// out to be, and what renditions it offers. Added for KEI-61; see
+/// `docs/adr/0014-pair-a-rendition-with-its-audio.md`.
+const EVENT_PLAYLIST_INFO: &str = "playlist-info";
 
 const STATE_READY: &str = "ready";
 const STATE_REJECTED: &str = "rejected";
@@ -109,6 +113,15 @@ struct NativeRequest {
     /// `docs/adr/0011-one-playlist-parser.md`.
     #[serde(default)]
     playlist_text: Option<String>,
+    /// The rendition the user picked, when they picked one.
+    ///
+    /// Absent, `resolve_variant` decides as it always has, so an unchosen
+    /// download is unchanged. Present and not declared by the master, the
+    /// download is **refused** rather than silently served at another quality:
+    /// see `crate::error::DownerError::VariantNotOffered`. Optional and
+    /// non-breaking, so no `protocol_version` bump (KEI-61).
+    #[serde(default)]
+    variant_url: Option<String>,
     /// The FFmpeg the user chose on the Settings page.
     ///
     /// Firefox launches the host with a minimal environment, so `DOWNER_FFMPEG`
@@ -161,6 +174,10 @@ struct Capabilities {
     /// Pause and resume use Unix process signals, so they are unavailable elsewhere.
     pause_resume: bool,
     hls_info: bool,
+    /// The host answers `playlist-info`, so a client may offer a rendition
+    /// picker. A host too old to say does not, and the client shows no picker —
+    /// which is exactly the behaviour before KEI-61.
+    playlist_info: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -207,6 +224,36 @@ struct NativeResponse {
     metadata_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     request_id: Option<String>,
+    /// What a `playlist-info` request's playlist turned out to be: `master`,
+    /// `media` or `unusable`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    playlist_kind: Option<&'static str>,
+    /// The renditions a master declares, best first. Empty for anything else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    renditions: Option<Vec<RenditionInfo>>,
+}
+
+/// One rendition, as the popup needs to label and choose it.
+///
+/// `audio_url` is the rendition's paired audio when the master carries it
+/// separately. It is reported so a client can *say* the download will include
+/// it, not so the client can send it back: the host re-derives it from the
+/// playlist at download time, which keeps playlist knowledge in one place
+/// (ADR-0011).
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct RenditionInfo {
+    url: String,
+    bandwidth: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    codecs: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio_url: Option<String>,
+    /// Whether this is the one an unchosen download would take.
+    default: bool,
 }
 
 impl Default for NativeResponse {
@@ -229,6 +276,8 @@ impl Default for NativeResponse {
             elapsed_ms: None,
             metadata_error: None,
             request_id: None,
+            playlist_kind: None,
+            renditions: None,
         }
     }
 }
@@ -296,6 +345,7 @@ pub fn run_stdio() -> DownerResult<()> {
             ),
             "pause" | "resume" | "cancel" => control_download(request, &job),
             "hls-info" => update_hls_info(request, &job),
+            "playlist-info" => playlist_info_response(&request),
             command => rejected(
                 ERROR_UNSUPPORTED_COMMAND,
                 format!("unsupported native command: {command}"),
@@ -318,8 +368,74 @@ fn hello_response(request_id: Option<String>) -> NativeResponse {
         capabilities: Some(Capabilities {
             pause_resume: cfg!(unix),
             hls_info: true,
+            playlist_info: true,
         }),
         request_id,
+        ..NativeResponse::default()
+    }
+}
+
+/// Answer `playlist-info`: read a playlist the extension fetched and say what
+/// it offers.
+///
+/// The extension has the page's session and fetches; this parses, because
+/// ADR-0011 puts one implementation of "what a playlist means" in Rust and a
+/// picker must not reintroduce a second one. Unlike `download` this makes no
+/// request of its own — the text must be supplied — because it runs while the
+/// popup is open, for every master on the page, and a host-side fetch there
+/// would be a request the page's session may not even be able to make.
+fn playlist_info_response(request: &NativeRequest) -> NativeResponse {
+    let Ok(url) = crate::output::validate_url(&request.url) else {
+        return rejected(
+            ERROR_INVALID_REQUEST,
+            "playlist-info needs an http(s) url".to_string(),
+            request.request_id.clone(),
+            None,
+        );
+    };
+    let Some(text) = request.playlist_text.as_deref() else {
+        return rejected(
+            ERROR_INVALID_REQUEST,
+            "playlist-info needs playlist_text".to_string(),
+            request.request_id.clone(),
+            None,
+        );
+    };
+
+    let (kind, renditions, hls) = match crate::scraper::parse_playlist(text, &url) {
+        crate::scraper::Playlist::Master(master) => {
+            let default = master
+                .default_rendition()
+                .map(|rendition| rendition.url.clone());
+            let renditions = master
+                .renditions
+                .iter()
+                .map(|rendition| RenditionInfo {
+                    url: rendition.url.to_string(),
+                    bandwidth: rendition.bandwidth,
+                    width: rendition.width,
+                    height: rendition.height,
+                    codecs: rendition.codecs.clone(),
+                    audio_url: master
+                        .audio_for(rendition)
+                        .map(|audio| audio.url.to_string()),
+                    default: default.as_ref() == Some(&rendition.url),
+                })
+                .collect();
+            ("master", Some(renditions), None)
+        }
+        crate::scraper::Playlist::Media(info) => ("media", Some(Vec::new()), Some(info)),
+        crate::scraper::Playlist::Unusable => ("unusable", Some(Vec::new()), None),
+    };
+
+    NativeResponse {
+        event_type: EVENT_PLAYLIST_INFO,
+        ok: true,
+        state: Some(STATE_READY.to_string()),
+        request_id: request.request_id.clone(),
+        playlist_kind: Some(kind),
+        renditions,
+        total_segments: hls.map(|info| info.total_segments),
         ..NativeResponse::default()
     }
 }
@@ -354,6 +470,7 @@ fn status_response(
         capabilities: Some(Capabilities {
             pause_resume: cfg!(unix),
             hls_info: true,
+            playlist_info: true,
         }),
         status: Some(report),
         request_id,
@@ -820,6 +937,15 @@ fn download(
         threads: request.threads,
         quiet: true,
         playlist_text: request.playlist_text.clone(),
+        // Validated as a URL here; whether the master actually offers it is
+        // decided by `download_resolved`, which is the one place that has the
+        // parsed playlist to check against.
+        rendition: request
+            .variant_url
+            .as_deref()
+            .map(crate::output::validate_url)
+            .transpose()?
+            .map(crate::scraper::RenditionChoice::Exact),
         keep_partial: request.keep_partial,
     };
     let info = task.hls_info.lock().ok().and_then(|info| *info);
