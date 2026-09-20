@@ -7,6 +7,13 @@ media URL at a time through FFmpeg. The extension scans the active page and
 uses a Rust native-messaging host so browser cookies, User-Agent, and Referer
 information can be forwarded to protected media servers.
 
+This file is the contributor guide: workflow, layout, rules, and the checks that
+must pass. What the product *does* is in
+[`docs/user-guide.md`](docs/user-guide.md), how it is put together in
+[`docs/architecture.md`](docs/architecture.md), and why in
+[`docs/adr/`](docs/adr/README.md). Keep user-facing prose out of this file and
+out of `README.md`; both point at the docs instead.
+
 ## Planning, status, and handoffs
 
 The Linear project **Downer** is the source of truth for the roadmap, work in
@@ -78,17 +85,12 @@ it. Changing that ID breaks every installed add-on, as
 ## Architecture decisions
 
 Architectural decisions are recorded as ADRs under `docs/adr/`, numbered
-`NNNN-short-title.md`. ADR-0001 records the native messaging protocol
-contract, ADR-0002 cookie scoping and argv exposure, ADR-0003 where URL
-redaction happens, ADR-0004 the output collision policy, ADR-0005 the
-default output name, ADR-0006 FFmpeg version detection, ADR-0007 the
-structured FFmpeg command model, ADR-0008 relocatable native host
-installation, ADR-0009 setup diagnostics, and ADR-0010 resolving HLS master
-playlists, ADR-0011 one playlist parser, ADR-0012 control semantics, ADR-0013
-one download per host process, and ADR-0014 pairing a chosen rendition with its
-separately declared audio (which amends ADR-0010); KEI-63 backfills the
-decisions already embodied in the code and adds the rest of the documentation
-set.
+`NNNN-short-title.md`. [`docs/adr/README.md`](docs/adr/README.md) indexes them
+with a one-line summary and a status each, and
+[`docs/adr/template.md`](docs/adr/template.md) is the starting point for a new
+one. Take the next free number; records are never renumbered, and an accepted
+record is not edited except to add a status line pointing at whatever changed
+it.
 
 Any change to the native messaging protocol, the host process model, the
 FFmpeg command layer, discovery ownership, or control semantics requires an
@@ -131,10 +133,14 @@ ADR.
   Two things this file cannot fix: settings are read at session start, so a
   change needs a fresh session, and if an organization sets a claude.ai
   connector tool to `ask`, allow rules for it never take effect.
-- `docs/`: `protocol.md`, the native messaging contract implemented by
-  `src/native.rs` and `extension/task-protocol.js`, `e2e-firefox.md`, how the
-  real-Firefox tests work and where their browser comes from, and `adr/`, the
-  architecture decision records.
+- `docs/`: `user-guide.md` (install, first download, settings, controls, and
+  what Downer does not do) and `troubleshooting.md` (the same ground by
+  symptom), which are where user-facing prose belongs rather than `README.md`;
+  `architecture.md`, the components, data flow and trust boundaries;
+  `protocol.md`, the native messaging contract implemented by `src/native.rs`
+  and `extension/task-protocol.js`; `e2e-firefox.md`, how the real-Firefox tests
+  work and where their browser comes from; and `adr/`, the architecture decision
+  records, indexed by `adr/README.md`.
 - `tests/`: CLI and native-host integration tests (`tests/cli.rs`,
   `tests/native_host.rs`), the extension's Node tests (`tests/extension/`),
   and fixtures shared by both languages: HLS playlists in
@@ -160,40 +166,34 @@ ADR.
 
 ## Architecture map
 
-1. `extension/content.js` scans page DOM and resource entries, and can fetch an
-   HLS playlist using the source page's browser session. The detection itself
-   lives in `extension/media-scan.js`, whose attribute list is kept identical to
-   `src/scraper.rs::extract_media_urls` so the CLI and the extension find the
-   same media on the same page.
-2. `extension/popup.js` starts downloads and renders status/control events. Which
-   persisted jobs a popup renders is decided by `extension/job-view.js`: only
-   media listed on the page being viewed, and only jobs begun in the current
-   browser session may set the headline status.
-3. `extension/background.js` owns persistent jobs, cookies, playlist metadata,
-   native task channels, progress state, and log history. Logs are kept under
-   one `downloadLogs:<jobId>` key each rather than inside the job records, and
-   storage writes and log broadcasts are coalesced, so a long HLS download does
-   not rewrite all state per line of FFmpeg output. It reconciles jobs
-   that were still active when the browser closed, since native ports do not
-   survive a restart.
-4. `extension/job-state.js` defines the job state machine once: states, legal
-   transitions, the terminal set, and the predicates the popup renders from.
-   The extension's terminal set is wider than the protocol's — `preparing` and
-   `interrupted` are extension-only and never appear on the wire.
-5. `extension/task-protocol.js` correlates native control acknowledgements and
-   terminal responses by job/request ID.
-6. `src/native.rs` implements the Firefox native-messaging protocol, launches
-   download workers, forwards progress/log events, and controls FFmpeg.
-7. `src/ffmpeg.rs` invokes FFmpeg without a shell, parses `-progress` output,
-   captures stderr, and supports Unix pause/resume signals.
-8. `src/scraper.rs` resolves source-page media URLs and parses HLS metadata.
-9. `src/output.rs` validates URLs, infers and sanitizes filenames from the URL
-   and the caller's `NamingHints`, and applies the `OnConflict` policy.
-10. `src/host.rs` registers and removes the Firefox native messaging host: the
-   manifest, the launcher that supplies `--native-host` because Firefox does
-   not, the stable binary location outside the checkout, and the host config
-   file recording an FFmpeg path for a browser-launched host that has no
-   `DOWNER_FFMPEG`.
+Where things live. The data flow from page to FFmpeg, the trust and session
+boundaries, the job state machine, and the reasoning behind each component are
+in [`docs/architecture.md`](docs/architecture.md); this list is here so a
+session can find the right file without opening it.
+
+| File | Owns |
+| --- | --- |
+| `extension/media-scan.js` | Detection rules. Kept identical to `src/scraper.rs::extract_media_urls`, pinned by `tests/fixtures/media-extensions.json`. |
+| `extension/content.js` | Page DOM and resource-entry scan; fetches an HLS playlist in the page's own session. |
+| `extension/popup.js` | Starts downloads, renders status and controls. Holds no authoritative state. |
+| `extension/job-view.js` | Which persisted jobs a popup renders, and which may set the headline status. |
+| `extension/background.js` | Jobs, cookies, playlist metadata, native ports, progress, log history, and restart reconciliation. |
+| `extension/job-state.js` | The job state machine: states, transitions, terminal set, render predicates. |
+| `extension/task-protocol.js` | Correlates native acknowledgements and terminal responses by job/request ID. |
+| `src/main.rs` | Entry point; pre-parses `--native-host` before clap (ADR-0019). |
+| `src/native.rs` | The native messaging host: framing, handshake, workers, progress, control. |
+| `src/ffmpeg.rs` | Invokes FFmpeg without a shell, parses `-progress`, captures stderr, pause/resume signals. |
+| `src/scraper.rs` | Resolves source-page media URLs and parses HLS playlists. The only playlist parser. |
+| `src/output.rs` | URL validation, filename inference and sanitizing, the `OnConflict` policy. |
+| `src/host.rs` | Native-host registration: manifest, launcher, durable binary location, recorded FFmpeg path. |
+
+Two things in that table are easy to break and worth knowing before you edit
+them. The detection rules and the redaction rule are each implemented once per
+language and pinned by a shared fixture, so changing one side alone fails the
+other side's tests. And `background.js` keeps logs under a
+`downloadLogs:<jobId>` key of their own, with storage writes and log broadcasts
+coalesced, so a long HLS download does not rewrite all state per line of FFmpeg
+output.
 
 ## Required workflow
 

@@ -8,45 +8,83 @@ playlists (`.m3u8`); the best discovered media URL is then passed through the
 same download/remux path. Direct files, segmented streams, and remuxing are
 supported when FFmpeg can stream-copy the input.
 
-HLS playlists with nonstandard segment names, including JPEG-named video
-segments, are accepted by disabling FFmpeg's strict HLS segment-extension
-matching.
-
 The repository also includes a Firefox WebExtension. The extension scans the
 currently loaded page, including media discovered by its player, and delegates
-the actual download to the Rust/FFmpeg native host. This lets the page's
-already-established browser session be used for protected media.
+the actual download to the Rust/FFmpeg native host — so the page's
+already-established browser session can be used for protected media.
+
+## Documentation
+
+| | |
+| --- | --- |
+| [User guide](docs/user-guide.md) | Install, first download, settings, controls, where files go, and what Downer does not do |
+| [Troubleshooting](docs/troubleshooting.md) | Organized by symptom, from "native host disconnected" to where the logs are |
+| [Architecture](docs/architecture.md) | Components, data flow, and the trust and session boundaries |
+| [Native messaging protocol](docs/protocol.md) | The contract between the extension and the host |
+| [Decision records](docs/adr/README.md) | Why things are the way they are |
+| [End-to-end tests](docs/e2e-firefox.md) | The real-Firefox harness and where its browser comes from |
+| [`AGENTS.md`](AGENTS.md) | Contributor workflow, repository layout, and the required checks |
 
 ## Prerequisites
 
-- Rust and Cargo, to build the CLI. The minimum supported Rust version is
-  **1.88** (declared as `rust-version` in `Cargo.toml`); it is the floor
-  required by the dependency versions pinned in `Cargo.lock`.
-- FFmpeg available at runtime as `ffmpeg` on `PATH`, or supplied with
-  `--ffmpeg /path/to/ffmpeg`. The minimum supported FFmpeg version is **7.1**,
+- **FFmpeg 7.1 or newer** at runtime, as `ffmpeg` on `PATH` or supplied with
+  `--ffmpeg /path/to/ffmpeg`. It is not bundled
+  ([ADR-0015](docs/adr/0015-ffmpeg-as-the-only-engine.md)). The minimum is 7.1
   because HLS playlists with nonstandard segment names are downloaded with
   `-extension_picky 0`, which older builds do not accept. Development and
   testing currently use FFmpeg 9.0.1.
 
-  The version is detected at startup. An older FFmpeg is **warned about, not
-  refused**: those two 7.1-only options are omitted so the download can proceed,
-  because the strict segment-extension checking they switch off arrived in 7.1
-  too and 6.x does not need them. It remains unsupported — anything else that
-  needs 7.1 will still fail, and the failure names the version you have and the
-  minimum. See [ADR-0006](docs/adr/0006-ffmpeg-version-detection.md).
+  An older FFmpeg is **warned about, not refused** — the two 7.1-only options
+  are omitted so the download can proceed. It remains unsupported. See
+  [ADR-0006](docs/adr/0006-ffmpeg-version-detection.md).
 
-The CLI and the Firefox extension share one product version; see "Versioning"
-in `AGENTS.md`. User-visible changes are listed in `CHANGELOG.md`.
+- **Rust 1.88 or newer** to build the CLI (declared as `rust-version` in
+  `Cargo.toml`); it is the floor required by the versions pinned in
+  `Cargo.lock`.
 
-## Handy Make commands
+- **macOS or Linux.** Windows is not supported: it registers native hosts in the
+  registry, and pause/resume use Unix signals.
 
-On macOS with Homebrew, install the prerequisites and verify them with:
+## Quick start
 
 ```sh
-make setup
+cargo install --path .
+downer 'https://example.com/video.mp4'
+downer 'https://example.com/live/index.m3u8' --dir ./downloads
+downer 'https://example.com/watch/video' --dir ./downloads
 ```
 
-Other useful targets:
+On macOS with Homebrew, `make setup` installs the `rust` and `ffmpeg` formulae
+when they are missing and then verifies the toolchain.
+
+Check that everything a download needs is in place:
+
+```sh
+downer doctor --dir ~/Downloads
+```
+
+Full options, cookies for protected media, quality selection, output naming and
+exit codes are in the [user guide](docs/user-guide.md); `downer --help` lists
+every flag.
+
+## Firefox extension
+
+```sh
+make extension
+```
+
+That builds and registers the native host and packages the extension; load
+`extension/manifest.json` in Firefox from `about:debugging` → **This Firefox** →
+**Load Temporary Add-on**. Open the source page, let its video player load, then
+click the Downer toolbar button and choose a discovered media URL.
+
+The extension is unsigned and not on AMO, so a **permanent** install needs
+Firefox Developer Edition, Nightly or ESR — **Release and Beta cannot install it
+permanently** and must use the temporary path above. Both routes, the `.xpi`
+from each release and its checksum verification are in the
+[user guide](docs/user-guide.md#3-install-the-extension).
+
+## Handy Make commands
 
 ```sh
 make check
@@ -56,11 +94,6 @@ make install
 make extension-xpi
 make clean
 ```
-
-`make setup` installs the `rust` and `ffmpeg` Homebrew formulae when they are
-missing, then runs the toolchain check. On other platforms, install Rust and
-FFmpeg using the platform's package manager and use the same build/test
-targets.
 
 `make check` does not need a browser. The end-to-end tests, which install the
 extension into a real headless Firefox, are a separate step:
@@ -72,312 +105,11 @@ make extension-e2e
 
 See [`docs/e2e-firefox.md`](docs/e2e-firefox.md).
 
-## Firefox extension
-
-Build and register the native host, then load the `extension/` directory in
-Firefox from `about:debugging` → **This Firefox** → **Load Temporary Add-on**
-by selecting `extension/manifest.json`:
-
-```sh
-make extension
-```
-
-Open the source page in Firefox, let its video player load, then click the
-Downer toolbar button and choose a discovered media URL. The extension uses
-Firefox cookies for the media host and sends them to the native host only for
-the selected download. The native host defaults to the operating system's
-Downloads directory; configure another path from the extension's Settings
-page if needed.
-
-### Installing the extension
-
-The extension is not published on [addons.mozilla.org](https://addons.mozilla.org)
-(AMO) and is not signed. That decides which of the two install paths is open to
-you.
-
-**Temporarily, in any Firefox.** `about:debugging` → **This Firefox** → **Load
-Temporary Add-on**, selecting `extension/manifest.json` (or the `.xpi`).
-`web-ext run` does the same from a command line. A temporary add-on bypasses
-signature enforcement in every edition, and disappears when Firefox closes.
-This is the development path and the one `make extension` sets up.
-
-**Permanently, from the `.xpi`.** Every tagged release attaches
-`downer-<version>.xpi` to its [GitHub Release](../../releases); `make
-extension-xpi` builds the same file into `dist/` from a checkout. Installing it
-so that it survives a restart needs a Firefox that can be told not to require
-signatures:
-
-1. Use **Developer Edition**, **Nightly**, or **ESR**. Firefox **Release and
-   Beta cannot install this add-on permanently** — they enforce add-on signing
-   and offer no override, so for them the temporary path above is the only one.
-2. In `about:config`, set `xpinstall.signatures.required` to `false`.
-3. Open `about:addons` → the gear icon → **Install Add-on From File…** and
-   pick the `.xpi`.
-
-The add-on ID is `downer@kz-hq.github.io`, and the native messaging host allows
-exactly that ID. Both are read from `extension/manifest.json`, so an XPI built
-from a checkout and a released one register the same way.
-
-Verify a downloaded release against the `SHA256SUMS` published beside it:
-
-```sh
-sha256sum -c SHA256SUMS      # shasum -a 256 -c SHA256SUMS on macOS
-```
-
-The extension package is built reproducibly, so `make extension-xpi` on the
-tagged commit produces a file with the same checksum as the released one.
-
-**If signing ever becomes worthwhile**, the route that fits a private tool is
-AMO *unlisted* signing: `web-ext sign --channel unlisted` with a free AMO
-account and an API key and secret. It returns a signed XPI that installs in
-Firefox Release without publishing anything to the AMO catalogue. It is
-deliberately not part of the release pipeline today — it would put a credential
-in CI for a tool with one user.
-
-### Installing the native host
-
-Firefox reaches the downloader through a native messaging host: a manifest in a
-per-user directory naming a program Firefox may launch, and the extension ID
-allowed to talk to it. `downer` registers itself:
-
-```sh
-cargo install --path .    # or use a released binary
-downer install-host
-```
-
-That copies the binary to a stable per-user location (`~/.local/share/downer/`
-on Linux, `~/Library/Application Support/downer/` on macOS) unless it is
-already somewhere durable such as `~/.cargo/bin`, writes a small launcher
-beside it, and points the Firefox manifest at the launcher. **The registration
-does not depend on this repository**, so the checkout can be moved or deleted
-afterwards. `downer install-host --link` registers the running binary where it
-is instead of copying it, which is right for a binary you keep in a fixed place
-yourself.
-
-### Checking the setup
-
-`downer doctor` reports whether everything a download needs is in place: the
-native host is registered with Firefox and its launcher still exists, FFmpeg
-runs and is new enough, and — with `--dir` — that downloads can be written
-where you want them.
-
-```sh
-downer doctor --dir ~/Downloads
-```
-
-Each check prints what was found and, when something is wrong, what to do about
-it. It exits `6` if any check **failed**; a **warning** exits `0`, because a
-warning means downloads still work. An FFmpeg older than the supported minimum
-is the usual warning: it downloads, with the caveats in
-[`docs/adr/0006-ffmpeg-version-detection.md`](docs/adr/0006-ffmpeg-version-detection.md).
-
-The same checks are available from the extension: **Settings → Check setup**
-runs them in the native host and shows the results, which is the place to look
-when a download fails before FFmpeg starts. The Settings page also has an
-**FFmpeg path** field — Firefox starts the native host with a minimal
-environment, so a `PATH` or `DOWNER_FFMPEG` set in a shell cannot reach it.
-
-Firefox launches the native host with a minimal environment, so `DOWNER_FFMPEG`
-is not available to it. If FFmpeg is somewhere the host would not look — it
-searches Homebrew's standard locations and then `PATH` — record it at install
-time:
-
-```sh
-downer install-host --ffmpeg /opt/ffmpeg/bin/ffmpeg
-```
-
-The path is stored in `~/.config/downer/config.json` (macOS:
-`~/Library/Application Support/downer/config.json`) and used unless
-`DOWNER_FFMPEG` overrides it.
-
-To reverse all of it:
-
-```sh
-downer uninstall-host             # manifest, launcher, and config
-downer uninstall-host --binary    # and the copied binary
-```
-
-Windows is not supported: it registers native hosts in the registry, and
-pause/resume use Unix signals.
-
-For development, `make extension-install` (part of `make extension`) builds the
-release binary and runs `downer install-host --dev`, which registers that build
-where it sits in `target/release` and labels the manifest as a development
-registration. Rebuilding is then enough; reinstalling is not needed.
-
-After choosing a media URL, the popup immediately shows a preparing or
-downloading state. For HLS, it reads the selected playlist through the source
-page's browser session and displays completed segments, total segments, and an
-estimated percentage. The native host also probes the playlist as a fallback.
-If the server blocks both session-aware probes, the download can still run but
-the segment total is unavailable and the popup explains why. Segment counts
-are estimates of completed HLS segments based on FFmpeg's output timestamp;
-the playlist supplies the total for VOD streams.
-
-While a download is active, the popup provides Pause, Resume, and Cancel
-controls.
-
-**Pause** suspends the FFmpeg process. FFmpeg is not told it has been paused,
-so the connections it holds open simply go idle — and servers close idle
-connections and expire signed segment URLs on their own schedule. A short pause
-is safe; a long one can cost the download. If that happens, the popup says the
-connection was lost while paused rather than reporting the media as
-undownloadable, and Retry starts the download again. Pause and Resume need Unix
-process signals, so the buttons appear on macOS and Linux and not elsewhere.
-
-**Cancel** stops the download immediately, on every platform the native host
-runs on, and works on a paused download without resuming it first. By default
-it also deletes what FFmpeg had written: a cancel means you did not want the
-file, and the fragment would not play. Settings has a toggle to keep it
-instead. A download that *fails* on its own always keeps its part-written file,
-whichever way that toggle is set — that fragment is the evidence for what went
-wrong, and it may be most of a long download.
-
-The full guarantees are in [docs/protocol.md](docs/protocol.md) and the
-reasoning in [ADR-0012](docs/adr/0012-control-semantics.md).
-
-The command line has no equivalent: `Ctrl-C` terminates `downer` outright, so
-nothing runs to clean up after it and there is no cancel policy to set.
-
-The Settings page includes a live FFmpeg log console. It keeps the most recent
-500 lines per download, supports filtering by download, and can clear the
-stored log history. Logs are useful for diagnosing server responses, playlist
-access, and FFmpeg conversion failures.
-
-The Settings page can also set an optional FFmpeg processing-thread count.
-Leave it blank for FFmpeg's automatic choice. This setting does not make HLS
-HTTP segment requests concurrent; that requires a separate segmented-download
-implementation.
-
-Build and run:
-
-```sh
-cargo install --path .
-downer 'https://example.com/video.mp4'
-downer 'https://example.com/live/index.m3u8' --dir ./downloads
-downer 'https://example.com/watch/video' --dir ./downloads
-downer 'https://example.com/video.mp4' --output ./downloads/video.mp4
-downer 'https://example.com/video.mp4' --output ./downloads/video.mp4 --overwrite
-downer 'https://example.com/live/index.m3u8' --dir ./downloads --name 'Episode 4'
-downer 'https://example.com/live/index.m3u8' --dir ./downloads --on-conflict fail
-downer 'https://example.com/live/master.m3u8' --rendition 720p
-downer 'https://example.com/live/master.m3u8' --rendition worst
-```
-
-### Choosing a quality
-
-A master playlist lists several renditions of the same video. Without
-`--rendition`, `downer` takes the highest bandwidth it declares — which is what
-it has always done, and what the extension does when you do not pick one.
-
-`--rendition` takes `best`, `worst`, a height such as `720p` (or `1280x720`, of
-which only the height is matched), or an exact variant URL. A rendition the
-playlist does not offer **stops the download** rather than quietly becoming a
-different one; a live playlist repackaged since you last looked is the case
-where that happens, and the remedy is to look again. Listing what a playlist
-offers, as machine-readable output, is discovery and belongs to a separate
-piece of work.
-
-In the extension, a master playlist with more than one rendition gets a
-**Quality** menu in the popup, defaulting to the same highest-bandwidth pick.
-A media playlist, or a master with one rendition, gets no menu.
-
-Where a master carries its audio as a separate rendition — common in modern
-packaging — the chosen video and that audio are handed to FFmpeg together, so
-picking a lower quality does not cost you the sound. See
-[ADR-0014](docs/adr/0014-pair-a-rendition-with-its-audio.md).
-
-### Where downloads go
-
-The **command line** writes to the current directory unless `--dir` or
-`--output` says otherwise. That is the normal thing for a command-line tool and
-is unchanged.
-
-The **extension** writes to the directory set on the Settings page. Left blank —
-the default — the native host uses your desktop's own download directory, or
-`~/Downloads` where the desktop has none. Linux only reports a download
-directory when XDG user-directory configuration is present
-(`~/.config/user-dirs.dirs`), which minimal installs and containers often lack;
-`~/Downloads` is what Firefox itself falls back to there, so downloads land
-beside the browser's rather than somewhere this project invented. The directory
-is created on first use.
-
-**Check setup** on the Settings page names the exact directory the host
-resolved, including when it does not exist yet. That is the answer to trust: it
-comes from the host, not from a guess about your platform.
-
-### Output names and collisions
-
-By default, an inferred filename is written to the current directory. URL
-path names are percent-decoded and sanitized; playlist names become `.mp4`
-outputs.
-
-When the media URL's own filename is generic — `index`, `playlist`, `master`,
-`download`, `video`, `media`, or digits only, which covers most HLS playlists —
-the download is named **`video.mp4`**. That is deliberate: a fixed default is
-predictable, where a name derived from the page varies with the site, the
-locale, and whatever marketing put in the `<title>`.
-
-Naming a download after the page title is available, but **off by default**: use
-`--name` on the command line, or tick "Name downloads after the page title" on
-the extension's Settings page. A title is sanitized the same way a URL-derived
-name is and is truncated to 80 characters. Bear in mind that page titles can
-carry account or document names, which then appear in your Downloads folder.
-
-A collision is then resolved according to who chose the filename:
-
-| Situation | Default | Effect |
-| --- | --- | --- |
-| Inferred filename (`--dir`, or neither flag, and every extension download) | `rename` | Writes `video_2.mp4`, `video_3.mp4`, … beside the existing file. Nothing is replaced. |
-| Exact path (`--output`) | `fail` | Refuses with exit code 3 and leaves the existing file untouched. |
-
-`--on-conflict fail|rename|overwrite` overrides the default in either
-direction, and `--overwrite` remains shorthand for `--on-conflict overwrite`.
-The two cannot be combined. The extension exposes the same choice on its
-Settings page; `overwrite` there permanently discards the existing file.
-
-Because the default name repeats, renaming is the common path rather than the
-exception, and nothing is ever overwritten without being asked.
-
-The collision policy is recorded in
-[ADR-0004](docs/adr/0004-output-naming-and-collision-policy.md) and the naming
-default in
-[ADR-0005](docs/adr/0005-default-output-name-over-derived-one.md).
-Partial files are retained if FFmpeg fails for diagnostics. Resuming failed
-downloads is not promised in v1.
-
-For a source page that requires an existing browser session, supply the copied
-cookie header; it is used for both the page scraper and FFmpeg. There are three
-sources, in order of precedence:
-
-```sh
-downer 'https://example.com/watch/video' --cookie-file ~/.config/downer/cookie
-DOWNER_COOKIE='session=...' downer 'https://example.com/watch/video'
-downer 'https://example.com/watch/video' --cookie 'session=...'
-```
-
-`--cookie-file` reads the header from a file, ignoring surrounding whitespace,
-and `DOWNER_COOKIE` is used when neither option is given. Both keep the value
-out of shell history, which is why they are preferred over `--cookie`. Passing
-`--cookie` and `--cookie-file` together is an error (exit status `2`).
-
-Cookies are scoped to the media URL's host, so a server FFmpeg is redirected to
-and, for HLS, a cross-host segment server receive nothing.
-
-The value is still visible in FFmpeg's process arguments while a download runs:
-FFmpeg has no file-based input for headers or cookies. That limitation is
-recorded in
-[`docs/adr/0002-cookie-scoping-and-argv-exposure.md`](docs/adr/0002-cookie-scoping-and-argv-exposure.md).
-
-The scraper sends a browser-like User-Agent and forwards the source page as the
-FFmpeg Referer. It reports Cloudflare challenge responses explicitly; it does
-not attempt to solve JavaScript challenges automatically. In that case, a
-valid browser cookie or a direct signed media URL is required.
-
-Use `downer --help` for all options. Exit status `2` indicates invalid input,
-`3` an output-path problem, `4` an FFmpeg that is unavailable or older than the
-supported minimum, `5` a media or FFmpeg failure, and `6` a failing setup check
-from `downer doctor`.
+## Versioning
+
+The CLI and the Firefox extension share one product version; see "Versioning" in
+[`AGENTS.md`](AGENTS.md). User-visible changes are listed in
+[`CHANGELOG.md`](CHANGELOG.md).
 
 ## Releasing
 
@@ -405,27 +137,15 @@ Running the workflow from the Actions tab (`workflow_dispatch`) builds and
 uploads the same artifacts without creating a Release, which is how to check a
 change to it before tagging.
 
+## Known limitations
+
+Moved to the docs, where the remedies are: the list of what Downer does not do
+is in the [user guide](docs/user-guide.md#what-downer-does-not-do), and
+symptom-by-symptom help is in
+[troubleshooting](docs/troubleshooting.md).
+
 ## Roadmap, status, and handoffs
 
 Planned work, current status, known gaps, and handoff notes live in the Linear
-project **Downer** (https://linear.app/kzhq/project/downer-fb4196d41645), not
-in this repository. See `AGENTS.md` for the contributor workflow.
-
-## Known limitations
-
-- `--threads` controls FFmpeg processing, not concurrent HLS segment HTTP
-  requests.
-- HLS progress totals depend on successfully reading a VOD playlist. Cloudflare
-  or other session protections can prevent metadata access even when a browser
-  player can load the media.
-- Completed HLS segment counts are estimated from FFmpeg output duration.
-- DASH manifests (`.mpd`) are detected and listed, marked **experimental**.
-  Nothing has yet validated one against FFmpeg end to end.
-- A master's alternate **audio languages** are parsed but not offered: the
-  download takes the group's `DEFAULT=YES` rendition, which is what FFmpeg
-  already picked when handed the master. Subtitle renditions are ignored
-  entirely — FFmpeg cannot mux WebVTT into an MP4.
-- Batch downloads, authentication automation, provider-specific scraping,
-  robust resume, and live playlist scheduling are not implemented.
-- AES-128/SAMPLE-AES, byte ranges, discontinuities, and alternate HLS tracks
-  require validation before a concurrent segment scheduler can handle them.
+project **Downer** (https://linear.app/kzhq/project/downer-fb4196d41645), not in
+this repository. See [`AGENTS.md`](AGENTS.md) for the contributor workflow.
