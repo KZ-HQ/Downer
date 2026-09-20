@@ -148,6 +148,16 @@ The Rust package and the Firefox extension share one product version; see
 
 ### Changed
 
+- **The native host now serves one download per process, and says so.** That is
+  what the extension has always done — a native port per download, disconnected
+  on the terminal event — but the host kept a job map, a duplicate-job check and
+  an EOF path that cancelled *every* task, describing a multiplexing host that
+  neither side implemented. The registry is now a single slot; a `download`
+  arriving while one is running is rejected with `host_busy` rather than run
+  alongside. `job_id` stays on the wire, so a long-lived host remains possible
+  without a protocol break. Measured first: a host process costs 1.3 ms to
+  reach its handshake and ~3.5 MB idle, so there was nothing to amortise. See
+  `docs/adr/0013-one-download-per-host-process.md`.
 - **Cancelling a download now deletes what FFmpeg had written.** It used to be
   kept, and the popup said so — but nothing had decided that; it was what
   happened when nothing deleted the file. A cancel is the user saying they do
@@ -255,6 +265,11 @@ The Rust package and the Firefox extension share one product version; see
   so one very long line cannot fill `storage.local`.
 
 ### Fixed
+
+- A native messaging channel that settled by *failing* — a `rejected` answering
+  the request that starts a download — left its port open, so the host process
+  behind it stayed alive with nothing to do until garbage collection reached
+  it. Only the success path disconnected. Both do now.
 
 - An FFmpeg older than the supported 7.1 no longer fails every HLS download with
   an unreadable error. `-allowed_segment_extensions` and `-extension_picky` exist
