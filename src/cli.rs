@@ -57,6 +57,39 @@ pub struct Cli {
     #[arg(long, value_name = "SELECTOR")]
     pub rendition: Option<crate::scraper::RenditionChoice>,
 
+    /// List what the URL offers and exit without downloading.
+    ///
+    /// Prints one numbered row per candidate — its kind and URL — and, under a
+    /// master playlist, the renditions it declares. Exits 0 when something was
+    /// found, so a script can tell "nothing to download" from "the listing
+    /// worked".
+    #[arg(long, conflicts_with_all = ["select", "media"])]
+    pub list: bool,
+
+    /// Print machine-readable JSON instead of prose.
+    ///
+    /// Applies to `--list` and to the result of a download (`path`, `engine`,
+    /// `bytes`, `elapsed_ms`). The document is a stable interface carrying a
+    /// `schema_version`; see `docs/adr/0020-json-output-is-a-cli-interface.md`.
+    /// Failures stay on stderr with their exit code, which is the
+    /// machine-readable form a failure already has (ADR-0018).
+    #[arg(long)]
+    pub json: bool,
+
+    /// Download the Nth candidate rather than the first.
+    ///
+    /// Numbered as `--list` prints them, from 1. A number the source does not
+    /// offer stops the run rather than falling back to the first.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    pub select: Option<u32>,
+
+    /// Download this exact candidate URL rather than the first.
+    ///
+    /// It must be one the source offers — `--list` prints them. To download a
+    /// URL on its own, pass it as the argument instead.
+    #[arg(long, value_name = "URL", conflicts_with = "select")]
+    pub media: Option<String>,
+
     /// FFmpeg executable to invoke (default: ffmpeg on PATH).
     #[arg(long, value_name = "PATH", default_value = "ffmpeg")]
     pub ffmpeg: PathBuf,

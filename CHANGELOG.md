@@ -12,6 +12,19 @@ The Rust package and the Firefox extension share one product version; see
 
 ### Added
 
+- **CLI discovery, selection and JSON output.** `downer URL --list` prints
+  every candidate a page offers — playlists first, then files, with a master
+  playlist's renditions under it — and exits without downloading. `--select N`
+  or `--media URL` downloads one other than the first; naming one the page does
+  not offer stops the run rather than quietly falling back. `--json` makes both
+  the listing and a download's result machine-readable (`path`, `engine`,
+  `bytes`, `elapsed_ms`), and that output is a stable interface carrying a
+  `schema_version` — [ADR-0020](docs/adr/0020-json-output-is-a-cli-interface.md)
+  records what may change and why a failure is deliberately still an exit code
+  and a line on stderr rather than a JSON document. Default behaviour is
+  unchanged: without `--select` or `--media`, the first candidate is downloaded
+  exactly as before.
+
 - **A documentation set.** [`docs/user-guide.md`](docs/user-guide.md) covers
   install, a first download, settings, controls, where files go and what Downer
   does not do; [`docs/troubleshooting.md`](docs/troubleshooting.md) covers the

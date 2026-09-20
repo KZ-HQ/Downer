@@ -5,8 +5,9 @@
 `downer` downloads one HTTP(S) source or media URL per invocation through
 FFmpeg. Source pages are fetched and scanned for direct video files and HLS
 playlists (`.m3u8`); the best discovered media URL is then passed through the
-same download/remux path. Direct files, segmented streams, and remuxing are
-supported when FFmpeg can stream-copy the input.
+same download/remux path, or `--list` shows the whole list and `--select`
+picks another. Direct files, segmented streams, and remuxing are supported
+when FFmpeg can stream-copy the input.
 
 The repository also includes a Firefox WebExtension. The extension scans the
 currently loaded page, including media discovered by its player, and delegates

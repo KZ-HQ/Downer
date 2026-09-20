@@ -6,6 +6,8 @@ use std::{
 use assert_cmd::Command;
 use predicates::prelude::*;
 
+mod support;
+
 #[test]
 fn help_and_version_are_available() {
     Command::cargo_bin("downer")
@@ -940,4 +942,347 @@ fn doctor_with_an_explicit_directory_does_not_add_the_note() {
         !stdout.contains("note: this is the command line's"),
         "{stdout}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Discovery, selection and JSON output (KEI-62)
+//
+// These drive the real binary against a loopback HTTP server, because only
+// `http(s)://` URLs are accepted — a `file://` fixture cannot reach the source
+// page path at all. The server is `tests/support`, already serving the variant
+// and cookie-scope suites.
+// ---------------------------------------------------------------------------
+
+/// A page offering a master playlist and a plain file, in that order.
+#[cfg(unix)]
+fn source_page(server: &support::HeaderRecorder) -> String {
+    format!(
+        r#"<html><body>
+             <video data-src="{}"></video>
+             <source src="{}">
+           </body></html>"#,
+        server.url("/media/master.m3u8"),
+        server.url("/media/trailer.mp4")
+    )
+}
+
+#[cfg(unix)]
+fn master_playlist(server: &support::HeaderRecorder) -> String {
+    format!(
+        "#EXTM3U\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=400000,RESOLUTION=640x360,CODECS=\"avc1.4d401e,mp4a.40.2\"\n{}\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=1280x720,CODECS=\"avc1.64001f,mp4a.40.2\"\n{}\n",
+        server.url("/media/low.m3u8"),
+        server.url("/media/high.m3u8")
+    )
+}
+
+/// A server serving the page above, its playlist, and nothing else.
+#[cfg(unix)]
+fn discovery_server() -> support::HeaderRecorder {
+    let server = support::HeaderRecorder::start("127.0.0.1");
+    server.route(
+        "/watch",
+        support::Reply::text("text/html", source_page(&server)),
+    );
+    server.route(
+        "/media/master.m3u8",
+        support::Reply::text("application/vnd.apple.mpegurl", master_playlist(&server)),
+    );
+    server
+}
+
+/// `--list` on a source page names every candidate and exits 0 having
+/// downloaded nothing.
+#[cfg(unix)]
+#[test]
+fn list_prints_candidates_and_downloads_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake = fake_ffmpeg(temp.path(), false);
+    let server = discovery_server();
+
+    let assert = Command::cargo_bin("downer")
+        .unwrap()
+        .args([&server.url("/watch"), "--list"])
+        .arg("--ffmpeg")
+        .arg(&fake)
+        .env_remove("DOWNER_COOKIE")
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("  1  hls"),
+        "playlists come first:\n{stdout}"
+    );
+    assert!(stdout.contains("/media/master.m3u8"), "{stdout}");
+    assert!(stdout.contains("  2  file"), "{stdout}");
+    assert!(stdout.contains("/media/trailer.mp4"), "{stdout}");
+    // The renditions under the master are the point of listing it: a row
+    // saying only "hls" tells the user nothing they did not type.
+    assert!(stdout.contains("720p"), "{stdout}");
+    assert!(stdout.contains("360p"), "{stdout}");
+    assert!(
+        stdout.contains("(default)"),
+        "the 720p line is the default pick:\n{stdout}"
+    );
+    // Exiting 0 is the contract; not downloading is the other half of it.
+    assert!(
+        !temp.path().join("args").exists(),
+        "--list must not start FFmpeg"
+    );
+}
+
+/// The JSON listing is the shape `docs/adr/0020-*` promises, key for key.
+#[cfg(unix)]
+#[test]
+fn list_json_carries_the_documented_keys() {
+    let server = discovery_server();
+    let assert = Command::cargo_bin("downer")
+        .unwrap()
+        .args([&server.url("/watch"), "--list", "--json"])
+        .env_remove("DOWNER_COOKIE")
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let document: serde_json::Value =
+        serde_json::from_str(&stdout).expect("--list --json writes JSON and nothing else");
+
+    assert_eq!(
+        keys(&document),
+        vec!["candidates", "schema_version", "source"]
+    );
+    assert_eq!(document["schema_version"], 1);
+    assert!(document["source"].as_str().unwrap().ends_with("/watch"));
+
+    let candidates = document["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(
+        keys(&candidates[0]),
+        vec!["experimental", "index", "kind", "renditions", "url"]
+    );
+    assert_eq!(candidates[0]["index"], 1);
+    assert_eq!(candidates[0]["kind"], "hls");
+    assert_eq!(candidates[0]["experimental"], false);
+
+    // A plain file has nothing to choose between, so it carries no `renditions`
+    // key at all rather than an empty list suggesting an empty choice.
+    assert_eq!(
+        keys(&candidates[1]),
+        vec!["experimental", "index", "kind", "url"]
+    );
+    assert_eq!(candidates[1]["kind"], "file");
+
+    let renditions = candidates[0]["renditions"].as_array().unwrap();
+    assert_eq!(renditions.len(), 2);
+    assert_eq!(
+        keys(&renditions[0]),
+        vec!["bandwidth", "codecs", "default", "height", "url", "width"]
+    );
+    // Best first, never the master's own order — KEI-89 measured that the
+    // publisher's order puts the lowest first.
+    assert_eq!(renditions[0]["height"], 720);
+    assert_eq!(renditions[0]["bandwidth"], 900_000);
+    assert_eq!(renditions[0]["default"], true);
+    assert_eq!(renditions[1]["height"], 360);
+    assert_eq!(renditions[1]["default"], false);
+}
+
+/// The keys of a JSON object, sorted, so a test can assert the whole set rather
+/// than the fields it happened to think of.
+#[cfg(unix)]
+fn keys(value: &serde_json::Value) -> Vec<String> {
+    let mut names: Vec<String> = value
+        .as_object()
+        .expect("a JSON object")
+        .keys()
+        .cloned()
+        .collect();
+    names.sort();
+    names
+}
+
+/// `--select 2` downloads the second candidate rather than the first.
+#[cfg(unix)]
+#[test]
+fn select_downloads_the_named_candidate() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake = fake_ffmpeg(temp.path(), false);
+    let server = discovery_server();
+
+    Command::cargo_bin("downer")
+        .unwrap()
+        .args([&server.url("/watch"), "--select", "2", "--dir"])
+        .arg(temp.path().join("downloads"))
+        .arg("--ffmpeg")
+        .arg(&fake)
+        .env_remove("DOWNER_COOKIE")
+        .assert()
+        .success();
+
+    let args = recorded_args(temp.path());
+    assert!(
+        args.iter()
+            .any(|argument| argument.ends_with("trailer.mp4")),
+        "the second candidate reached FFmpeg: {args:?}"
+    );
+}
+
+/// `--media URL` picks the same candidate by name.
+#[cfg(unix)]
+#[test]
+fn media_downloads_the_named_candidate() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake = fake_ffmpeg(temp.path(), false);
+    let server = discovery_server();
+
+    Command::cargo_bin("downer")
+        .unwrap()
+        .args([
+            &server.url("/watch"),
+            "--media",
+            &server.url("/media/trailer.mp4"),
+            "--dir",
+        ])
+        .arg(temp.path().join("downloads"))
+        .arg("--ffmpeg")
+        .arg(&fake)
+        .env_remove("DOWNER_COOKIE")
+        .assert()
+        .success();
+
+    let args = recorded_args(temp.path());
+    assert!(
+        args.iter()
+            .any(|argument| argument.ends_with("trailer.mp4")),
+        "the named candidate reached FFmpeg: {args:?}"
+    );
+}
+
+/// A `--select` past the end of the list is refused, never quietly replaced
+/// with the first — the rule `VariantNotOffered` applies one level down, and it
+/// shares that error's exit code.
+#[cfg(unix)]
+#[test]
+fn a_candidate_that_is_not_offered_is_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake = fake_ffmpeg(temp.path(), false);
+    let server = discovery_server();
+
+    Command::cargo_bin("downer")
+        .unwrap()
+        .args([&server.url("/watch"), "--select", "9"])
+        .arg("--ffmpeg")
+        .arg(&fake)
+        .env_remove("DOWNER_COOKIE")
+        .assert()
+        .code(5)
+        .stderr(predicate::str::contains("2 candidates"));
+
+    Command::cargo_bin("downer")
+        .unwrap()
+        .args([
+            &server.url("/watch"),
+            "--media",
+            "https://elsewhere.test/other.mp4",
+        ])
+        .arg("--ffmpeg")
+        .arg(&fake)
+        .env_remove("DOWNER_COOKIE")
+        .assert()
+        .code(5)
+        .stderr(predicate::str::contains("does not offer it"));
+
+    assert!(
+        !temp.path().join("args").exists(),
+        "a refused choice starts no download"
+    );
+}
+
+/// A malformed `--media` is invalid input, not an unoffered candidate: the
+/// remedy is to fix the argument, which is what exit 2 means (ADR-0018).
+#[cfg(unix)]
+#[test]
+fn a_malformed_media_argument_is_an_input_error() {
+    let server = discovery_server();
+    Command::cargo_bin("downer")
+        .unwrap()
+        .args([&server.url("/watch"), "--media", "not-a-url"])
+        .env_remove("DOWNER_COOKIE")
+        .assert()
+        .code(2);
+}
+
+/// `--list` and a selection together is a usage error rather than one silently
+/// ignoring the other.
+#[test]
+fn list_and_select_cannot_be_used_together() {
+    Command::cargo_bin("downer")
+        .unwrap()
+        .args(["https://example.test/video.mp4", "--list", "--select", "2"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+/// A `--json` download writes one document and no prose, so stdout parses.
+#[cfg(unix)]
+#[test]
+fn json_download_result_carries_the_documented_keys() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake = fake_ffmpeg(temp.path(), false);
+
+    let assert = Command::cargo_bin("downer")
+        .unwrap()
+        .args(["https://example.test/video.mp4", "--json", "--dir"])
+        .arg(temp.path().join("downloads"))
+        .arg("--ffmpeg")
+        .arg(&fake)
+        .env_remove("DOWNER_COOKIE")
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let document: serde_json::Value =
+        serde_json::from_str(&stdout).expect("--json writes JSON and nothing else");
+
+    assert_eq!(
+        keys(&document),
+        vec![
+            "bytes",
+            "elapsed_ms",
+            "engine",
+            "path",
+            "schema_version",
+            "url"
+        ]
+    );
+    assert_eq!(document["schema_version"], 1);
+    assert_eq!(document["engine"], "ffmpeg");
+    assert_eq!(document["url"], "https://example.test/video.mp4");
+    // The fake writes "fake media"; the size is read off the finished file.
+    assert_eq!(document["bytes"], 10);
+    assert!(document["path"].as_str().unwrap().ends_with("video.mp4"));
+}
+
+/// A `--list` run against a page offering nothing is a media failure, exactly
+/// as a download of it would be: the exit code says "no media here", and
+/// listing does not invent a success out of an empty list.
+#[cfg(unix)]
+#[test]
+fn listing_a_page_with_no_media_fails_like_a_download() {
+    let server = support::HeaderRecorder::start("127.0.0.1");
+    server.route(
+        "/empty",
+        support::Reply::text("text/html", "<html><body>nothing here</body></html>"),
+    );
+
+    Command::cargo_bin("downer")
+        .unwrap()
+        .args([&server.url("/empty"), "--list"])
+        .env_remove("DOWNER_COOKIE")
+        .assert()
+        .code(5)
+        .stderr(predicate::str::contains("no supported m3u8"));
 }

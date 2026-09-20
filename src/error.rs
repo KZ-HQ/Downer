@@ -22,6 +22,14 @@ pub enum DownerError {
     /// happens when a live master is repackaged between being listed and being
     /// chosen, and the remedy is to look again.
     VariantNotOffered(String),
+    /// A `--select` or `--media` named a candidate the source does not offer.
+    ///
+    /// Refused rather than falling back to the first, for the reason
+    /// [`Self::VariantNotOffered`] refuses one level down: downloading
+    /// something other than what was named is invisible to the script that
+    /// named it. A page whose markup changed between being listed and being
+    /// chosen is when this happens, and the remedy is to list it again.
+    CandidateNotOffered(String),
     /// A cookie could not be read from the requested source. The message names
     /// the source, never the value.
     CookieSource(String),
@@ -85,6 +93,9 @@ impl fmt::Display for DownerError {
                 f,
                 "the playlist does not offer that rendition: {url} (it may have changed since it was listed; look again)"
             ),
+            Self::CandidateNotOffered(message) => {
+                write!(f, "no such candidate: {message}")
+            }
             Self::CookieSource(message) => write!(f, "could not read cookie: {message}"),
             Self::NativeIo(error) => write!(f, "native messaging I/O error: {error}"),
             Self::Host(message) => write!(f, "native host installation failed: {message}"),
