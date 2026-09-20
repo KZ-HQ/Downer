@@ -178,3 +178,19 @@ test("a protocol mismatch says to update a build, not to re-register the host", 
     "the generic registration advice would not fix a version mismatch"
   );
 });
+
+test("KEI-65: keeping part-written files is off by default and round-trips", async () => {
+  const page = await loadOptions({});
+  assert.equal(
+    page.field("keep-partial").checked,
+    false,
+    "cancelling deletes the fragment unless the user says otherwise"
+  );
+
+  page.field("keep-partial").checked = true;
+  await page.save();
+  assert.equal(page.saved().at(-1).keepPartial, true);
+
+  const stored = await loadOptions({ settings: { keepPartial: true } });
+  assert.equal(stored.field("keep-partial").checked, true);
+});

@@ -115,25 +115,45 @@ function renderDownloadStatus(job) {
   }
 
   const busy = isBusy(job.state);
-  row.pause.hidden = !busy || !canPause(job.state);
-  row.resume.hidden = !busy || !canResume(job.state);
+  // Pause and Resume rest on Unix process signals, which the host reports for
+  // itself in the `hello` handshake. A host that cannot do it gets no buttons
+  // rather than buttons that can only answer `control_failed`; Cancel works
+  // everywhere. Absent capabilities mean a host too old to say, which is a host
+  // that does support them — the field arrived long after the commands did.
+  const canSignal = job.capabilities?.pause_resume !== false;
+  row.pause.hidden = !busy || !canPause(job.state) || !canSignal;
+  row.resume.hidden = !busy || !canResume(job.state) || !canSignal;
   row.cancel.hidden = !busy || !canCancel(job.state);
-  row.pause.disabled = !canPause(job.state);
-  row.resume.disabled = !canResume(job.state);
+  row.pause.disabled = !canPause(job.state) || !canSignal;
+  row.resume.disabled = !canResume(job.state) || !canSignal;
   row.cancel.disabled = !canCancel(job.state);
 
   if (job.state === "completed") {
     showStatus(`Download complete: ${job.path}`);
     downloadStatusElement.textContent = "The media file is ready.";
+  } else if (job.state === "failed" && job.errorCode === "resume_failed") {
+    // The input is fine; the connections FFmpeg was holding while stopped are
+    // not. Saying so is the difference between "retry this" and "this will
+    // never work" — see docs/adr/0012-control-semantics.md.
+    showStatus("Could not resume: the connection was lost while paused.");
+    downloadStatusElement.textContent =
+      "Retry starts the download again from the beginning. The part-written file was kept.";
   } else if (job.state === "failed") {
     showStatus(job.error || "Download failed.");
-    downloadStatusElement.textContent = "Download failed. You can retry.";
+    downloadStatusElement.textContent = "Download failed. You can retry. The part-written file was kept.";
   } else if (job.state === "cancelled") {
     showStatus("Download cancelled.");
-    downloadStatusElement.textContent = "The partial file was kept for diagnostics.";
+    // What actually happened to the fragment, from the policy this job ran
+    // under — not from the setting as it stands now.
+    downloadStatusElement.textContent = job.keepPartial
+      ? "The part-written file was kept."
+      : "The part-written file was deleted.";
   } else if (job.state === "paused") {
     showStatus("Download paused.");
-    downloadStatusElement.textContent = "Resume or cancel this download.";
+    // Said here rather than in the docs only: this is the moment the user is
+    // deciding how long to leave it.
+    downloadStatusElement.textContent =
+      "Resume or cancel this download. A long pause can break the connection.";
   } else if (job.state === "cancelling") {
     showStatus("Cancelling download…");
     downloadStatusElement.textContent = "FFmpeg is stopping; please wait.";

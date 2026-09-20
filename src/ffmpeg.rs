@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     process::{ChildStderr, Command, Stdio},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
     },
     thread,
@@ -175,6 +175,27 @@ pub struct ProcessControl {
     child: Arc<Mutex<Option<std::process::Child>>>,
     cancelled: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
+    /// Set when a resume signals a live FFmpeg, cleared as soon as FFmpeg
+    /// reports a later output timestamp. While it is set, FFmpeg has been told
+    /// to continue but has not yet shown that it can: a failure in that window
+    /// is a resume failure, not an ordinary one. See
+    /// `docs/adr/0012-control-semantics.md`.
+    resume_pending: Arc<AtomicBool>,
+    /// Whether the cancel came from the user or from the host shutting down.
+    ///
+    /// Both stop FFmpeg the same way; they mean opposite things about the file.
+    /// A requested cancel is the user saying they do not want it. A shutdown —
+    /// EOF on the native port, which is what closing Firefox looks like — is
+    /// nobody saying anything, and the extension already promises that such a
+    /// job keeps what it had ("Interrupted by browser restart; partial file
+    /// kept"). See `docs/adr/0012-control-semantics.md`.
+    cancelled_for_shutdown: Arc<AtomicBool>,
+    /// The latest `out_time_ms` FFmpeg has reported, and the value it stood at
+    /// when the last resume was issued. Elapsed output is the only evidence
+    /// that reaches this layer that segments are arriving again; the clock is
+    /// not, because a paused process keeps no wall-clock promises.
+    out_time_ms: Arc<AtomicU64>,
+    resume_out_time_ms: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -189,10 +210,35 @@ impl ProcessControl {
             child: Arc::new(Mutex::new(None)),
             cancelled: Arc::new(AtomicBool::new(false)),
             paused: Arc::new(AtomicBool::new(false)),
+            resume_pending: Arc::new(AtomicBool::new(false)),
+            cancelled_for_shutdown: Arc::new(AtomicBool::new(false)),
+            out_time_ms: Arc::new(AtomicU64::new(0)),
+            resume_out_time_ms: Arc::new(AtomicU64::new(0)),
         }
     }
 
+    /// Stop the download because the user asked. The part-written file is the
+    /// caller's to dispose of; see `DownloadOptions::keep_partial`.
     pub fn cancel(&self) -> Result<(), String> {
+        self.stop()
+    }
+
+    /// Stop the download because the host is going away, not because anyone
+    /// asked. Identical to [`ProcessControl::cancel`] except that the
+    /// part-written file is always kept.
+    pub fn cancel_for_shutdown(&self) -> Result<(), String> {
+        self.cancelled_for_shutdown.store(true, Ordering::SeqCst);
+        self.stop()
+    }
+
+    /// Whether this download was cancelled by a request rather than by the host
+    /// shutting down. The only cancel whose part-written file is up for
+    /// deletion.
+    pub fn cancelled_by_request(&self) -> bool {
+        self.is_cancelled() && !self.cancelled_for_shutdown.load(Ordering::SeqCst)
+    }
+
+    fn stop(&self) -> Result<(), String> {
         self.cancelled.store(true, Ordering::SeqCst);
         let mut child = self
             .child
@@ -219,7 +265,51 @@ impl ProcessControl {
             return Err("download is already cancelled".to_string());
         }
         self.paused.store(false, Ordering::SeqCst);
-        self.signal_if_running(unix_signal::CONT)
+        // Record the mark *before* signalling, so progress that arrives in the
+        // race between the two still counts as progress after the resume.
+        self.resume_out_time_ms
+            .store(self.out_time_ms.load(Ordering::SeqCst), Ordering::SeqCst);
+        self.resume_pending.store(true, Ordering::SeqCst);
+        let result = self.signal_if_running(unix_signal::CONT);
+        if result.is_err() {
+            // Nothing was resumed, so nothing is owed proof that it recovered.
+            self.resume_pending.store(false, Ordering::SeqCst);
+        }
+        result
+    }
+
+    /// Record what FFmpeg last reported, and clear a pending resume once the
+    /// output timestamp has moved past where it stood when resume was issued.
+    ///
+    /// Called by the executor for every progress report, so no caller can
+    /// forget it.
+    ///
+    /// Measured against FFmpeg 6.1.1 with `-progress` at a 0.5 s stats period:
+    /// a process under `SIGSTOP` writes no progress block at all (4 blocks
+    /// before the stop, 4 after three seconds stopped, 10 three seconds after
+    /// `SIGCONT`), and one blocked on a stalled HTTP input writes none either.
+    /// So silence is the ordinary signal. The comparison still demands that the
+    /// timestamp *advance* rather than merely arrive, because a block that
+    /// repeats a timestamp says the same thing silence does.
+    pub fn note_progress(&self, out_time_ms: Option<u64>) {
+        let Some(out_time_ms) = out_time_ms else {
+            return;
+        };
+        self.out_time_ms.fetch_max(out_time_ms, Ordering::SeqCst);
+        if out_time_ms > self.resume_out_time_ms.load(Ordering::SeqCst) {
+            self.resume_pending.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// Whether FFmpeg was resumed and has not yet produced any further output.
+    ///
+    /// A download that ends in this state failed *at the resume*: while a
+    /// process is stopped its sockets sit idle, and CDNs close them and expire
+    /// signed segment URLs long before the user comes back. Worth naming
+    /// separately because the remedy differs — retrying works, where retrying
+    /// a genuinely broken input does not.
+    pub fn resume_pending(&self) -> bool {
+        self.resume_pending.load(Ordering::SeqCst)
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -480,6 +570,13 @@ where
             status: None,
             stderr: error,
         })?;
+    // Every progress report passes through the control first, so the resume
+    // tracking cannot be forgotten by a caller that supplies its own callback.
+    let progress_control = control.clone();
+    let progress = move |value: FfmpegProgress| {
+        progress_control.note_progress(value.out_time_ms);
+        progress(value);
+    };
     let progress_thread =
         progress_output.map(|output| thread::spawn(|| capture_progress(output, progress)));
     let stderr_thread =

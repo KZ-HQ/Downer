@@ -8,6 +8,7 @@ const ffmpegPathElement = document.getElementById("ffmpeg-path");
 const threadsElement = document.getElementById("ffmpeg-threads");
 const conflictElement = document.getElementById("on-conflict");
 const titleNamingElement = document.getElementById("name-from-title");
+const keepPartialElement = document.getElementById("keep-partial");
 const statusElement = document.getElementById("status");
 const filterElement = document.getElementById("job-filter");
 const logsElement = document.getElementById("logs");
@@ -74,15 +75,19 @@ function appendLogs(jobId, entries) {
 const DEFAULT_ON_CONFLICT = "rename";
 /** Kept identical to `DEFAULT_NAME_FROM_TITLE` in `background.js` (KEI-84). */
 const DEFAULT_NAME_FROM_TITLE = false;
+/** Kept identical to `default_keep_partial` in `tests/fixtures/protocol.json`. */
+const DEFAULT_KEEP_PARTIAL = false;
 
 browser.storage.local.get({
   outputDir: "",
   ffmpegPath: "",
   ffmpegThreads: null,
   onConflict: DEFAULT_ON_CONFLICT,
-  nameFromTitle: DEFAULT_NAME_FROM_TITLE
+  nameFromTitle: DEFAULT_NAME_FROM_TITLE,
+  keepPartial: DEFAULT_KEEP_PARTIAL
 }).then((settings) => {
   titleNamingElement.checked = settings.nameFromTitle === true;
+  keepPartialElement.checked = settings.keepPartial === true;
   outputElement.value = settings.outputDir;
   ffmpegPathElement.value = settings.ffmpegPath || "";
   threadsElement.value = Number.isInteger(settings.ffmpegThreads) ? settings.ffmpegThreads : "";
@@ -107,7 +112,8 @@ document.getElementById("save").addEventListener("click", async () => {
     ffmpegPath: ffmpegPathElement.value.trim(),
     ffmpegThreads,
     onConflict: conflictElement.value,
-    nameFromTitle: titleNamingElement.checked
+    nameFromTitle: titleNamingElement.checked,
+    keepPartial: keepPartialElement.checked
   });
   statusElement.textContent = "Saved.";
 });

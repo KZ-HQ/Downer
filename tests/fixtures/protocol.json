@@ -53,6 +53,7 @@
     "control_failed",
     "invalid_hls_info",
     "download_failed",
+    "resume_failed",
     "cancelled"
   ],
   "capabilities": [
@@ -65,6 +66,7 @@
     "overwrite"
   ],
   "default_on_conflict": "rename",
+  "default_keep_partial": false,
   "check_outcomes": [
     "pass",
     "warn",

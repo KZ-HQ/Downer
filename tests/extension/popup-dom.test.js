@@ -227,3 +227,77 @@ test("KEI-56: the newest job for a URL owns the row, and an older one cannot tak
   assert.equal(row.download.jobId, "new");
   assert.equal(row.pause.hidden, false, "and its controls are live");
 });
+
+test("KEI-65: a host that cannot pause offers no Pause or Resume button", async () => {
+  // The capability comes from the host's own `hello`, so a platform without
+  // Unix signals gets Cancel and nothing else. A button that can only answer
+  // `control_failed` is worse than no button.
+  const popup = await loadPopup({
+    candidates: [{ url: FEATURE, type: "video" }],
+    jobs: [{
+      id: "live-1",
+      url: FEATURE,
+      state: "downloading",
+      capabilities: { pause_resume: false, hls_info: true }
+    }],
+    sessionJobIds: ["live-1"]
+  });
+
+  const [row] = popup.rows();
+  assert.equal(row.pause.hidden, true);
+  assert.equal(row.resume.hidden, true);
+  assert.equal(row.cancel.hidden, false, "cancel works everywhere");
+});
+
+test("KEI-65: a host that says nothing about pausing still offers Pause", async () => {
+  // Absent is not false. `capabilities` arrived long after the commands did,
+  // so a host too old to report it is a host that supports them.
+  const popup = await loadPopup({
+    candidates: [{ url: FEATURE, type: "video" }],
+    jobs: [{ id: "live-1", url: FEATURE, state: "downloading" }],
+    sessionJobIds: ["live-1"]
+  });
+
+  const [row] = popup.rows();
+  assert.equal(row.pause.hidden, false);
+});
+
+test("KEI-65: a cancelled download reports what happened to the part-written file", async () => {
+  // The two policies say opposite things, and the popup must say the one this
+  // job actually ran under — `keepPartial` is pinned onto the job at start.
+  for (const [keepPartial, expected] of [
+    [false, "The part-written file was deleted."],
+    [true, "The part-written file was kept."]
+  ]) {
+    const popup = await loadPopup({
+      candidates: [{ url: FEATURE, type: "video" }],
+      jobs: [{ id: "cancelled-1", url: FEATURE, state: "cancelled", keepPartial }],
+      sessionJobIds: ["cancelled-1"]
+    });
+    assert.equal(popup.status(), "Download cancelled.");
+    assert.equal(popup.downloadStatus(), expected);
+  }
+});
+
+test("KEI-65: a download that died at the resume says so, and not just 'failed'", async () => {
+  const popup = await loadPopup({
+    candidates: [{ url: FEATURE, type: "video" }],
+    jobs: [{
+      id: "failed-1",
+      url: FEATURE,
+      state: "failed",
+      errorCode: "resume_failed",
+      error: "ffmpeg exited with status 1"
+    }],
+    sessionJobIds: ["failed-1"]
+  });
+
+  assert.equal(popup.status(), "Could not resume: the connection was lost while paused.");
+  assert.equal(
+    popup.downloadStatus(),
+    "Retry starts the download again from the beginning. The part-written file was kept."
+  );
+  const [row] = popup.rows();
+  assert.equal(row.download.text, "Retry", "the offer is still Retry");
+  assert.equal(row.download.disabled, false);
+});

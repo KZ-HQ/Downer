@@ -169,8 +169,29 @@ are estimates of completed HLS segments based on FFmpeg's output timestamp;
 the playlist supplies the total for VOD streams.
 
 While a download is active, the popup provides Pause, Resume, and Cancel
-controls. Pause and Resume use Unix process signals on macOS and Linux;
-cancellation is supported on all platforms supported by the native host.
+controls.
+
+**Pause** suspends the FFmpeg process. FFmpeg is not told it has been paused,
+so the connections it holds open simply go idle — and servers close idle
+connections and expire signed segment URLs on their own schedule. A short pause
+is safe; a long one can cost the download. If that happens, the popup says the
+connection was lost while paused rather than reporting the media as
+undownloadable, and Retry starts the download again. Pause and Resume need Unix
+process signals, so the buttons appear on macOS and Linux and not elsewhere.
+
+**Cancel** stops the download immediately, on every platform the native host
+runs on, and works on a paused download without resuming it first. By default
+it also deletes what FFmpeg had written: a cancel means you did not want the
+file, and the fragment would not play. Settings has a toggle to keep it
+instead. A download that *fails* on its own always keeps its part-written file,
+whichever way that toggle is set — that fragment is the evidence for what went
+wrong, and it may be most of a long download.
+
+The full guarantees are in [docs/protocol.md](docs/protocol.md) and the
+reasoning in [ADR-0012](docs/adr/0012-control-semantics.md).
+
+The command line has no equivalent: `Ctrl-C` terminates `downer` outright, so
+nothing runs to clean up after it and there is no cancel policy to set.
 
 The Settings page includes a live FFmpeg log console. It keeps the most recent
 500 lines per download, supports filtering by download, and can clear the

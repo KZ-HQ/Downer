@@ -23,6 +23,14 @@ const DEFAULT_ON_CONFLICT = "rename";
  * older host sees exactly what it saw before.
  */
 const DEFAULT_NAME_FROM_TITLE = false;
+/**
+ * Whether a cancelled download keeps what FFmpeg had written. Off: a cancel is
+ * the user saying they do not want this file, so the fragment goes with it.
+ * Kept identical to `default_keep_partial` in `tests/fixtures/protocol.json`
+ * and to the host's own default for an absent field. A *failed* download keeps
+ * its fragment regardless; see docs/adr/0012-control-semantics.md.
+ */
+const DEFAULT_KEEP_PARTIAL = false;
 
 /**
  * How long storage writes and log broadcasts are coalesced for.
@@ -203,6 +211,10 @@ async function nativeDownload(request, jobId) {
     channel.close(compatibility.error);
     throw new Error(compatibility.error);
   }
+  // What this host can actually do, straight from its own handshake. The popup
+  // hides Pause when `pause_resume` is false rather than offering a button that
+  // can only answer `control_failed`; see docs/adr/0012-control-semantics.md.
+  updateJob(jobId, { capabilities: compatibility.capabilities || {} });
   const completion = channel.start(request).finally(() => nativeTasks.delete(jobId));
   return { channel, completion };
 }
@@ -423,8 +435,13 @@ async function runDownload(message, jobId) {
       ffmpegPath: "",
       ffmpegThreads: null,
       onConflict: DEFAULT_ON_CONFLICT,
-      nameFromTitle: DEFAULT_NAME_FROM_TITLE
+      nameFromTitle: DEFAULT_NAME_FROM_TITLE,
+      keepPartial: DEFAULT_KEEP_PARTIAL
     });
+    // Pinned onto the job, not looked up again later: the popup's account of
+    // what happened to the part-written file has to match the policy this
+    // download actually ran under, even if the setting changes afterwards.
+    updateJob(jobId, { keepPartial: settings.keepPartial === true });
     const cookie = await cookieHeader(message.url);
     // Fetched here because only this context has the page's session; read by
     // the host, which owns what a playlist means. Totals come back as a
@@ -463,7 +480,8 @@ async function runDownload(message, jobId) {
       threads: Number.isInteger(settings.ffmpegThreads) && settings.ffmpegThreads > 0
         ? settings.ffmpegThreads
         : null,
-      playlist_text: playlistText
+      playlist_text: playlistText,
+      keep_partial: settings.keepPartial === true
     }, jobId);
     const response = await native.completion;
     if (response?.state === "cancelled") {
@@ -486,6 +504,10 @@ async function runDownload(message, jobId) {
     } else {
       const job = updateJob(jobId, {
         state: "failed",
+        // Kept alongside the message because the two say different things: the
+        // message is FFmpeg's, the code is why the job ended, and only the code
+        // can be branched on. `resume_failed` is the one the popup acts on.
+        errorCode: response?.error_code || null,
         error: response?.error || "Download failed.",
         finishedAt: Date.now()
       });

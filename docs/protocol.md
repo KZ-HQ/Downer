@@ -21,8 +21,9 @@ bytes of UTF-8 JSON.
 
 Both directions are limited to **1 MiB** per message. A length prefix larger
 than 1 MiB is unrecoverable — the host writes no response and exits with status
-`1` rather than reading a payload it cannot trust. EOF on stdin cancels every
-active download and exits `0`.
+`1` rather than reading a payload it cannot trust. EOF on stdin stops every
+active download and exits `0`. That is a shutdown, not a cancel anyone asked
+for, so each job keeps its part-written file whatever `keep_partial` said.
 
 All wire field names are `snake_case`. The extension's internal job objects are
 `camelCase`; the mapping lives in `handleNativeEvent` in `background.js` and is
@@ -62,7 +63,7 @@ extension correlates acknowledgements. The extension generates request IDs as
 | --- | --- | --- |
 | `hello` | — | `request_id` |
 | `status` | — | `request_id`, `output_dir`, `ffmpeg` |
-| `download` | `url` | `job_id`, `request_id`, `source_url`, `output_dir`, `title`, `on_conflict`, `overwrite`, `cookie`, `user_agent`, `threads`, `total_segments`, `total_duration_ms`, `playlist_text`, `ffmpeg` |
+| `download` | `url` | `job_id`, `request_id`, `source_url`, `output_dir`, `title`, `on_conflict`, `overwrite`, `keep_partial`, `cookie`, `user_agent`, `threads`, `total_segments`, `total_duration_ms`, `playlist_text`, `ffmpeg` |
 | `pause` | `job_id` | `request_id` |
 | `resume` | `job_id` | `request_id` |
 | `cancel` | `job_id` | `request_id` |
@@ -112,6 +113,16 @@ Notes:
   field existed. A value that is none of the three is refused with
   `invalid_request` rather than ignored, because a misread collision policy is
   the one misunderstanding that can destroy a file.
+* `keep_partial` decides what happens to the part-written file when the job is
+  **cancelled**. **Absent means delete it**: a cancel is the user saying they do
+  not want this file, and a fragment that will not play is litter they did not
+  ask for. `true` keeps it. This governs an explicit `cancel` only: a job
+  stopped because the port closed keeps its fragment either way, since nobody
+  asked for that one. A download that *fails* keeps its fragment either way
+  too — this field says nothing about that case, because the fragment is then
+  the evidence for the failure. Deletion is best-effort and never turns a clean
+  cancel into an error. See
+  [ADR-0012](adr/0012-control-semantics.md).
 * `overwrite` is **superseded by `on_conflict`** and kept for older clients.
   `on_conflict` wins when both are present; `overwrite: true` on its own still
   means overwrite. The extension sends `on_conflict` and leaves `overwrite`
@@ -255,6 +266,27 @@ starting ──► downloading ⇄ paused        │
   settled by `completed`, `failed`, or `cancelled`. Both states are defined in
   `extension/job-state.js`.
 
+### What the controls guarantee
+
+* **`pause`** suspends the FFmpeg process (`SIGSTOP`). It is not protocol-level
+  pausing: FFmpeg does not know it has been paused, and its open sockets sit
+  idle. A stopped FFmpeg produces no output and no progress events at all —
+  measured, not assumed; see [ADR-0012](adr/0012-control-semantics.md).
+  **A long pause can cost the download**, because servers close idle
+  connections and expire signed segment URLs on their own schedule. Pause is
+  available only where `capabilities.pause_resume` is true.
+* **`resume`** continues the process (`SIGCONT`). It is best-effort for the same
+  reason: nothing was held open on the user's behalf while it was stopped. A job
+  that fails with no FFmpeg output since the resume reports `resume_failed`
+  rather than `download_failed`, so a client can say the connection was lost and
+  offer a retry rather than declaring the media undownloadable.
+* **`cancel`** is immediate and works everywhere, including on a *stopped*
+  process — a paused download does not have to be resumed before it can be
+  cancelled. It is acknowledged with `cancelling` and settled by the `cancelled`
+  terminal event once FFmpeg has actually stopped.
+* `pause` and `cancel` may be sent before FFmpeg has started. The host applies
+  them as the process appears rather than losing them to the race.
+
 ## Ordering guarantees
 
 * `starting` precedes every other event for a job.
@@ -283,15 +315,19 @@ may change wording.
 | `task_not_active` | `control-error` | A control command named a job the host is not running. |
 | `invalid_hls_info` | `control-error` | `hls-info` supplied zero or missing segment totals. |
 | `control_failed` | `control-error` | The command was understood but could not be applied (for example pause on a non-Unix platform, or a job already cancelled). |
-| `download_failed` | `terminal` | FFmpeg failed, or the media could not be resolved. Partial output is kept. |
-| `cancelled` | `terminal` | The job was cancelled, by `cancel` or by EOF on stdin. |
+| `download_failed` | `terminal` | FFmpeg failed, or the media could not be resolved. The part-written file is kept. |
+| `resume_failed` | `terminal` | The job failed after a `resume`, with no further FFmpeg output since it. The input is fine; the connections FFmpeg was holding while stopped are not. The `state` is still `failed`. |
+| `cancelled` | `terminal` | The job was cancelled, by `cancel` or by EOF on stdin. A `cancel` deletes the part-written file unless `keep_partial` was `true`; EOF always keeps it, because nobody asked for that one. |
 
 ## Optional fields
 
 A client must tolerate any documented optional field being absent, and must
 ignore fields it does not recognise — that is how this protocol adds
 non-breaking fields without a version bump. `title` and `on_conflict` were added
-this way; ADR-0004 records why they did not bump the version. Absent is not the
+this way; ADR-0004 records why they did not bump the version. `keep_partial` and
+the `resume_failed` code were added the same way, for the reason ADR-0012 gives:
+a client that does not recognise `resume_failed` still reads `state: "failed"`,
+which is true. Absent is not the
 same as zero: `total_segments` absent means "unknown", while `0` would mean an
 empty playlist.
 
