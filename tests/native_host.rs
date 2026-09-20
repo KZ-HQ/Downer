@@ -1834,9 +1834,13 @@ fn downer_ffmpeg_overrides_the_recorded_path() {
 #[test]
 fn pause_sent_before_ffmpeg_starts_holds_the_download() {
     let temp = tempfile::tempdir().unwrap();
+    // Four seconds of work against a 1.5-second assertion window. The earlier
+    // 2 x 1.0s was too tight: under a loaded machine the pause could land after
+    // FFmpeg had already burned half its runtime, and the fake could finish
+    // inside the window even though the pause itself worked.
     let ffmpeg = FakeFfmpeg {
-        progress_updates: 2,
-        sleep_seconds: 1.0,
+        progress_updates: 40,
+        sleep_seconds: 0.1,
         ..FakeFfmpeg::default()
     }
     .install(temp.path());
@@ -2151,5 +2155,101 @@ fn a_download_stopped_by_the_port_closing_keeps_its_part_written_file() {
     assert!(
         partial.exists(),
         "a browser restart must not delete what was downloaded"
+    );
+}
+
+/// One host process serves one download, and says so rather than quietly
+/// starting a second.
+///
+/// The extension opens a native port per download, so this never happens in
+/// production — which is exactly why it needs pinning. Without it the host's
+/// behaviour for a second `download` would be "run both", contradicting the
+/// model ADR-0013 records, and nothing would notice.
+#[test]
+fn a_second_download_on_one_connection_is_refused_as_host_busy() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg {
+        progress_updates: 100,
+        sleep_seconds: 0.1,
+        ..FakeFfmpeg::default()
+    }
+    .install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    let mut host = NativeHost::start(&ffmpeg);
+
+    let mut first = download_request("https://example.test/video.mp4", &output_dir);
+    first["job_id"] = json!("job-first");
+    host.send(&first);
+    host.wait_for(|event| event["state"] == "downloading" && event["ok"] == json!(true));
+
+    // A *different* job, unlike `duplicate_job_ids_are_rejected…` above.
+    let mut second = download_request("https://example.test/other.mp4", &output_dir);
+    second["job_id"] = json!("job-second");
+    second["request_id"] = json!("job-second-start");
+    host.send(&second);
+
+    let (rejected, _) = host.wait_for(|event| event["request_id"] == json!("job-second-start"));
+    assert_envelope(&rejected, "rejected");
+    assert_eq!(rejected["ok"], json!(false));
+    assert_eq!(rejected["error_code"], json!("host_busy"), "{rejected}");
+    assert!(
+        protocol_strings("/error_codes").contains(&"host_busy".to_string()),
+        "host_busy is listed in tests/fixtures/protocol.json"
+    );
+    // Rejections name the job that was refused, and are never terminal.
+    assert_eq!(rejected["job_id"], json!("job-second"));
+    assert_eq!(
+        rejected["error"],
+        json!("this host is already running download job-first")
+    );
+    assert_eq!(
+        protocol()["max_downloads_per_connection"],
+        json!(1),
+        "the shared vocabulary states the model this test pins"
+    );
+
+    // The running download is untouched.
+    host.send(&json!({
+        "command": "cancel",
+        "protocol_version": 1,
+        "job_id": "job-first",
+        "request_id": "job-first-cancel",
+    }));
+    let (ack, _) = host.wait_for(|event| event["request_id"] == json!("job-first-cancel"));
+    assert_eq!(ack["ok"], json!(true), "{ack}");
+    assert_eq!(ack["state"], json!("cancelling"), "{ack}");
+    host.wait_for_state("cancelled");
+    assert!(
+        !output_dir.join("other.mp4").exists(),
+        "the refused download must never have started"
+    );
+}
+
+/// The slot is released when a job ends, so the process is idle — not wedged —
+/// until its port closes. Pins the other half of `host_busy`: the refusal is
+/// about a *running* job, not a used-up process.
+#[test]
+fn a_finished_download_frees_the_host_for_another_on_the_same_connection() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg::default().install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    let mut host = NativeHost::start(&ffmpeg);
+
+    let mut first = download_request("https://example.test/video.mp4", &output_dir);
+    first["job_id"] = json!("job-serial-1");
+    host.send(&first);
+    let (completed, _) = host.wait_for_state("completed");
+    assert_eq!(completed["ok"], json!(true));
+
+    let mut second = download_request("https://example.test/second.mp4", &output_dir);
+    second["job_id"] = json!("job-serial-2");
+    host.send(&second);
+    let (completed, _) = host.wait_for(|event| {
+        event["state"] == "completed" && event["job_id"] == json!("job-serial-2")
+    });
+    assert_eq!(completed["ok"], json!(true), "{completed}");
+    assert_eq!(
+        PathBuf::from(completed["path"].as_str().expect("a path")),
+        output_dir.join("second.mp4")
     );
 }

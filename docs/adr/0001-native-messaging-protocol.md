@@ -68,9 +68,10 @@ start the download and fails the job with a message naming both versions and
 telling the user to rebuild with `make extension`.
 
 The handshake costs one round trip over an already-open pipe and does no I/O,
-which matters because the current process model starts a host process per
-download. If the process model later becomes a long-lived host (KEI-53), the
-handshake becomes cheaper still, not more expensive.
+which matters because a host process is started per download — settled since as
+the process model, in
+[ADR-0013](0013-one-download-per-host-process.md), which measured that round
+trip at 1.3 ms from spawn to reply.
 
 Rejected alternative: a `status` command used for diagnostics only, with no
 enforcement. That leaves the mismatch to be discovered as a confusing download
@@ -157,6 +158,6 @@ test suites catches the same drift at the point where it would be introduced.
   tick. Not material.
 * Per AGENTS.md, any future change to the protocol, the host process model, the
   FFmpeg command layer, discovery ownership, or control semantics needs its own
-  ADR. The process model (KEI-53), pause/resume/cancel semantics (KEI-65), and
+  ADR. The process model (ADR-0013), pause/resume/cancel semantics (ADR-0012), and
   the job state machine (KEI-56) are owned elsewhere and deliberately not
   settled here; this ADR fixes only the wire contract.

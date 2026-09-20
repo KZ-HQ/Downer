@@ -173,11 +173,6 @@ var DownerTaskProtocol = (() => {
     /** Give up on a channel that never started a job (a failed handshake). */
     close(reason = "The native host connection was closed.") {
       this.fail(new Error(reason));
-      try {
-        this.port.disconnect();
-      } catch (_) {
-        // The port may already be gone; closing is best effort.
-      }
     }
 
     finish(response) {
@@ -185,7 +180,7 @@ var DownerTaskProtocol = (() => {
       this.settled = true;
       this.rejectPending("Download task finished before the command was acknowledged.");
       this.resolveCompletion(response);
-      this.port.disconnect();
+      this.disconnect();
     }
 
     fail(error) {
@@ -193,6 +188,26 @@ var DownerTaskProtocol = (() => {
       this.settled = true;
       this.rejectPending(error.message);
       this.rejectCompletion(error);
+      this.disconnect();
+    }
+
+    /**
+     * End the host process behind this channel.
+     *
+     * One host process serves one download and exits on EOF, so a settled
+     * channel that leaves its port open leaves a process alive with nothing to
+     * do — until garbage collection happens to reach it. Both ways a channel
+     * can settle disconnect, so that cannot depend on which one ran: a
+     * `rejected` answering the start request used to settle without
+     * disconnecting. See `docs/adr/0013-one-download-per-host-process.md`.
+     */
+    disconnect() {
+      try {
+        this.port.disconnect();
+      } catch (_) {
+        // Already gone — a disconnect we are reacting to, or a second call.
+        // Closing is best effort either way.
+      }
     }
 
     rejectPending(error) {

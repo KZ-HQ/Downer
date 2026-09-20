@@ -49,6 +49,7 @@
     "unsupported_command",
     "unsupported_protocol_version",
     "duplicate_job",
+    "host_busy",
     "task_not_active",
     "control_failed",
     "invalid_hls_info",
@@ -56,6 +57,7 @@
     "resume_failed",
     "cancelled"
   ],
+  "max_downloads_per_connection": 1,
   "capabilities": [
     "pause_resume",
     "hls_info"

@@ -21,8 +21,8 @@ bytes of UTF-8 JSON.
 
 Both directions are limited to **1 MiB** per message. A length prefix larger
 than 1 MiB is unrecoverable — the host writes no response and exits with status
-`1` rather than reading a payload it cannot trust. EOF on stdin stops every
-active download and exits `0`. That is a shutdown, not a cancel anyone asked
+`1` rather than reading a payload it cannot trust. EOF on stdin stops the
+running download and exits `0`. That is a shutdown, not a cancel anyone asked
 for, so each job keeps its part-written file whatever `keep_partial` said.
 
 All wire field names are `snake_case`. The extension's internal job objects are
@@ -73,7 +73,9 @@ Notes:
 
 * `job_id` is chosen by the extension. If `download` omits it the host
   generates one and reports it on the first event. `job_id` stays on the wire
-  even though the current process model runs one job per process.
+  even though one host process runs one download (see **Process model**): it is
+  what would let a long-lived host be introduced later without a protocol
+  break, since every event and control command already names its job.
 * `url` and `source_url` must be `http://` or `https://`.
 * `ffmpeg` on `download` and `status` names the FFmpeg the user chose on the
   Settings page. Absent, the host discovers one as it always has
@@ -238,6 +240,34 @@ ordinary upgrade skew between two halves that ship separately.
 `downer doctor` reports the same checks from the command line, minus those two:
 a CLI run speaks to no extension.
 
+## Process model
+
+**One host process runs one download.** The extension opens a native port per
+download and disconnects it on the terminal event, which is EOF for the host,
+which exits. `hello` and `status` use their own short-lived connection, because
+the user runs setup checks precisely when no download is going.
+
+What follows from that, and what a client may rely on:
+
+* A `download` arriving while this host already has a running job is
+  **rejected**, never queued and never run alongside: `duplicate_job` if it
+  names the running job, `host_busy` if it names another. Neither is terminal
+  and the running download is untouched.
+* A settled channel must disconnect its port. A host process whose port stays
+  open stays alive with nothing to do; EOF is the only shutdown path.
+* The host does **not** exit when a job ends. It releases its slot and waits for
+  the port to close, so a second `download` on a finished connection is served
+  rather than refused.
+* EOF stops the running job **without** deleting its part-written file,
+  whatever `keep_partial` said. That is a shutdown, not a cancel anyone asked
+  for (ADR-0012).
+* Concurrency is the client's to arrange, by opening more connections. Nothing
+  in this protocol multiplexes.
+
+`job_id` is on the wire anyway, so this is reversible. See
+[ADR-0013](adr/0013-one-download-per-host-process.md) for the measurements
+behind it and why a long-lived host was not chosen.
+
 ## Per-job state machine
 
 ```
@@ -312,6 +342,7 @@ may change wording.
 | `unsupported_command` | `rejected` | `command` is not one of the commands above. |
 | `unsupported_protocol_version` | `rejected` | `protocol_version` is neither the host's version nor absent. |
 | `duplicate_job` | `rejected` | A `download` named a `job_id` that is already running. The running job is untouched. |
+| `host_busy` | `rejected` | A `download` arrived while this host was already running a *different* job. One host process runs one download; see **Process model**. The running job is untouched. |
 | `task_not_active` | `control-error` | A control command named a job the host is not running. |
 | `invalid_hls_info` | `control-error` | `hls-info` supplied zero or missing segment totals. |
 | `control_failed` | `control-error` | The command was understood but could not be applied (for example pause on a non-Unix platform, or a job already cancelled). |
@@ -336,7 +367,8 @@ Ignoring an unrecognised *field* is not the same as tolerating an unrecognised
 distinction matters: its value decides whether an existing file survives, so a
 value outside the documented set is refused rather than guessed at. The
 documented set, like the rest of the vocabulary, is listed in
-`tests/fixtures/protocol.json` (`on_conflict_policies`, `default_on_conflict`).
+`tests/fixtures/protocol.json` (`on_conflict_policies`, `default_on_conflict`,
+`default_keep_partial`, `max_downloads_per_connection`).
 
 ## Testing
 

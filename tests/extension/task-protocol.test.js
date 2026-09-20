@@ -377,3 +377,54 @@ test("close fails an unstarted channel and disconnects the port", async () => {
     error: "Download task is no longer active."
   });
 });
+
+test("KEI-53: a rejected start disconnects the port, so its host process ends", async () => {
+  // One host process serves one download and exits on EOF. A settled channel
+  // that leaves its port open leaves a process alive with nothing to do, until
+  // garbage collection happens to reach it. This path used to do exactly that:
+  // `finish` disconnected, `fail` did not. See ADR-0013.
+  const { port, task } = channel();
+  const completion = task.start({ command: "download" });
+  port.emit({
+    ok: false,
+    type: "rejected",
+    state: "rejected",
+    error_code: "host_busy",
+    job_id: "job-1",
+    request_id: "job-1-start",
+    error: "this host is already running download job-0"
+  });
+
+  await assert.rejects(completion, /already running/);
+  assert.equal(port.disconnected, true, "a rejected start must end its host process");
+});
+
+test("KEI-53: a failed handshake disconnects the port too", async () => {
+  const { port, task } = channel();
+  task.close("The native host is too old.");
+  assert.equal(port.disconnected, true);
+});
+
+test("KEI-53: reacting to a disconnect does not throw trying to disconnect again", async () => {
+  // `handleDisconnect` settles via `fail`, which now disconnects. The port is
+  // already gone at that point, so the second call must be harmless.
+  const { port, task } = channel();
+  const completion = task.start({ command: "download" });
+  port.emitDisconnect();
+  await assert.rejects(completion, /native host disconnected/);
+  assert.equal(port.disconnected, true);
+});
+
+test("KEI-53: host_busy is a connection-level rejection, never a job state", () => {
+  assert.ok(protocol.error_codes.includes("host_busy"));
+  assert.ok(
+    !protocol.job_states.terminal.includes("host_busy")
+      && !protocol.job_states.active.includes("host_busy"),
+    "host_busy is an error code, not a state"
+  );
+  assert.equal(
+    protocol.max_downloads_per_connection,
+    1,
+    "the vocabulary states the process model host_busy enforces"
+  );
+});

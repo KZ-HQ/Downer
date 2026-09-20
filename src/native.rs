@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{
@@ -48,6 +47,11 @@ const ERROR_INVALID_REQUEST: &str = "invalid_request";
 const ERROR_UNSUPPORTED_COMMAND: &str = "unsupported_command";
 const ERROR_UNSUPPORTED_PROTOCOL_VERSION: &str = "unsupported_protocol_version";
 const ERROR_DUPLICATE_JOB: &str = "duplicate_job";
+/// A second `download` on a connection that is already running one. Distinct
+/// from `duplicate_job`, which is the same job named twice: this is a
+/// *different* job arriving at a host that serves one. See
+/// `docs/adr/0013-one-download-per-host-process.md`.
+const ERROR_HOST_BUSY: &str = "host_busy";
 const ERROR_TASK_NOT_ACTIVE: &str = "task_not_active";
 const ERROR_INVALID_HLS_INFO: &str = "invalid_hls_info";
 const ERROR_DOWNLOAD_FAILED: &str = "download_failed";
@@ -61,7 +65,15 @@ const ERROR_RESUME_FAILED: &str = "resume_failed";
 
 static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(1);
 type SharedOutput = Arc<Mutex<io::Stdout>>;
-type ActiveTasks = Arc<Mutex<HashMap<String, ActiveTask>>>;
+/// The one job this host process may be running.
+///
+/// A single slot, not a map: the extension opens a native port per download
+/// (`background.js::nativeDownload`) and this process serves exactly that one.
+/// A map here would describe a multiplexing host that nothing on either side
+/// implements. `job_id` still travels on the wire, so multiplexing could be
+/// reintroduced without a protocol break — but the code no longer claims to
+/// support it already. See `docs/adr/0013-one-download-per-host-process.md`.
+type ActiveJob = Arc<Mutex<Option<(String, ActiveTask)>>>;
 
 #[derive(Clone, Debug)]
 struct ActiveTask {
@@ -212,11 +224,11 @@ pub fn run_stdio() -> DownerResult<()> {
     let stdin = io::stdin();
     let mut input = stdin.lock();
     let output = Arc::new(Mutex::new(io::stdout()));
-    let tasks = Arc::new(Mutex::new(HashMap::new()));
+    let job = Arc::new(Mutex::new(None));
 
     loop {
         let Some(payload) = read_message(&mut input).map_err(DownerError::NativeIo)? else {
-            cancel_all(&tasks);
+            cancel_for_shutdown(&job);
             return Ok(());
         };
         let request = match serde_json::from_slice::<NativeRequest>(&payload) {
@@ -248,8 +260,7 @@ pub fn run_stdio() -> DownerResult<()> {
             continue;
         }
         if request.command == "download" {
-            start_download(request, output.clone(), tasks.clone())
-                .map_err(DownerError::NativeIo)?;
+            start_download(request, output.clone(), job.clone()).map_err(DownerError::NativeIo)?;
             continue;
         }
         let response = match request.command.as_str() {
@@ -259,8 +270,8 @@ pub fn run_stdio() -> DownerResult<()> {
                 request.ffmpeg.as_deref(),
                 request.request_id,
             ),
-            "pause" | "resume" | "cancel" => control_download(request, &tasks),
-            "hls-info" => update_hls_info(request, &tasks),
+            "pause" | "resume" | "cancel" => control_download(request, &job),
+            "hls-info" => update_hls_info(request, &job),
             command => rejected(
                 ERROR_UNSUPPORTED_COMMAND,
                 format!("unsupported native command: {command}"),
@@ -347,11 +358,7 @@ fn rejected(
     }
 }
 
-fn start_download(
-    request: NativeRequest,
-    output: SharedOutput,
-    tasks: ActiveTasks,
-) -> io::Result<()> {
+fn start_download(request: NativeRequest, output: SharedOutput, job: ActiveJob) -> io::Result<()> {
     let job_id = request.job_id.clone().unwrap_or_else(next_job_id);
     let initial_info = match (request.total_segments, request.total_duration_ms) {
         (Some(total_segments), Some(total_duration_ms)) if total_segments > 0 => Some(HlsInfo {
@@ -365,23 +372,34 @@ fn start_download(
         hls_info: Arc::new(Mutex::new(initial_info)),
         progress: Arc::new(Mutex::new(None)),
     };
-    let mut active = tasks
+    let mut active = job
         .lock()
         .map_err(|_| io::Error::other("download task registry is unavailable"))?;
-    if active.contains_key(&job_id) {
-        // Rejected rather than failed: the job named here is already running and
-        // must not be terminated by a duplicate start.
-        return send_response(
-            &output,
-            &rejected(
+    // Rejected rather than failed, either way: the job already running here must
+    // not be terminated by a second `download` arriving on its connection.
+    if let Some((running, _)) = active.as_ref() {
+        let (error_code, error) = if running == &job_id {
+            // The same job named twice.
+            (
                 ERROR_DUPLICATE_JOB,
                 format!("download task already exists: {job_id}"),
-                request.request_id,
-                Some(job_id),
-            ),
+            )
+        } else {
+            // A different job, at a host that serves one. The extension opens a
+            // port per download and never does this; a client that did would
+            // otherwise have got a second download sharing one process, which
+            // is the model this host does not implement (ADR-0013).
+            (
+                ERROR_HOST_BUSY,
+                format!("this host is already running download {running}"),
+            )
+        };
+        return send_response(
+            &output,
+            &rejected(error_code, error, request.request_id, Some(job_id)),
         );
     }
-    active.insert(job_id.clone(), task.clone());
+    *active = Some((job_id.clone(), task.clone()));
     drop(active);
 
     if let Err(error) = send_response(
@@ -397,13 +415,11 @@ fn start_download(
             ..NativeResponse::default()
         },
     ) {
-        if let Ok(mut active) = tasks.lock() {
-            active.remove(&job_id);
-        }
+        clear_job(&job, &job_id);
         return Err(error);
     }
 
-    start_hls_preflight(&request, &job_id, &task, output.clone(), tasks.clone());
+    start_hls_preflight(&request, &job_id, &task, output.clone(), job.clone());
 
     let worker_job_id = job_id.clone();
     let worker_task = task.clone();
@@ -442,9 +458,7 @@ fn start_download(
             }
         };
         let _ = send_response(&output, &response);
-        if let Ok(mut active) = tasks.lock() {
-            active.remove(&worker_job_id);
-        }
+        clear_job(&job, &worker_job_id);
     });
 
     Ok(())
@@ -473,7 +487,7 @@ fn start_hls_preflight(
     job_id: &str,
     task: &ActiveTask,
     output: SharedOutput,
-    tasks: ActiveTasks,
+    job: ActiveJob,
 ) {
     if task.hls_info.lock().ok().and_then(|info| *info).is_some()
         || !request.url.to_ascii_lowercase().contains(".m3u8")
@@ -514,10 +528,10 @@ fn start_hls_preflight(
         let Some(info) = info else {
             return;
         };
-        let still_active = tasks
+        let still_active = job
             .lock()
             .ok()
-            .is_some_and(|active| active.contains_key(&job_id));
+            .is_some_and(|active| active.as_ref().is_some_and(|(id, _)| id == &job_id));
         if !still_active {
             return;
         }
@@ -545,12 +559,9 @@ fn publish_hls_info(job_id: &str, info: HlsInfo, task: &ActiveTask, output: &Sha
     );
 }
 
-fn control_download(request: NativeRequest, tasks: &ActiveTasks) -> NativeResponse {
+fn control_download(request: NativeRequest, job: &ActiveJob) -> NativeResponse {
     let job_id = request.job_id.unwrap_or_default();
-    let task = tasks
-        .lock()
-        .ok()
-        .and_then(|active| active.get(&job_id).cloned());
+    let task = running_task(job, &job_id);
     let Some(task) = task else {
         return control_error(
             job_id,
@@ -578,12 +589,9 @@ fn control_download(request: NativeRequest, tasks: &ActiveTasks) -> NativeRespon
     }
 }
 
-fn update_hls_info(request: NativeRequest, tasks: &ActiveTasks) -> NativeResponse {
+fn update_hls_info(request: NativeRequest, job: &ActiveJob) -> NativeResponse {
     let job_id = request.job_id.unwrap_or_default();
-    let task = tasks
-        .lock()
-        .ok()
-        .and_then(|active| active.get(&job_id).cloned());
+    let task = running_task(job, &job_id);
     let Some(task) = task else {
         return control_error(
             job_id,
@@ -662,15 +670,38 @@ fn cancelled_response(job_id: &str) -> NativeResponse {
     }
 }
 
-/// Stop every running job because the port closed — Firefox quitting, the
+/// Stop the running job because the port closed — Firefox quitting, the
 /// extension reloading, a crash. Not a cancel anyone asked for, so the
-/// part-written files are kept whatever `keep_partial` says: the extension
+/// part-written file is kept whatever `keep_partial` says: the extension
 /// reconciles such a job to `interrupted` on its next start and tells the user
 /// the file is still there.
-fn cancel_all(tasks: &ActiveTasks) {
-    if let Ok(active) = tasks.lock() {
-        for task in active.values() {
+fn cancel_for_shutdown(job: &ActiveJob) {
+    if let Ok(active) = job.lock() {
+        if let Some((_, task)) = active.as_ref() {
             let _ = task.control.cancel_for_shutdown();
+        }
+    }
+}
+
+/// The running task, if it is the one named. A control command for any other
+/// job is answered `task_not_active`, exactly as before: this host has one job
+/// and does not know about anyone else's.
+fn running_task(job: &ActiveJob, job_id: &str) -> Option<ActiveTask> {
+    job.lock().ok().and_then(|active| {
+        active
+            .as_ref()
+            .filter(|(id, _)| id == job_id)
+            .map(|(_, task)| task.clone())
+    })
+}
+
+/// Release the slot once a job has ended, leaving the process idle until the
+/// port closes. Named rather than inlined because it happens on every terminal
+/// path and each one must do it.
+fn clear_job(job: &ActiveJob, job_id: &str) {
+    if let Ok(mut active) = job.lock() {
+        if active.as_ref().is_some_and(|(id, _)| id == job_id) {
+            *active = None;
         }
     }
 }
