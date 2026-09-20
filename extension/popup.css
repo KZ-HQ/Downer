@@ -73,6 +73,22 @@ button {
   min-height: 1.2em;
 }
 
+/*
+ * A failure's detail arrives as several lines and used to render as one
+ * paragraph: `textContent` keeps the newlines, but HTML collapses them to
+ * spaces unless told otherwise. `pre-wrap` keeps the line breaks and still
+ * wraps long lines, which `pre` would not. Bounded so a long FFmpeg tail
+ * scrolls inside the popup rather than pushing the candidates off it — the
+ * whole text is in the Settings log console either way. See KEI-86.
+ */
+#status {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 11em;
+  overflow-y: auto;
+  margin-top: 0;
+}
+
 a {
   color: #145dbf;
 }

@@ -148,6 +148,26 @@ The Rust package and the Firefox extension share one product version; see
 
 ### Changed
 
+- **A running download always shows evidence that it is running, and a stopped
+  one says why in its first line.** Four defects that were one: in each, the
+  host already had the answer and discarded it before the user could see it.
+  - A download with no playlist totals showed "Waiting for playlist metadata…"
+    for its whole run, though FFmpeg was reporting how far it had got. Progress
+    events now carry `elapsed_ms` whether or not a segment total is known, and
+    the popup shows elapsed media time advancing. `percent` still needs a
+    total — a numerator is informative, an invented fraction is not.
+  - A playlist answered with a challenge page was reported as "No HLS segments
+    found". The probe now distinguishes a challenge, an unreachable server, a
+    body that is not a playlist, and a playlist with genuinely no segments, and
+    says which on a `metadata_error` field — using the same words the CLI
+    already used for a challenge.
+  - A failure was an unbroken wall of text opening with FFmpeg's own
+    configuration. It now leads with the cause (`Connection refused`, `Server
+    returned 404`), keeps the rest as readable lines, and is bounded — the full
+    text is still in the Settings log console. The popup renders the line
+    breaks that were always in the message and were collapsed by CSS.
+  - A failed or cancelled download did not say where its file was. All three
+    terminal states now carry `path`.
 - **The native host now serves one download per process, and says so.** That is
   what the extension has always done — a native port per download, disconnected
   on the terminal event — but the host kept a job map, a duplicate-job check and

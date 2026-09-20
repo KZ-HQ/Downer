@@ -80,6 +80,12 @@ struct ActiveTask {
     control: ProcessControl,
     hls_info: Arc<Mutex<Option<HlsInfo>>>,
     progress: Arc<Mutex<Option<FfmpegProgress>>>,
+    /// Where this download will write, once the name has been inferred.
+    ///
+    /// Recorded so a job that ends badly can still say where its part-written
+    /// file is: `download_resolved` returns the path only on success, and by
+    /// the time an error surfaces the name it chose is gone. See KEI-86.
+    target: Arc<Mutex<Option<PathBuf>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -183,6 +189,22 @@ struct NativeResponse {
     total_segments: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     percent: Option<f64>,
+    /// How far into the media FFmpeg has got, in milliseconds.
+    ///
+    /// Reported whenever FFmpeg has said, whether or not a segment total is
+    /// known. It is the only evidence a download with no playlist metadata has
+    /// that anything is happening at all, and it was being computed and thrown
+    /// away. `percent` still requires a total: a numerator is informative, an
+    /// invented fraction is not. See KEI-86.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    elapsed_ms: Option<u64>,
+    /// Why the segment total is unavailable, when it is.
+    ///
+    /// Carried on a `progress` event because the download is still running: a
+    /// probe that could not read the playlist is not a job state, and never
+    /// terminates anything. See KEI-86.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     request_id: Option<String>,
 }
@@ -204,6 +226,8 @@ impl Default for NativeResponse {
             completed_segments: None,
             total_segments: None,
             percent: None,
+            elapsed_ms: None,
+            metadata_error: None,
             request_id: None,
         }
     }
@@ -371,6 +395,7 @@ fn start_download(request: NativeRequest, output: SharedOutput, job: ActiveJob) 
         control: ProcessControl::new(),
         hls_info: Arc::new(Mutex::new(initial_info)),
         progress: Arc::new(Mutex::new(None)),
+        target: Arc::new(Mutex::new(None)),
     };
     let mut active = job
         .lock()
@@ -425,19 +450,23 @@ fn start_download(request: NativeRequest, output: SharedOutput, job: ActiveJob) 
     let worker_task = task.clone();
     thread::spawn(move || {
         let response = if worker_task.control.is_cancelled() {
-            cancelled_response(&worker_job_id)
+            cancelled_response(&worker_job_id, &worker_task)
         } else {
             match download(request, &worker_task, output.clone(), &worker_job_id) {
                 Ok(_path) if worker_task.control.is_cancelled() => {
-                    cancelled_response(&worker_job_id)
+                    cancelled_response(&worker_job_id, &worker_task)
                 }
                 Ok(path) => completed_response(&worker_job_id, path, &worker_task),
                 Err(_error) if worker_task.control.is_cancelled() => {
-                    cancelled_response(&worker_job_id)
+                    cancelled_response(&worker_job_id, &worker_task)
                 }
                 Err(error) => NativeResponse {
                     event_type: EVENT_TERMINAL,
                     ok: false,
+                    // A failure keeps its part-written file (ADR-0012), so the
+                    // path is the difference between "you have a fragment at X"
+                    // and a user hunting their downloads folder for it.
+                    path: target_path(&worker_task),
                     // `DownerError::FfmpegFailed` embeds FFmpeg's stderr tail,
                     // which is exactly the text the `log` events are redacted
                     // for. The terminal error takes the same treatment, or a
@@ -525,9 +554,6 @@ fn start_hls_preflight(
             cookie.as_deref(),
             Duration::from_secs(8),
         );
-        let Some(info) = info else {
-            return;
-        };
         let still_active = job
             .lock()
             .ok()
@@ -535,8 +561,37 @@ fn start_hls_preflight(
         if !still_active {
             return;
         }
-        publish_hls_info(&job_id, info, &task, &output);
+        match info {
+            Ok(info) => publish_hls_info(&job_id, info, &task, &output),
+            // A probe that fails says why, instead of leaving the row on
+            // "waiting for playlist metadata" with no account of what went
+            // wrong. The download itself is unaffected: FFmpeg fetches the
+            // playlist for itself, in a session this probe does not have.
+            Err(problem) => publish_metadata_problem(&job_id, &problem, &task, &output),
+        }
     });
+}
+
+/// Tell the extension why the segment total is unavailable.
+///
+/// A `progress` event, not an error: the download is still running and this is
+/// not a job state. The message is the one `resolve_media` would give for the
+/// same cause, so the CLI and the extension say the same thing.
+fn publish_metadata_problem(
+    job_id: &str,
+    problem: &crate::scraper::PlaylistProblem,
+    task: &ActiveTask,
+    output: &SharedOutput,
+) {
+    let progress = task.progress.lock().ok().and_then(|progress| *progress);
+    let state = if task.control.is_paused() {
+        "paused"
+    } else {
+        "downloading"
+    };
+    let mut response = progress_response(job_id, None, progress, state, None);
+    response.metadata_error = Some(crate::redact::redact_text(&problem.message()));
+    let _ = send_response(output, &response);
 }
 
 /// Record playlist totals on the task and tell the extension.
@@ -658,10 +713,14 @@ fn control_error(
     }
 }
 
-fn cancelled_response(job_id: &str) -> NativeResponse {
+fn cancelled_response(job_id: &str, task: &ActiveTask) -> NativeResponse {
     NativeResponse {
         event_type: EVENT_TERMINAL,
         ok: false,
+        // Where the file was, whether or not it is still there: with
+        // `keep_partial` off it has just been deleted, and naming it is still
+        // the honest answer to "what happened to my download".
+        path: target_path(task),
         error: Some("download cancelled".to_string()),
         error_code: Some(ERROR_CANCELLED),
         job_id: Some(job_id.to_string()),
@@ -816,11 +875,23 @@ fn download(
     if let Some(version) = crate::unsupported_ffmpeg(&options.ffmpeg) {
         log(crate::outdated_ffmpeg_warning(version));
     }
+    let target = task.target.clone();
     crate::download_resolved(
         media,
         &options,
-        crate::Hooks::controlled(&task.control, progress, log),
+        crate::Hooks::controlled(&task.control, progress, log).reporting_target(
+            move |path: &Path| {
+                if let Ok(mut current) = target.lock() {
+                    *current = Some(path.to_path_buf());
+                }
+            },
+        ),
     )
+}
+
+/// The path this job resolved to, if it got that far.
+fn target_path(task: &ActiveTask) -> Option<PathBuf> {
+    task.target.lock().ok().and_then(|path| path.clone())
 }
 
 fn progress_response(
@@ -853,6 +924,8 @@ fn progress_response(
             (Some(completed), Some(info.total_segments), Some(percent))
         }
         (Some(info), None) => (Some(0), Some(info.total_segments), Some(0.0)),
+        // No playlist totals. Segment counts and a percentage are genuinely
+        // unknowable, but elapsed output is not, and it is carried below.
         (None, _) => (None, None, None),
     };
     NativeResponse {
@@ -863,6 +936,7 @@ fn progress_response(
         completed_segments,
         total_segments,
         percent,
+        elapsed_ms: progress.and_then(|progress| progress.out_time_ms),
         request_id,
         ..NativeResponse::default()
     }

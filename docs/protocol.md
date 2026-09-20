@@ -142,11 +142,43 @@ to be present.
 | `hello` | `ready` | Handshake answer. Adds `host_version` and `capabilities`. |
 | `status` | `ready` | Setup-check answer. Adds `host_version`, `capabilities` and `status`. |
 | `ack` | `paused`, `downloading`, `cancelling` | A control command was applied. Echoes `request_id`. |
-| `progress` | `starting`, `downloading`, `paused` | Job progress. May carry `completed_segments`, `total_segments`, `percent`. |
+| `progress` | `starting`, `downloading`, `paused` | Job progress. May carry `completed_segments`, `total_segments`, `percent`, `elapsed_ms`, `metadata_error`. |
 | `log` | `downloading` | One line of FFmpeg stderr, in `log`, redacted (see below). |
-| `terminal` | `completed`, `failed`, `cancelled` | The job ended. `completed` carries `path`; the others carry `error` and `error_code`. |
+| `terminal` | `completed`, `failed`, `cancelled` | The job ended. All three carry `path`; `failed` and `cancelled` also carry `error` and `error_code`. |
 | `rejected` | `rejected` | The host refused the request. Carries `error`, `error_code`, and the `request_id` being refused. **Never terminal.** |
 | `control-error` | `control-error` | The host understood a control command but could not apply it. Carries `error`, `error_code`, `job_id`, `request_id`. **Never terminal.** |
+
+### Progress fields
+
+* `completed_segments`, `total_segments` and `percent` require playlist totals.
+  Absent, they are **absent** rather than zero — the host does not know.
+* `elapsed_ms` is how far into the *media* FFmpeg has got, and is reported
+  whenever FFmpeg has said, **with or without** playlist totals. For a download
+  whose totals could not be read it is the only evidence anything is happening;
+  a client should show it advancing rather than a static "waiting". It is a
+  numerator, not a fraction: `percent` stays absent without a total, because an
+  invented percentage is worse than none.
+* `metadata_error` says why the segment total is unavailable, in the host's own
+  words — a challenge, an unreachable server, a body that is not a playlist, or
+  a playlist with no segments. It rides on a `progress` event because **the
+  download is still running**: the probe is a convenience, and FFmpeg fetches
+  the playlist for itself in a session the probe does not have. It is never a
+  job state and never terminates anything.
+
+### `path` on a terminal event
+
+All three terminal states carry `path`, not only `completed`.
+
+* `completed` — where the media is.
+* `failed` — where the part-written file is. A failure keeps its fragment
+  (ADR-0012), and naming it is the difference between "something went wrong"
+  and something the user can act on.
+* `cancelled` — where the file *was*. Under the default policy it has just been
+  deleted; saying where it was is still the honest answer, and a client must not
+  claim the file is there unless it asked for `keep_partial`.
+
+The path is the one the host inferred from `output_dir`, the URL, any `title`
+and the conflict policy, so a client cannot compute it for itself.
 
 ### Redaction
 

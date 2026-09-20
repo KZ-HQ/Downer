@@ -2253,3 +2253,195 @@ fn a_finished_download_frees_the_host_for_another_on_the_same_connection() {
         output_dir.join("second.mp4")
     );
 }
+
+/// A download with no playlist totals still reports how far FFmpeg has got.
+///
+/// The `(None, _)` arm of `progress_response` used to discard `progress`
+/// entirely because it could not compute a fraction, so a row with no metadata
+/// sat on "Waiting for playlist metadata…" for the whole download while FFmpeg
+/// fetched a segment a second. The numerator was there all along (KEI-86).
+#[test]
+fn a_download_with_no_playlist_totals_still_reports_elapsed_time() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg {
+        progress_updates: 3,
+        sleep_seconds: 0.1,
+        ..FakeFfmpeg::default()
+    }
+    .install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    let mut host = NativeHost::start(&ffmpeg);
+
+    let mut request = download_request("https://example.test/video.mp4", &output_dir);
+    request["job_id"] = json!("job-elapsed");
+    // Deliberately no totals: this is the case the host cannot measure.
+    assert!(request.get("total_segments").is_none());
+    host.send(&request);
+
+    let (progress, _) = host.wait_for(|event| event["elapsed_ms"].is_number());
+    assert_envelope(&progress, "progress");
+    assert_eq!(progress["elapsed_ms"], json!(1000), "{progress}");
+    assert!(
+        progress["percent"].is_null(),
+        "a numerator is not a fraction: {progress}"
+    );
+    assert!(progress["total_segments"].is_null(), "{progress}");
+
+    // And it advances, which is the whole point.
+    let (later, _) = host.wait_for(|event| {
+        event["elapsed_ms"]
+            .as_u64()
+            .is_some_and(|value| value > 1000)
+    });
+    assert!(later["elapsed_ms"].as_u64().unwrap() >= 2000, "{later}");
+}
+
+/// The segment-count path is untouched: totals still drive the numbers, and
+/// elapsed time rides alongside rather than replacing them.
+#[test]
+fn a_download_with_playlist_totals_is_unchanged() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg {
+        progress_updates: 2,
+        sleep_seconds: 0.1,
+        ..FakeFfmpeg::default()
+    }
+    .install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    let mut host = NativeHost::start(&ffmpeg);
+
+    let mut request = download_request("https://example.test/video.mp4", &output_dir);
+    request["job_id"] = json!("job-totals");
+    request["total_segments"] = json!(10);
+    request["total_duration_ms"] = json!(10_000);
+    host.send(&request);
+
+    let (progress, _) = host.wait_for(|event| event["completed_segments"] == json!(1));
+    assert_eq!(progress["total_segments"], json!(10));
+    assert_eq!(progress["percent"], json!(10.0));
+    assert_eq!(progress["elapsed_ms"], json!(1000), "{progress}");
+}
+
+/// A failed download says where its part-written file is.
+///
+/// `download_resolved` returns the path only on success, so by the time an
+/// error surfaced the inferred name was gone and the popup could say only that
+/// something went wrong. The host records the target before FFmpeg starts.
+#[test]
+fn a_failed_download_reports_where_its_part_written_file_is() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg {
+        progress_updates: 1,
+        sleep_seconds: 0.05,
+        exit_code: 1,
+        ..FakeFfmpeg::default()
+    }
+    .install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    let mut host = NativeHost::start(&ffmpeg);
+
+    let mut request = download_request("https://example.test/video.mp4", &output_dir);
+    request["job_id"] = json!("job-failed-path");
+    host.send(&request);
+
+    let (failed, _) = host.wait_for_state("failed");
+    assert_envelope(&failed, "terminal");
+    assert_eq!(
+        PathBuf::from(failed["path"].as_str().expect("a failure carries its path")),
+        output_dir.join("video.mp4")
+    );
+    // And the file really is there, which is what makes saying so worth it.
+    assert!(output_dir.join("video.mp4").exists());
+}
+
+/// A cancelled download names its file too — whether or not it still exists.
+/// "It was at X and has been deleted" is a complete answer; silence is not.
+#[test]
+fn a_cancelled_download_reports_the_path_it_was_writing() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg {
+        progress_updates: 100,
+        sleep_seconds: 0.1,
+        ..FakeFfmpeg::default()
+    }
+    .install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    let mut host = NativeHost::start(&ffmpeg);
+
+    let mut request = download_request("https://example.test/video.mp4", &output_dir);
+    request["job_id"] = json!("job-cancel-path");
+    host.send(&request);
+    host.wait_for(|event| event["state"] == "downloading" && event["ok"] == json!(true));
+    let partial = output_dir.join("video.mp4");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !partial.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    host.send(&json!({
+        "command": "cancel",
+        "job_id": "job-cancel-path",
+        "request_id": "job-cancel-path-1",
+    }));
+    let (cancelled, _) = host.wait_for_state("cancelled");
+    assert_eq!(
+        PathBuf::from(
+            cancelled["path"]
+                .as_str()
+                .expect("a cancel carries its path")
+        ),
+        partial
+    );
+    assert!(
+        !partial.exists(),
+        "and the default policy deleted it, which the message must not contradict"
+    );
+}
+
+/// The failure text leads with the cause, and keeps the rest as lines.
+#[test]
+fn a_failure_leads_with_the_cause_not_ffmpegs_configuration() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg {
+        progress_updates: 1,
+        sleep_seconds: 0.05,
+        exit_code: 1,
+        // The shape observed on 2026-09-19: configuration first, cause in the
+        // middle, consequence last.
+        stderr_line: Some(
+            "ffmpeg stats and -progress period set to 0.5.\n\
+             [tcp @ 0x1] Connection to tcp://127.0.0.1:8081 failed: Connection refused\n\
+             Error opening input files: Invalid data found when processing input",
+        ),
+        ..FakeFfmpeg::default()
+    }
+    .install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    let mut host = NativeHost::start(&ffmpeg);
+
+    let mut request = download_request("https://example.test/video.mp4", &output_dir);
+    request["job_id"] = json!("job-headline");
+    host.send(&request);
+
+    let (failed, _) = host.wait_for_state("failed");
+    let error = failed["error"]
+        .as_str()
+        .expect("a failure carries an error");
+    let headline = error.lines().next().expect("a first line");
+    assert_eq!(
+        headline, "Connection to tcp://127.0.0.1:8081 failed: Connection refused",
+        "whole error: {error}"
+    );
+    assert!(
+        error.contains("Invalid data found"),
+        "the rest is kept as detail: {error}"
+    );
+    assert!(
+        !error.contains("stats and -progress"),
+        "FFmpeg's own configuration is not a diagnostic: {error}"
+    );
+    assert!(
+        error.lines().count() > 1,
+        "detail renders as lines: {error}"
+    );
+}

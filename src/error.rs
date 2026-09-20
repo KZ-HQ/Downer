@@ -87,6 +87,12 @@ impl fmt::Display for DownerError {
                 minimum,
                 stderr,
             } => {
+                // The headline is this one, not FFmpeg's: an old FFmpeg that
+                // fails names itself first, whatever it failed at. KEI-81 pins
+                // this wording and `tests/cli.rs` asserts on it. The *detail*
+                // gets the same treatment as any other failure — chatter
+                // dropped, length bounded, lines kept — because it is the same
+                // wall of text (KEI-86).
                 write!(
                     f,
                     "FFmpeg {version} is older than the minimum supported {minimum}"
@@ -94,23 +100,29 @@ impl fmt::Display for DownerError {
                 if stderr.trim().is_empty() {
                     Ok(())
                 } else {
-                    write!(f, ": {}", stderr.trim())
+                    write!(f, ":\n{}", crate::failure::summarize(stderr).detail)
                 }
             }
             Self::SetupCheckFailed => {
                 write!(f, "setup checks failed; see the report above")
             }
+            // Headline first, then the status, then the detail — in that order
+            // because the first line is the one a user reads. FFmpeg's stderr
+            // buries the cause in the middle and opens with its own
+            // configuration; `failure::summarize` picks the cause out and
+            // bounds the rest. See KEI-86.
             Self::FfmpegFailed { status, stderr } => {
                 if stderr.trim().is_empty() {
-                    write!(f, "FFmpeg failed with status {}", display_status(*status))
-                } else {
-                    write!(
-                        f,
-                        "FFmpeg failed with status {}: {}",
-                        display_status(*status),
-                        stderr.trim()
-                    )
+                    return write!(f, "FFmpeg failed with status {}", display_status(*status));
                 }
+                let summary = crate::failure::summarize(stderr);
+                write!(
+                    f,
+                    "{}\n\nFFmpeg failed with status {}:\n{}",
+                    summary.headline,
+                    display_status(*status),
+                    summary.detail
+                )
             }
         }
     }

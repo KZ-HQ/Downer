@@ -25,12 +25,52 @@ pub struct HlsInfo {
     pub total_duration_ms: u64,
 }
 
+/// Why a playlist could not be read for its segment totals.
+///
+/// The probe used to answer `None` for every one of these, which is how a
+/// challenge page came to be reported as "no segments found": the diagnosis
+/// existed in [`resolve_media`] and nowhere else. They are four different
+/// problems with four different remedies, so they are four values. See KEI-86.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaylistProblem {
+    /// A challenge page stood in for the playlist. The media is there; a
+    /// browser session is what is missing.
+    Challenged,
+    /// The request failed, or the server answered with an error status.
+    Unreachable(String),
+    /// Something came back, and it is not a playlist.
+    NotAPlaylist,
+    /// A playlist, with no segments in it.
+    NoSegments,
+}
+
+impl PlaylistProblem {
+    /// What to tell the user. Deliberately the same words
+    /// [`resolve_media`] already uses for a challenge, because that is the
+    /// message they may have seen from the CLI.
+    pub fn message(&self) -> String {
+        match self {
+            Self::Challenged => CHALLENGE_MESSAGE.to_string(),
+            Self::Unreachable(reason) => format!("the playlist could not be fetched: {reason}"),
+            Self::NotAPlaylist => {
+                "the URL answered with something that is not a playlist".to_string()
+            }
+            Self::NoSegments => "the playlist lists no segments".to_string(),
+        }
+    }
+}
+
+/// The one wording for a challenge, shared by the source-page path and the
+/// playlist probe so a user cannot get two different accounts of one problem.
+pub const CHALLENGE_MESSAGE: &str =
+    "Cloudflare challenge; provide a browser session cookie with --cookie or use a direct media URL";
+
 pub fn hls_info(
     url: &Url,
     user_agent: &str,
     referer: Option<&Url>,
     cookie: Option<&str>,
-) -> Option<HlsInfo> {
+) -> Result<HlsInfo, PlaylistProblem> {
     hls_info_with_timeout(url, user_agent, referer, cookie, Duration::from_secs(8))
 }
 
@@ -40,22 +80,29 @@ pub fn hls_info_with_timeout(
     referer: Option<&Url>,
     cookie: Option<&str>,
     timeout: Duration,
-) -> Option<HlsInfo> {
+) -> Result<HlsInfo, PlaylistProblem> {
     let client = Client::builder()
         .redirect(Policy::limited(10))
         .connect_timeout(timeout.min(Duration::from_secs(4)))
         .timeout(timeout)
         .build()
-        .ok()?;
-    if let Some(info) = hls_info_from_playlist(&client, url, user_agent, referer, cookie, None) {
-        return Some(info);
-    }
+        .map_err(|error| PlaylistProblem::Unreachable(error.to_string()))?;
+    let problem = match hls_info_from_playlist(&client, url, user_agent, referer, cookie, None) {
+        Ok(info) => return Ok(info),
+        Err(problem) => problem,
+    };
 
-    let parent = url.join("../playlist.m3u8").ok()?;
+    // The `../playlist.m3u8` fallback, unchanged. If it does not help, the
+    // problem reported is the *first* one: the URL the user asked about is the
+    // one they need an explanation for, not a sibling this probe guessed at.
+    let Ok(parent) = url.join("../playlist.m3u8") else {
+        return Err(problem);
+    };
     if parent == *url {
-        return None;
+        return Err(problem);
     }
     hls_info_from_playlist(&client, &parent, user_agent, referer, cookie, Some(url))
+        .map_err(|_| problem)
 }
 
 /// What a playlist turned out to be, once parsed.
@@ -131,7 +178,12 @@ pub fn resolve_variant(
         .timeout(VARIANT_TIMEOUT)
         .build()
         .ok()?;
-    let (playlist, base_url) = fetch_hls_playlist(&client, url, user_agent, referer, cookie)?;
+    // A problem here costs the bandwidth this resolution would have saved and
+    // nothing else — the download falls back to the URL as given — so it is
+    // dropped rather than reported. The *segment count* probe reports its
+    // problems, because there the user is owed an explanation for a blank row.
+    let (playlist, base_url) =
+        fetch_hls_playlist(&client, url, user_agent, referer, cookie).ok()?;
     match parse_playlist(&playlist, &base_url) {
         Playlist::Master { variant } => variant,
         Playlist::Media(_) | Playlist::Unusable => None,
@@ -179,18 +231,40 @@ fn hls_info_from_playlist(
     referer: Option<&Url>,
     cookie: Option<&str>,
     preferred_variant: Option<&Url>,
-) -> Option<HlsInfo> {
+) -> Result<HlsInfo, PlaylistProblem> {
     let (playlist, base_url) = fetch_hls_playlist(client, url, user_agent, referer, cookie)?;
     let playlist = if is_master_playlist(&playlist) {
-        let variant = select_variant(&playlist, &base_url, preferred_variant)?;
-        fetch_hls_playlist(client, &variant, user_agent, referer, cookie)
-            .or_else(|| fetch_hls_playlist(client, &variant, user_agent, Some(&base_url), cookie))?
-            .0
+        let variant = select_variant(&playlist, &base_url, preferred_variant)
+            .ok_or(PlaylistProblem::NoSegments)?;
+        match fetch_hls_playlist(client, &variant, user_agent, referer, cookie) {
+            Ok((text, _)) => text,
+            // Retried with the master as Referer, as before.
+            Err(problem) => {
+                fetch_hls_playlist(client, &variant, user_agent, Some(&base_url), cookie)
+                    .map_err(|_| problem)?
+                    .0
+            }
+        }
     } else {
         playlist
     };
 
-    parse_hls_info(&playlist)
+    parse_hls_info(&playlist).ok_or_else(|| classify_body(&playlist))
+}
+
+/// What a body that yielded no segments actually was.
+///
+/// Three outcomes the probe used to collapse into one `None`. The challenge
+/// check by body text complements the header check in `fetch_hls_playlist`: a
+/// challenge served as `200` never reaches that one.
+fn classify_body(body: &str) -> PlaylistProblem {
+    if !body.trim_start().starts_with("#EXTM3U") {
+        if body.to_ascii_lowercase().contains("cloudflare") {
+            return PlaylistProblem::Challenged;
+        }
+        return PlaylistProblem::NotAPlaylist;
+    }
+    PlaylistProblem::NoSegments
 }
 
 fn fetch_hls_playlist(
@@ -199,8 +273,9 @@ fn fetch_hls_playlist(
     user_agent: &str,
     referer: Option<&Url>,
     cookie: Option<&str>,
-) -> Option<(String, Url)> {
-    let user_agent = HeaderValue::from_str(user_agent).ok()?;
+) -> Result<(String, Url), PlaylistProblem> {
+    let user_agent = HeaderValue::from_str(user_agent)
+        .map_err(|_| PlaylistProblem::Unreachable("invalid user agent".to_string()))?;
     let mut request = client
         .get(url.clone())
         .header(USER_AGENT, user_agent)
@@ -214,14 +289,43 @@ fn fetch_hls_playlist(
     if let Some(cookie) = cookie {
         request = request.header(COOKIE, cookie);
     }
-    let response = request.send().ok()?;
+    let response = request
+        .send()
+        .map_err(|error| PlaylistProblem::Unreachable(request_failure(&error)))?;
     let base_url = response.url().clone();
-    response
-        .error_for_status()
-        .ok()?
+    let status = response.status();
+    if !status.is_success() {
+        // The same test `resolve_media` makes, in the path that used to throw
+        // the answer away.
+        if status.as_u16() == 403 && response.headers().get("cf-mitigated").is_some() {
+            return Err(PlaylistProblem::Challenged);
+        }
+        return Err(PlaylistProblem::Unreachable(format!(
+            "the server answered {status}"
+        )));
+    }
+    let text = response
         .text()
-        .ok()
-        .map(|text| (text, base_url))
+        .map_err(|error| PlaylistProblem::Unreachable(request_failure(&error)))?;
+    Ok((text, base_url))
+}
+
+/// A request failure in words, without the URL.
+///
+/// `reqwest`'s `Display` includes the URL it was fetching, which is exactly the
+/// text `docs/adr/0003-redact-urls-in-logs.md` keeps off this wire. The cause
+/// is what the user needs; the URL is one they already have.
+fn request_failure(error: &reqwest::Error) -> String {
+    if error.is_timeout() {
+        return "the request timed out".to_string();
+    }
+    if error.is_connect() {
+        return "the server could not be reached".to_string();
+    }
+    if error.is_redirect() {
+        return "too many redirects".to_string();
+    }
+    "the request failed".to_string()
 }
 
 fn select_variant(playlist: &str, base_url: &Url, preferred_variant: Option<&Url>) -> Option<Url> {
