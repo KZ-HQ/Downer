@@ -838,3 +838,47 @@ fn a_cookie_value_is_still_visible_in_ffmpeg_argv() {
         "ADR-0002 records this exposure; if it is gone, update the ADR"
     );
 }
+
+/// KEI-86: an old FFmpeg keeps KEI-81's headline, and its detail is cleaned up
+/// like any other failure's.
+///
+/// The headline is this project's own, not FFmpeg's: an old FFmpeg that fails
+/// names itself first, whatever it failed at. What changes is the wall of text
+/// after it — FFmpeg's configuration chatter is dropped, and the cause is no
+/// longer preceded by it.
+#[cfg(unix)]
+#[test]
+fn an_old_ffmpeg_keeps_its_headline_and_loses_the_chatter() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake = install_fake(
+        &temp.path().join("fake-noisy-ffmpeg"),
+        &format!(
+            "{}last=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\nprintf 'partial media' > \"$last\"\n             echo 'ffmpeg stats and -progress period set to 0.5.' >&2\n             echo '[tcp @ 0x1] Connection to tcp://127.0.0.1:8081 failed: Connection refused' >&2\n             echo 'Error opening input files: Invalid data found when processing input' >&2\n             exit 17\n",
+            version_prelude("6.1.1-3ubuntu5")
+        ),
+    );
+    let output = temp.path().join("partial.mp4");
+
+    let result = Command::cargo_bin("downer")
+        .unwrap()
+        .args(["https://example.test/playlist.m3u8", "--output"])
+        .arg(&output)
+        .arg("--ffmpeg")
+        .arg(&fake)
+        .output()
+        .expect("downer runs");
+    let stderr = String::from_utf8_lossy(&result.stderr);
+
+    assert!(
+        stderr.contains("error: FFmpeg 6.1.1 is older than the minimum supported 7.1"),
+        "KEI-81's wording is unchanged: {stderr}"
+    );
+    assert!(
+        !stderr.contains("supported 7.1:\nffmpeg stats and -progress"),
+        "the configuration chatter no longer opens the detail: {stderr}"
+    );
+    assert!(
+        stderr.contains("Connection refused"),
+        "and the cause is still there: {stderr}"
+    );
+}

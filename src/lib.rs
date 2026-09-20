@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod diagnostics;
 pub mod error;
+pub mod failure;
 pub mod ffmpeg;
 pub mod host;
 pub mod native;
@@ -247,7 +248,19 @@ pub struct Hooks<'a> {
     pub control: Option<&'a ProcessControl>,
     pub on_progress: Option<Box<dyn Fn(FfmpegProgress) + Send + Sync>>,
     pub on_log: Option<Box<dyn Fn(String) + Send + Sync>>,
+    /// Called once, with the path this download will write, before FFmpeg
+    /// starts.
+    ///
+    /// The caller cannot work this out for itself: it supplies a *directory*,
+    /// and the filename is inferred here from the URL, the naming hints and the
+    /// collision policy. Without this hook a failed download can only be
+    /// reported as "it went wrong somewhere", because the one thing that says
+    /// where the fragment is has already been consumed by the error path.
+    pub on_target: Option<TargetReporter>,
 }
+
+/// Told the path a download will write, once it has been inferred.
+pub type TargetReporter = Box<dyn Fn(&Path) + Send + Sync>;
 
 impl<'a> Hooks<'a> {
     /// A controllable download reporting progress and FFmpeg's output.
@@ -260,7 +273,17 @@ impl<'a> Hooks<'a> {
             control: Some(control),
             on_progress: Some(Box::new(on_progress)),
             on_log: Some(Box::new(on_log)),
+            on_target: None,
         }
+    }
+
+    /// Also report the path this download resolved to, before it starts.
+    pub fn reporting_target<T>(mut self, on_target: T) -> Self
+    where
+        T: Fn(&Path) + Send + Sync + 'static,
+    {
+        self.on_target = Some(Box::new(on_target));
+        self
     }
 }
 
@@ -283,6 +306,11 @@ pub fn download_resolved(
     )?;
     let target = resolve_conflict(destination, options.conflict_policy())?;
     let destination = target.path.clone();
+    // Announced before FFmpeg runs, so a download that fails or is cancelled can
+    // still say where its part-written file is. See KEI-86.
+    if let Some(on_target) = hooks.on_target.as_ref() {
+        on_target(&target.path);
+    }
 
     if !options.quiet {
         if let Some(referer) = &media.referer {

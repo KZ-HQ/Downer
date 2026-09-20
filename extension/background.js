@@ -237,6 +237,15 @@ function handleNativeEvent(jobId, response) {
     progress.totalSegments = response.total_segments;
   }
   if (response?.percent !== undefined) progress.percent = response.percent;
+  // How far into the media FFmpeg has got. Present whether or not a segment
+  // total is known, and the only evidence a download with no playlist metadata
+  // has that it is running at all (KEI-86).
+  if (response?.elapsed_ms !== undefined) progress.elapsedMs = response.elapsed_ms;
+  // Why the segment total is unavailable, said by the host that tried. Not a
+  // job state and never terminal: the download is still going.
+  if (typeof response?.metadata_error === "string") {
+    progress.metadataError = response.metadata_error;
+  }
   if (response?.state === "paused") {
     updateJob(jobId, { state: "paused", controlError: null, ...progress });
   } else if (["starting", "preparing"].includes(response?.state)) {
@@ -245,6 +254,9 @@ function handleNativeEvent(jobId, response) {
     updateJob(jobId, {
       state: "downloading",
       controlError: null,
+      // A segment total arriving answers the question, so the explanation for
+      // its absence goes. `...progress` follows, so a `metadata_error` on this
+      // very event still wins.
       metadataError: progress.totalSegments ? null : jobs.get(jobId)?.metadataError,
       ...progress
     });
@@ -487,6 +499,10 @@ async function runDownload(message, jobId) {
     if (response?.state === "cancelled") {
       const job = updateJob(jobId, {
         state: "cancelled",
+        // Where the file was, whether or not it is still there. With the
+        // default policy it has just been deleted, and naming it is still the
+        // honest answer to "what happened to my download" (ADR-0012, KEI-86).
+        path: response.path ?? null,
         error: response.error || "Download cancelled.",
         finishedAt: Date.now()
       });
@@ -508,6 +524,9 @@ async function runDownload(message, jobId) {
         // message is FFmpeg's, the code is why the job ended, and only the code
         // can be branched on. `resume_failed` is the one the popup acts on.
         errorCode: response?.error_code || null,
+        // A failure keeps its part-written file, so saying where it is turns
+        // "it went wrong" into something the user can act on.
+        path: response?.path ?? null,
         error: response?.error || "Download failed.",
         finishedAt: Date.now()
       });

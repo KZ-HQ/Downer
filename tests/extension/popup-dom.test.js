@@ -301,3 +301,103 @@ test("KEI-65: a download that died at the resume says so, and not just 'failed'"
   assert.equal(row.download.text, "Retry", "the offer is still Retry");
   assert.equal(row.download.disabled, false);
 });
+
+test("KEI-86: a download with no segment total shows elapsed media time, not 'waiting'", async () => {
+  // The defect: a row with no playlist metadata sat on "Waiting for playlist
+  // metadata…" for the whole download while FFmpeg fetched a segment a second.
+  const popup = await loadPopup({
+    candidates: [{ url: FEATURE, type: "video" }],
+    jobs: [{ id: "live-1", url: FEATURE, state: "downloading", elapsedMs: 754_000 }],
+    sessionJobIds: ["live-1"]
+  });
+
+  const [row] = popup.rows();
+  assert.equal(row.count, "12:34 downloaded");
+});
+
+test("KEI-86: an hour-long download reads as hours, and a fresh one still waits", async () => {
+  const hours = await loadPopup({
+    candidates: [{ url: FEATURE, type: "video" }],
+    jobs: [{ id: "live-1", url: FEATURE, state: "downloading", elapsedMs: 3_723_000 }],
+    sessionJobIds: ["live-1"]
+  });
+  assert.equal(hours.rows()[0].count, "1:02:03 downloaded");
+
+  // Nothing reported yet is still "waiting" — there is nothing to advance.
+  const fresh = await loadPopup({
+    candidates: [{ url: FEATURE, type: "video" }],
+    jobs: [{ id: "live-2", url: FEATURE, state: "downloading", elapsedMs: 0 }],
+    sessionJobIds: ["live-2"]
+  });
+  assert.equal(fresh.rows()[0].count, "Waiting for FFmpeg progress…");
+});
+
+test("KEI-86: a segment total still wins over elapsed time", async () => {
+  // The verified path must not change: when totals exist they are the better
+  // measure, because they carry a denominator.
+  const popup = await loadPopup({
+    candidates: [{ url: FEATURE, type: "video" }],
+    jobs: [{
+      id: "live-1",
+      url: FEATURE,
+      state: "downloading",
+      completedSegments: 3,
+      totalSegments: 10,
+      percent: 30,
+      elapsedMs: 754_000
+    }],
+    sessionJobIds: ["live-1"]
+  });
+  assert.equal(popup.rows()[0].count, "3 / 10 segments");
+});
+
+test("KEI-86: a failed download says where its part-written file is", async () => {
+  const popup = await loadPopup({
+    candidates: [{ url: FEATURE, type: "video" }],
+    jobs: [{
+      id: "failed-1",
+      url: FEATURE,
+      state: "failed",
+      error: "Connection refused",
+      path: "/home/me/Downloads/feature.mp4"
+    }],
+    sessionJobIds: ["failed-1"]
+  });
+  assert.equal(
+    popup.downloadStatus(),
+    "Download failed. You can retry. The part-written file is at /home/me/Downloads/feature.mp4."
+  );
+});
+
+test("KEI-86: a cancelled download does not claim a file that was deleted", async () => {
+  // The path is reported either way; what changes is the verb. Naming a file
+  // the popup has just deleted would be worse than saying nothing.
+  const deleted = await loadPopup({
+    candidates: [{ url: FEATURE, type: "video" }],
+    jobs: [{
+      id: "cancelled-1",
+      url: FEATURE,
+      state: "cancelled",
+      keepPartial: false,
+      path: "/home/me/Downloads/feature.mp4"
+    }],
+    sessionJobIds: ["cancelled-1"]
+  });
+  assert.equal(deleted.downloadStatus(), "The part-written file was deleted.");
+
+  const kept = await loadPopup({
+    candidates: [{ url: FEATURE, type: "video" }],
+    jobs: [{
+      id: "cancelled-2",
+      url: FEATURE,
+      state: "cancelled",
+      keepPartial: true,
+      path: "/home/me/Downloads/feature.mp4"
+    }],
+    sessionJobIds: ["cancelled-2"]
+  });
+  assert.equal(
+    kept.downloadStatus(),
+    "The part-written file was kept at /home/me/Downloads/feature.mp4."
+  );
+});

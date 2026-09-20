@@ -61,6 +61,16 @@ pub enum Reply {
     },
     /// `302` to this absolute URL.
     Redirect(String),
+    /// An arbitrary status with extra headers, for the answers a CDN gives that
+    /// are neither a body nor a redirect — a challenge, most of all.
+    Status {
+        code: u16,
+        reason: &'static str,
+        /// Sent verbatim, one per line, as `Name: value`.
+        headers: Vec<(&'static str, String)>,
+        content_type: &'static str,
+        body: String,
+    },
 }
 
 impl Reply {
@@ -225,6 +235,22 @@ fn serve(
         Some(Reply::Redirect(location)) => format!(
             "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         ),
+        Some(Reply::Status {
+            code,
+            reason,
+            headers,
+            content_type,
+            body,
+        }) => {
+            let extra: String = headers
+                .iter()
+                .map(|(name, value)| format!("{name}: {value}\r\n"))
+                .collect();
+            format!(
+                "HTTP/1.1 {code} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n{body}",
+                body.len(),
+            )
+        }
         None => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
     };
 

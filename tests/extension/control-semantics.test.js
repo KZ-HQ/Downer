@@ -84,3 +84,66 @@ test("what the host said it could do is kept, not discarded after the handshake"
     );
   }
 });
+
+test("KEI-86: a metadata problem reaches the job as an explanation, not a failure", async () => {
+  // The host says why the segment total is unavailable on a `progress` event:
+  // the download is still running, and the probe is a convenience.
+  const background = await loadBackground({ native: true });
+  const { jobId } = await startedRequest(background);
+  const port = background.nativePort();
+  port.emit({
+    protocol_version: 1,
+    type: "progress",
+    ok: true,
+    job_id: jobId,
+    state: "downloading",
+    metadata_error:
+      "Cloudflare challenge; provide a browser session cookie with --cookie or use a direct media URL"
+  });
+  await background.settle();
+
+  const { jobs } = await background.send({ type: "get-download-statuses" });
+  const job = jobs.find((entry) => entry.id === jobId);
+  assert.match(job.metadataError, /Cloudflare challenge/);
+  assert.equal(job.state, "downloading", "an unreadable playlist does not end the job");
+});
+
+test("KEI-86: elapsed time reaches the job even with no segment total", async () => {
+  const background = await loadBackground({ native: true });
+  const { jobId } = await startedRequest(background);
+  background.nativePort().emit({
+    protocol_version: 1,
+    type: "progress",
+    ok: true,
+    job_id: jobId,
+    state: "downloading",
+    elapsed_ms: 754000
+  });
+  await background.settle();
+
+  const { jobs } = await background.send({ type: "get-download-statuses" });
+  const job = jobs.find((entry) => entry.id === jobId);
+  assert.equal(job.elapsedMs, 754000);
+  assert.equal(job.totalSegments, undefined, "and no total was invented");
+});
+
+test("KEI-86: a segment total arriving clears the explanation for its absence", async () => {
+  const background = await loadBackground({ native: true });
+  const { jobId } = await startedRequest(background);
+  const port = background.nativePort();
+  port.emit({
+    protocol_version: 1, type: "progress", ok: true, job_id: jobId,
+    state: "downloading", metadata_error: "the playlist could not be fetched: the request timed out"
+  });
+  await background.settle();
+  port.emit({
+    protocol_version: 1, type: "progress", ok: true, job_id: jobId,
+    state: "downloading", total_segments: 42, completed_segments: 1, percent: 2.4
+  });
+  await background.settle();
+
+  const { jobs } = await background.send({ type: "get-download-statuses" });
+  const job = jobs.find((entry) => entry.id === jobId);
+  assert.equal(job.totalSegments, 42);
+  assert.equal(job.metadataError, null, "the question has been answered");
+});

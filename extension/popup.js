@@ -23,6 +23,23 @@ function showStatus(message) {
 }
 
 /**
+ * Elapsed media time as `h:mm:ss` or `m:ss`.
+ *
+ * This is how far into the *media* FFmpeg has got, not how long the download
+ * has been running — the two differ, and the first is the one that means
+ * progress.
+ */
+function formatElapsed(milliseconds) {
+  const total = Math.max(0, Math.floor(milliseconds / 1000));
+  const seconds = String(total % 60).padStart(2, "0");
+  const minutes = Math.floor(total / 60) % 60;
+  const hours = Math.floor(total / 3600);
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${seconds}`
+    : `${minutes}:${seconds}`;
+}
+
+/**
  * Render one job's state. A job with no row on this page is not about what the
  * user is looking at, so it renders nothing at all — in particular it does not
  * set the headline status, which is the defect this guard closes.
@@ -82,6 +99,13 @@ function renderDownloadStatus(job) {
   } else if (job.state === "interrupted") {
     row.count.textContent = "Interrupted — not running";
     row.progress.removeAttribute("value");
+  } else if (job.elapsedMs > 0) {
+    // No segment total, but FFmpeg has said how far into the media it is. The
+    // bar stays indeterminate — a numerator without a denominator is not a
+    // fraction — while the text advances, which is what distinguishes a
+    // download that is working from one that is stuck (KEI-86).
+    row.count.textContent = `${formatElapsed(job.elapsedMs)} downloaded`;
+    row.progress.removeAttribute("value");
   } else {
     row.count.textContent = job.metadataError
       ? "Waiting for playlist metadata…"
@@ -136,17 +160,20 @@ function renderDownloadStatus(job) {
     // not. Saying so is the difference between "retry this" and "this will
     // never work" — see docs/adr/0012-control-semantics.md.
     showStatus("Could not resume: the connection was lost while paused.");
-    downloadStatusElement.textContent =
-      "Retry starts the download again from the beginning. The part-written file was kept.";
+    downloadStatusElement.textContent = job.path
+      ? `Retry starts the download again from the beginning. The part-written file is at ${job.path}.`
+      : "Retry starts the download again from the beginning. The part-written file was kept.";
   } else if (job.state === "failed") {
     showStatus(job.error || "Download failed.");
-    downloadStatusElement.textContent = "Download failed. You can retry. The part-written file was kept.";
+    downloadStatusElement.textContent = job.path
+      ? `Download failed. You can retry. The part-written file is at ${job.path}.`
+      : "Download failed. You can retry. The part-written file was kept.";
   } else if (job.state === "cancelled") {
     showStatus("Download cancelled.");
     // What actually happened to the fragment, from the policy this job ran
     // under — not from the setting as it stands now.
     downloadStatusElement.textContent = job.keepPartial
-      ? "The part-written file was kept."
+      ? `The part-written file was kept${job.path ? ` at ${job.path}` : ""}.`
       : "The part-written file was deleted.";
   } else if (job.state === "paused") {
     showStatus("Download paused.");
