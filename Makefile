@@ -4,7 +4,7 @@ CARGO ?= cargo
 FFMPEG ?= ffmpeg
 NPM ?= npm
 
-.PHONY: help setup doctor build fmt fmt-check lint test version-check extension-deps extension-lint extension-test extension-check extension-browser extension-ffmpeg extension-e2e extension-e2e-native check run install extension extension-package extension-install fixture-site fixture-site-peer clean
+.PHONY: help setup doctor build fmt fmt-check lint test version-check release-check extension-deps extension-lint extension-test extension-check extension-browser extension-ffmpeg extension-e2e extension-e2e-native check run install extension extension-package extension-xpi extension-install fixture-site fixture-site-peer clean
 
 help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -41,6 +41,13 @@ test: ## Run unit, integration, and doc tests
 
 version-check: ## Verify the Cargo package and extension manifest versions agree
 	@python3 scripts/check_versions.py
+
+# The release tooling is shell and Python, which Clippy and cargo test do not
+# see. AGENTS.md requires a new check to live in `make check` rather than only
+# in a workflow, so the release scripts are tested here and CI runs the same
+# thing (KEI-58).
+release-check: ## Test the release tooling (version gate, changelog notes, packaging)
+	@python3 scripts/test_release_tooling.py
 
 extension-deps: node_modules/.install-stamp ## Install development-only extension tooling
 
@@ -101,7 +108,7 @@ extension-check: extension-lint extension-test ## Validate Firefox extension JSO
 
 extension: extension-install extension-package ## Build/register the native host and package the extension
 
-check: fmt-check lint version-check test extension-check ## Run Rust and Firefox extension checks
+check: fmt-check lint version-check release-check test extension-check ## Run Rust and Firefox extension checks
 
 FIXTURE_SITE := python3 tests/fixtures/protected_site.py
 
@@ -120,9 +127,14 @@ install: ## Install downer with Cargo
 
 extension-package: extension-check ## Package the Firefox extension as a ZIP
 	@mkdir -p dist
-	@rm -f dist/downer-firefox.zip
-	@cd extension && zip -qr ../dist/downer-firefox.zip .
-	@echo "Created dist/downer-firefox.zip"
+	@./scripts/package_extension.sh dist/downer-firefox.zip
+
+# The release artifact. Same bytes as the zip above, named the way Firefox
+# expects for a file you install rather than load temporarily, and carrying the
+# version so two downloads in one directory cannot be confused.
+extension-xpi: extension-check ## Package the extension as dist/downer-<version>.xpi
+	@mkdir -p dist
+	@./scripts/package_extension.sh "dist/downer-$$(python3 scripts/check_versions.py --print).xpi"
 
 extension-install: ## Build and register the Firefox native messaging host
 	./scripts/install_native_host.sh

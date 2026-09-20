@@ -66,6 +66,15 @@ The minimum supported Rust version is declared as `rust-version` in
 `Cargo.toml`; raising it is a deliberate change that belongs in the changelog.
 The minimum supported FFmpeg version is documented in `README.md`.
 
+A release is a `vX.Y.Z` tag on a commit whose two version fields already say
+`X.Y.Z`; `.github/workflows/release.yml` refuses to build otherwise. The
+extension's add-on ID, `downer@kz-hq.github.io`, is written only in
+`extension/manifest.json`: `build.rs` reads it from there into
+`downer::host::EXTENSION_ID`, and `tests/e2e/browser.mjs` reads the same field,
+so the ID cannot drift between the extension and the native host that allows
+it. Changing that ID breaks every installed add-on, as
+`docs/adr/0008-relocatable-native-host-installation.md` records.
+
 ## Architecture decisions
 
 Architectural decisions are recorded as ADRs under `docs/adr/`, numbered
@@ -95,7 +104,18 @@ ADR.
   itself lives in `src/host.rs`, so a user without the repository can run it),
   `install_test_browser.sh`, which installs the Firefox and geckodriver the
   end-to-end tests drive, and `session_start.sh`, the SessionStart hook that
-  runs it in a Claude Code cloud session and nowhere else.
+  runs it in a Claude Code cloud session and nowhere else. The release tooling
+  also lives here, and is written so it runs on a laptop rather than only
+  inside a workflow: `check_versions.py` (the version agreement rule, with
+  `--tag` for the extra "and the tag agrees" check a release needs),
+  `package_extension.sh` (the one packaging rule behind both
+  `make extension-package` and `make extension-xpi`, built reproducibly so a
+  published checksum can be rechecked by rebuilding), `release_artifacts.sh`
+  (one platform's release build, package and checksums),
+  `release_collect.py` (merges the platforms' staged artifacts into the files a
+  Release carries), `changelog_section.py` (a version's release notes), and
+  `test_release_tooling.py`, which tests all of them and runs as part of
+  `make check`.
 - `.claude/settings.json`: Claude Code project settings. It registers
   `scripts/session_start.sh` as a SessionStart hook, so a cloud session starts
   with the end-to-end browser installed; that script exits immediately unless
@@ -209,6 +229,15 @@ them locally with `-- --nocapture` and record the result.
 new check, add it to `make check` rather than to the workflow, so local runs
 and CI cannot drift apart. The end-to-end tests are the one deliberate
 exception: they need a browser that `make check` cannot assume.
+
+`.github/workflows/release.yml` runs on `v*` tags, and on demand from the
+Actions tab for a dry run that builds and uploads the artifacts without
+publishing anything. It is deliberately thin: everything it does apart from
+talking to GitHub is in the `scripts/` release tooling above, so a failure can
+be reproduced locally — which matters because this repository's GitHub job logs
+are not always readable after a run. What cannot be checked without pushing a
+tag is that GitHub fires the workflow and that `gh release create` attaches the
+files; say so plainly rather than implying a workflow works because it parses.
 
 The root `package.json` is development-only tooling (`web-ext`); the extension
 itself ships without dependencies, and `node_modules/` is not tracked.

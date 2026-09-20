@@ -53,6 +53,7 @@ make check
 make build
 make run ARGS='https://example.com/video.mp4 --dir ./downloads'
 make install
+make extension-xpi
 make clean
 ```
 
@@ -87,6 +88,51 @@ Firefox cookies for the media host and sends them to the native host only for
 the selected download. The native host defaults to the operating system's
 Downloads directory; configure another path from the extension's Settings
 page if needed.
+
+### Installing the extension
+
+The extension is not published on [addons.mozilla.org](https://addons.mozilla.org)
+(AMO) and is not signed. That decides which of the two install paths is open to
+you.
+
+**Temporarily, in any Firefox.** `about:debugging` → **This Firefox** → **Load
+Temporary Add-on**, selecting `extension/manifest.json` (or the `.xpi`).
+`web-ext run` does the same from a command line. A temporary add-on bypasses
+signature enforcement in every edition, and disappears when Firefox closes.
+This is the development path and the one `make extension` sets up.
+
+**Permanently, from the `.xpi`.** Every tagged release attaches
+`downer-<version>.xpi` to its [GitHub Release](../../releases); `make
+extension-xpi` builds the same file into `dist/` from a checkout. Installing it
+so that it survives a restart needs a Firefox that can be told not to require
+signatures:
+
+1. Use **Developer Edition**, **Nightly**, or **ESR**. Firefox **Release and
+   Beta cannot install this add-on permanently** — they enforce add-on signing
+   and offer no override, so for them the temporary path above is the only one.
+2. In `about:config`, set `xpinstall.signatures.required` to `false`.
+3. Open `about:addons` → the gear icon → **Install Add-on From File…** and
+   pick the `.xpi`.
+
+The add-on ID is `downer@kz-hq.github.io`, and the native messaging host allows
+exactly that ID. Both are read from `extension/manifest.json`, so an XPI built
+from a checkout and a released one register the same way.
+
+Verify a downloaded release against the `SHA256SUMS` published beside it:
+
+```sh
+sha256sum -c SHA256SUMS      # shasum -a 256 -c SHA256SUMS on macOS
+```
+
+The extension package is built reproducibly, so `make extension-xpi` on the
+tagged commit produces a file with the same checksum as the released one.
+
+**If signing ever becomes worthwhile**, the route that fits a private tool is
+AMO *unlisted* signing: `web-ext sign --channel unlisted` with a free AMO
+account and an API key and secret. It returns a signed XPI that installs in
+Firefox Release without publishing anything to the AMO catalogue. It is
+deliberately not part of the release pipeline today — it would put a credential
+in CI for a tool with one user.
 
 ### Installing the native host
 
@@ -332,6 +378,32 @@ Use `downer --help` for all options. Exit status `2` indicates invalid input,
 `3` an output-path problem, `4` an FFmpeg that is unavailable or older than the
 supported minimum, `5` a media or FFmpeg failure, and `6` a failing setup check
 from `downer doctor`.
+
+## Releasing
+
+A release is a `vX.Y.Z` tag. `.github/workflows/release.yml` builds
+`downer-<version>-<target>.tar.gz` for macOS arm64 and Linux x86_64, packages
+`downer-<version>.xpi`, writes one `SHA256SUMS`, and attaches all of it to a
+GitHub Release whose notes are that version's section of
+[`CHANGELOG.md`](CHANGELOG.md).
+
+To cut one: bump `version` in both `Cargo.toml` and `extension/manifest.json`,
+move the changelog's `Unreleased` entries under the new version, merge that,
+then tag the merge commit `vX.Y.Z` and push the tag. The workflow refuses to
+build if the tag and the two version fields disagree, so a half-done bump fails
+before it publishes anything.
+
+Everything the workflow does apart from talking to GitHub is in
+`scripts/release_artifacts.sh` and `scripts/release_collect.py`, which run on a
+laptop:
+
+```sh
+./scripts/release_artifacts.sh --out staged --tag v0.5.0
+```
+
+Running the workflow from the Actions tab (`workflow_dispatch`) builds and
+uploads the same artifacts without creating a Release, which is how to check a
+change to it before tagging.
 
 ## Roadmap, status, and handoffs
 

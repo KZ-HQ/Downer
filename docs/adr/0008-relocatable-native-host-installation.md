@@ -87,6 +87,16 @@ FFmpeg failure.
 `tests/host_install.rs` reads `extension/manifest.json` and fails if they
 differ — the same tactic `scripts/check_versions.py` uses for the version.
 
+**Amended by KEI-58.** The ID is no longer written in Rust at all.
+`extension/manifest.json` is the single source, because it is the file Firefox
+itself reads, and `build.rs` lifts
+`browser_specific_settings.gecko.id` out of it into `EXTENSION_ID` at compile
+time. The test above stays and now checks the build wiring rather than two
+hand-typed strings. The same change replaced the placeholder
+`downer@example.com` with the permanent `downer@kz-hq.github.io`, which is the
+ID the installer writes into `allowed_extensions` and the ID the published
+`.xpi` carries.
+
 ## Consequences
 
 * A user installs with `cargo install --path .` (or a released binary) followed
@@ -101,6 +111,13 @@ differ — the same tactic `scripts/check_versions.py` uses for the version.
   `--link` opt out where it matters.
 * Windows stays refused, now in Rust rather than in a shell script. KEI-67
   records the platform decision itself.
+* The extension ID is now permanent, and that is a one-way door. Firefox keys
+  an add-on's identity, and therefore its `browser.storage.local` settings, on
+  the ID; changing it makes an installed add-on a different add-on, orphaning
+  its settings and leaving the old one registered against a native host
+  manifest that no longer names it. Changing the ID means every machine with
+  Downer installed must remove the old add-on and install the new one, so
+  treat it as a breaking change for the installed base, not a rename.
 * What is tested is the manifest, the launcher, the copy, the config, and that
   the launcher really starts the host protocol. The end of the acceptance
   criterion — a real Firefox connecting on a clean account — still needs a

@@ -21,16 +21,24 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
+const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..");
+
+/**
+ * The add-on ID, read from the manifest Firefox itself reads rather than
+ * copied here. `build.rs` reads the same field for the native host's
+ * `allowed_extensions`, so the ID is written in exactly one place (KEI-58).
+ */
+export const EXTENSION_ID = JSON.parse(
+  fs.readFileSync(path.join(REPO_ROOT, "extension", "manifest.json"), "utf8"),
+).browser_specific_settings.gecko.id;
+
 /**
  * Firefox gives each installed extension a random internal UUID per profile,
  * which would make `moz-extension://` URLs unguessable. Pinning the UUID with
  * the `extensions.webextensions.uuids` pref lets a test open the extension's
  * own pages directly, which is how it reaches a page with WebExtension APIs.
  */
-export const EXTENSION_ID = "downer@example.com";
 export const EXTENSION_UUID = "3e6ec1a4-4e6d-4a23-9d1c-1f0d6c3b9f10";
-
-const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..");
 
 /** Binaries the setup script installs, overridable for local runs. */
 function resolveBinary(envVar, name) {

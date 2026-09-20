@@ -1,0 +1,130 @@
+name: Release
+
+# A `vX.Y.Z` tag publishes a GitHub Release. `workflow_dispatch` runs the same
+# build without publishing anything, so the artifacts can be downloaded and
+# checked from a run before a tag is ever pushed (KEI-58).
+#
+# `ci.yml` uses an unfiltered `on: push`, so pushing a tag also runs the full
+# `make check`, release build and packaging on both platforms. This workflow
+# therefore does not repeat them; what it adds is the version gate, the
+# release-shaped artifacts, and the Release itself.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  stage:
+    name: Stage (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest is arm64, ubuntu-latest is x86_64; the target triple is
+        # read from rustc rather than assumed here.
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+
+      - name: Cache cargo registry and build directory
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ matrix.os }}-cargo-
+
+      # One script, runnable on a laptop, does the build, the packaging and the
+      # checksums. On a tag it is given the tag, and refuses to build at all
+      # unless Cargo.toml, extension/manifest.json and the tag agree. A
+      # workflow_dispatch run has no tag and only checks the first two.
+      # The ref reaches the shell as an environment variable rather than by
+      # expansion into the script, so a tag name is data and never becomes part
+      # of the command.
+      - name: Stage the release artifacts
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$REF_TYPE" = "tag" ]; then
+            ./scripts/release_artifacts.sh --out staged --tag "$REF_NAME"
+          else
+            ./scripts/release_artifacts.sh --out staged
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: staged-${{ matrix.os }}
+          path: staged/
+          if-no-files-found: error
+
+  publish:
+    name: Publish the GitHub Release
+    needs: stage
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: staged-*
+          path: staged
+
+      # Re-verifies each platform's checksums, fails if the platforms produced
+      # different copies of the extension, and writes the single SHA256SUMS the
+      # Release carries.
+      - name: Collect the release files
+        run: python3 scripts/release_collect.py staged release
+
+      - name: Write the release notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          {
+            python3 scripts/changelog_section.py "$version"
+            echo
+            echo '## Installing'
+            echo
+            echo 'See "Installing the extension" and "Installing the native host" in the README.'
+            echo 'The extension is unsigned: Firefox Release and Beta cannot install it permanently.'
+            echo
+            echo '## Checksums'
+            echo
+            echo '```'
+            cat release/SHA256SUMS
+            echo '```'
+          } > release-notes.md
+          cat release-notes.md
+
+      # `gh` is present on GitHub-hosted runners, so this needs no third-party
+      # action. `--verify-tag` refuses to invent a tag that does not exist.
+      - name: Create the Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            --verify-tag \
+            release/*
