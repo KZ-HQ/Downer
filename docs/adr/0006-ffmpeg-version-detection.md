@@ -3,6 +3,9 @@
 * Status: Accepted
 * Date: 2026-09-19
 * Issue: [KEI-81](https://linear.app/kzhq/issue/KEI-81)
+* Follows: [ADR-0015](0015-ffmpeg-as-the-only-engine.md), which records why
+  those two options are passed in the first place. This record decides only what
+  happens when the FFmpeg found is too old to accept them.
 
 ## Context
 

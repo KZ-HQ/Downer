@@ -12,6 +12,26 @@ The Rust package and the Firefox extension share one product version; see
 
 ### Added
 
+- **A documentation set.** [`docs/user-guide.md`](docs/user-guide.md) covers
+  install, a first download, settings, controls, where files go and what Downer
+  does not do; [`docs/troubleshooting.md`](docs/troubleshooting.md) covers the
+  same ground by symptom, from "native host disconnected" through a missing
+  segment total to where the logs are; and
+  [`docs/architecture.md`](docs/architecture.md) covers the components, the data
+  flow from page to FFmpeg, and the trust and session boundaries. `README.md` is
+  now an overview, a quick start and links, and the "Known limitations" list it
+  used to carry lives in the user guide next to the remedies. Nothing was
+  dropped in the move.
+- **Five decision records for decisions the code had always made and nobody had
+  written down**: FFmpeg as the only engine, always stream-copying and never
+  bundled, including why HLS segment extensions are not validated (ADR-0015);
+  blocking I/O on OS threads rather than an async runtime (ADR-0016); Manifest
+  V2 with a persistent background page (ADR-0017); the CLI exit codes as a
+  stable interface (ADR-0018); and the native host being a mode of the CLI
+  binary rather than a second program (ADR-0019). `docs/adr/README.md` indexes
+  every record with its status, and `docs/adr/template.md` is the starting point
+  for the next one.
+
 - **Releases.** Pushing a `vX.Y.Z` tag now publishes a GitHub Release carrying
   the `downer` binary for macOS arm64 and Linux x86_64, the extension as
   `downer-<version>.xpi`, and a `SHA256SUMS` covering both. The workflow
