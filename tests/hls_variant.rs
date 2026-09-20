@@ -70,6 +70,7 @@ fn argv_for_with_text(url: &str, playlist_text: Option<&str>) -> Vec<String> {
         threads: None,
         quiet: true,
         playlist_text: playlist_text.map(str::to_string),
+        keep_partial: true,
     };
     downer::download_resolved(media, &options, Hooks::default()).expect("the fake download runs");
     recorded(temp.path())

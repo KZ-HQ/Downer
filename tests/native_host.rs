@@ -1823,3 +1823,333 @@ fn downer_ffmpeg_overrides_the_recorded_path() {
         "the configured FFmpeg never ran"
     );
 }
+
+/// Pause queued before FFmpeg exists is still honoured.
+///
+/// `ProcessControl::attach` reads the `paused` flag as it takes ownership of
+/// the child, so a pause that wins the race against the spawn stops the process
+/// the moment it appears rather than being lost. The test cannot control which
+/// order the race resolves in — that is the point: both orders must end with a
+/// job that is paused and going nowhere.
+#[test]
+fn pause_sent_before_ffmpeg_starts_holds_the_download() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg {
+        progress_updates: 2,
+        sleep_seconds: 1.0,
+        ..FakeFfmpeg::default()
+    }
+    .install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    let mut host = NativeHost::start(&ffmpeg);
+
+    let mut request = download_request("https://example.test/video.mp4", &output_dir);
+    request["job_id"] = json!("job-pause-early");
+    host.send(&request);
+    // `starting` is emitted before the worker thread spawns FFmpeg, so the
+    // pause is on the wire while the host is still getting there.
+    let starting = host.next_event();
+    assert_eq!(starting["state"], json!("starting"));
+    host.send(&json!({
+        "command": "pause",
+        "job_id": "job-pause-early",
+        "request_id": "job-pause-early-1",
+    }));
+
+    let (paused, _) = host.wait_for_state("paused");
+    assert_envelope(&paused, "ack");
+    assert_eq!(paused["ok"], json!(true));
+    host.expect_no_terminal_event(Duration::from_millis(1_500));
+    assert!(
+        !temp.path().join("finished").exists(),
+        "a paused FFmpeg must not have run to the end"
+    );
+
+    host.send(&json!({
+        "command": "resume",
+        "job_id": "job-pause-early",
+        "request_id": "job-pause-early-2",
+    }));
+    let (completed, _) = host.wait_for_state("completed");
+    assert_eq!(completed["ok"], json!(true));
+}
+
+/// Cancel reaches a stopped process. `SIGKILL` is not blockable and a stopped
+/// process still dies of it, so a paused download does not have to be resumed
+/// before it can be given up on.
+#[test]
+fn cancel_during_a_pause_ends_the_download() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg {
+        progress_updates: 1,
+        sleep_seconds: 30.0,
+        ..FakeFfmpeg::default()
+    }
+    .install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    let mut host = NativeHost::start(&ffmpeg);
+
+    let mut request = download_request("https://example.test/video.mp4", &output_dir);
+    request["job_id"] = json!("job-cancel-paused");
+    host.send(&request);
+    host.wait_for(|event| event["state"] == "downloading" && event["ok"] == json!(true));
+
+    host.send(&json!({
+        "command": "pause",
+        "job_id": "job-cancel-paused",
+        "request_id": "job-cancel-paused-1",
+    }));
+    host.wait_for_state("paused");
+
+    host.send(&json!({
+        "command": "cancel",
+        "job_id": "job-cancel-paused",
+        "request_id": "job-cancel-paused-2",
+    }));
+    let (cancelled, _) = host.wait_for_state("cancelled");
+    assert_envelope(&cancelled, "terminal");
+    assert_eq!(cancelled["error_code"], json!("cancelled"));
+    assert!(
+        !temp.path().join("finished").exists(),
+        "cancel must kill a stopped FFmpeg too"
+    );
+}
+
+/// A download that dies at the resume is reported as `resume_failed`, not as an
+/// ordinary failure. The fake produces no further output after being continued
+/// and then exits non-zero, which is exactly the shape a CDN-closed connection
+/// takes: FFmpeg was told to carry on and never did.
+#[test]
+fn a_download_that_dies_at_the_resume_says_so() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg {
+        progress_updates: 1,
+        sleep_seconds: 3.0,
+        exit_code: 1,
+        ..FakeFfmpeg::default()
+    }
+    .install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    let mut host = NativeHost::start(&ffmpeg);
+
+    let mut request = download_request("https://example.test/video.mp4", &output_dir);
+    request["job_id"] = json!("job-resume-failed");
+    // Playlist totals only so that FFmpeg's first progress report is visible on
+    // the wire: without them a `progress` event carries no numbers to wait for.
+    request["total_segments"] = json!(10);
+    request["total_duration_ms"] = json!(10_000);
+    host.send(&request);
+    // One second of output has been produced, so the resume mark is set to a
+    // value the fake will never exceed.
+    host.wait_for(|event| event["completed_segments"] == json!(1));
+
+    host.send(&json!({
+        "command": "pause",
+        "job_id": "job-resume-failed",
+        "request_id": "job-resume-failed-1",
+    }));
+    host.wait_for_state("paused");
+    host.send(&json!({
+        "command": "resume",
+        "job_id": "job-resume-failed",
+        "request_id": "job-resume-failed-2",
+    }));
+
+    let (failed, _) = host.wait_for_state("failed");
+    assert_envelope(&failed, "terminal");
+    assert_eq!(
+        failed["error_code"],
+        json!("resume_failed"),
+        "a failure with no output since the resume is a resume failure: {failed}"
+    );
+    assert!(
+        protocol_strings("/error_codes").contains(&"resume_failed".to_string()),
+        "resume_failed is listed in tests/fixtures/protocol.json"
+    );
+}
+
+/// The same failure without a pause is an ordinary one. Without this the code
+/// above could be produced by any failing download and would mean nothing.
+#[test]
+fn a_failure_with_no_resume_behind_it_is_an_ordinary_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg {
+        progress_updates: 1,
+        sleep_seconds: 0.05,
+        exit_code: 1,
+        ..FakeFfmpeg::default()
+    }
+    .install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    let mut host = NativeHost::start(&ffmpeg);
+
+    let mut request = download_request("https://example.test/video.mp4", &output_dir);
+    request["job_id"] = json!("job-plain-failure");
+    host.send(&request);
+
+    let (failed, _) = host.wait_for_state("failed");
+    assert_eq!(failed["error_code"], json!("download_failed"));
+}
+
+/// Cancelling deletes what FFmpeg had written, because that is what an absent
+/// `keep_partial` means — and absent is what every request sends unless the
+/// user turned the setting on.
+#[test]
+fn a_cancelled_download_deletes_its_part_written_file_by_default() {
+    let temp = tempfile::tempdir().unwrap();
+    // Many short sleeps rather than one long one: the fake is a shell script,
+    // and a `sleep` it started inherits FFmpeg's pipes. Killing the shell does
+    // not close them, so a 30-second sleep would hold the terminal event back
+    // for 30 seconds. A tenth of a second holds it back for a tenth of one.
+    let ffmpeg = FakeFfmpeg {
+        progress_updates: 100,
+        sleep_seconds: 0.1,
+        ..FakeFfmpeg::default()
+    }
+    .install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    let mut host = NativeHost::start(&ffmpeg);
+
+    let mut request = download_request("https://example.test/video.mp4", &output_dir);
+    request["job_id"] = json!("job-partial-default");
+    assert!(
+        request.get("keep_partial").is_none(),
+        "the default is expressed by the field being absent"
+    );
+    host.send(&request);
+    host.wait_for(|event| event["state"] == "downloading" && event["ok"] == json!(true));
+    // The fake writes its output before its first sleep, so there is a real
+    // file to delete by the time the cancel lands.
+    let partial = output_dir.join("video.mp4");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !partial.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        partial.exists(),
+        "FFmpeg wrote its output before the cancel"
+    );
+
+    host.send(&json!({
+        "command": "cancel",
+        "job_id": "job-partial-default",
+        "request_id": "job-partial-default-1",
+    }));
+    host.wait_for_state("cancelled");
+    assert!(
+        !partial.exists(),
+        "a cancelled download leaves nothing behind by default"
+    );
+}
+
+/// `keep_partial: true` is the opt-in, and it keeps the fragment.
+#[test]
+fn keep_partial_keeps_a_cancelled_downloads_part_written_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg {
+        progress_updates: 100,
+        sleep_seconds: 0.1,
+        ..FakeFfmpeg::default()
+    }
+    .install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    let mut host = NativeHost::start(&ffmpeg);
+
+    let mut request = download_request("https://example.test/video.mp4", &output_dir);
+    request["job_id"] = json!("job-partial-kept");
+    request["keep_partial"] = json!(true);
+    host.send(&request);
+    host.wait_for(|event| event["state"] == "downloading" && event["ok"] == json!(true));
+    let partial = output_dir.join("video.mp4");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !partial.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(partial.exists());
+
+    host.send(&json!({
+        "command": "cancel",
+        "job_id": "job-partial-kept",
+        "request_id": "job-partial-kept-1",
+    }));
+    host.wait_for_state("cancelled");
+    assert_eq!(
+        fs::read_to_string(&partial).unwrap(),
+        "fake media",
+        "keep_partial: true keeps the fragment untouched"
+    );
+}
+
+/// A *failure* keeps its fragment whatever `keep_partial` says. The setting is
+/// about cancelling — the one case where the user has said they do not want the
+/// file. A download that died on its own is evidence, and deleting evidence at
+/// the moment something went wrong is not a default anyone asked for.
+#[test]
+fn a_failed_download_keeps_its_part_written_file_whatever_the_setting() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg {
+        progress_updates: 1,
+        sleep_seconds: 0.05,
+        exit_code: 1,
+        ..FakeFfmpeg::default()
+    }
+    .install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    let mut host = NativeHost::start(&ffmpeg);
+
+    let mut request = download_request("https://example.test/video.mp4", &output_dir);
+    request["job_id"] = json!("job-partial-failure");
+    request["keep_partial"] = json!(false);
+    host.send(&request);
+
+    let (failed, _) = host.wait_for_state("failed");
+    assert_eq!(failed["error_code"], json!("download_failed"));
+    assert_eq!(
+        fs::read_to_string(output_dir.join("video.mp4")).unwrap(),
+        "fake media",
+        "a failure keeps its fragment even with keep_partial off"
+    );
+}
+
+/// EOF on the port is not a cancel anyone asked for, so it keeps the file.
+///
+/// This is what closing Firefox looks like from here. The extension reconciles
+/// such a job to `interrupted` on its next start and tells the user the
+/// part-written file is still there — a promise the cancel policy must not
+/// quietly break.
+#[test]
+fn a_download_stopped_by_the_port_closing_keeps_its_part_written_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg {
+        progress_updates: 100,
+        sleep_seconds: 0.1,
+        ..FakeFfmpeg::default()
+    }
+    .install(temp.path());
+    let output_dir = temp.path().join("downloads");
+    let mut host = NativeHost::start(&ffmpeg);
+
+    let mut request = download_request("https://example.test/video.mp4", &output_dir);
+    request["job_id"] = json!("job-port-closed");
+    // The deletion policy that would apply to a real cancel, made explicit so
+    // this test fails if shutdown ever starts taking that path.
+    request["keep_partial"] = json!(false);
+    host.send(&request);
+    host.wait_for(|event| event["state"] == "downloading" && event["ok"] == json!(true));
+    let partial = output_dir.join("video.mp4");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !partial.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        partial.exists(),
+        "FFmpeg wrote its output before the shutdown"
+    );
+
+    host.close_stdin();
+    assert_eq!(host.wait_for_exit(Duration::from_secs(10)), 0);
+    assert!(
+        partial.exists(),
+        "a browser restart must not delete what was downloaded"
+    );
+}

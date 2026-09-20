@@ -36,6 +36,11 @@
       Name downloads after the page title
     </label>
     <p class="hint">Off by default. When on, a download whose media URL has no useful filename is named after the page's title instead of <code>video.mp4</code>. Page titles can contain account or document names, which would then appear in your Downloads folder.</p>
+    <label class="checkbox">
+      <input id="keep-partial" type="checkbox">
+      Keep the part-written file when I cancel a download
+    </label>
+    <p class="hint">Off by default: cancelling deletes what was written so far, because a cancel means you did not want the file. Turn this on to keep the fragment — it will not play, but it is evidence for why a download went wrong. A download that <em>fails</em> on its own always keeps its part-written file, whichever way this is set.</p>
     <button id="save">Save</button>
     <p id="status"></p>
     <section aria-labelledby="setup-heading">

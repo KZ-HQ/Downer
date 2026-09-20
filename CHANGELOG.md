@@ -12,6 +12,19 @@ The Rust package and the Firefox extension share one product version; see
 
 ### Added
 
+- Written, tested semantics for **Pause, Resume and Cancel**, in
+  `docs/protocol.md` and the README, decided in
+  `docs/adr/0012-control-semantics.md`. Pause is process suspension, not
+  protocol-level pausing: a stopped FFmpeg holds idle sockets that a server may
+  close, so a long pause can cost the download, and the popup now says so while
+  the download is paused.
+- A new terminal `error_code`, **`resume_failed`**: a job that fails with no
+  FFmpeg output since its resume died at the resume, not at the media. The
+  popup says the connection was lost while paused and offers Retry, instead of
+  reporting the media as undownloadable. The state is still `failed` and there
+  is still one terminal event per job.
+- A **"keep the part-written file when I cancel"** setting (off by default) and
+  the matching optional `keep_partial` field on the `download` request.
 - `downer doctor` and a **Check setup** panel on the extension's Settings page,
   both reporting the same checks: the native host is registered with Firefox
   and its launcher exists, FFmpeg runs and is new enough, and the download
@@ -135,6 +148,16 @@ The Rust package and the Firefox extension share one product version; see
 
 ### Changed
 
+- **Cancelling a download now deletes what FFmpeg had written.** It used to be
+  kept, and the popup said so — but nothing had decided that; it was what
+  happened when nothing deleted the file. A cancel is the user saying they do
+  not want the file, so the fragment goes with it unless the new setting is on.
+  A download that *fails* still keeps its part-written file whatever the
+  setting says: that fragment is the evidence for the failure.
+- Pause and Resume are hidden where the host reports
+  `capabilities.pause_resume: false`, instead of being offered on every
+  platform and failing. Cancel is still offered everywhere, including on a
+  paused download.
 - HLS playlists are now parsed in one place. The extension fetches them — only
   the page's context carries the session a protected CDN answers — and sends the
   text to the native host, which reads it for the segment totals and the

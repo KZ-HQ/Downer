@@ -54,6 +54,14 @@ pub struct DownloadOptions {
     /// answers (KEI-87). Absent, the host fetches for itself as before. See
     /// `docs/adr/0011-one-playlist-parser.md`.
     pub playlist_text: Option<String>,
+    /// Keep the partly written file when a download is **cancelled**.
+    ///
+    /// Off by default: a cancel is the user saying they do not want this file,
+    /// so leaving a broken one in their downloads makes cleaning up their
+    /// problem. A *failed* download keeps its partial either way — that one is
+    /// the evidence for why it failed, and deleting it is irreversible at the
+    /// worst possible moment. See `docs/adr/0012-control-semantics.md`.
+    pub keep_partial: bool,
 }
 
 impl DownloadOptions {
@@ -136,6 +144,10 @@ pub fn run(cli: Cli) -> DownerResult<()> {
         quiet: false,
         // The CLI has no browser session to fetch with, so the host fetches.
         playlist_text: None,
+        // Nothing can cancel a CLI download: Ctrl-C terminates the process and
+        // no cleanup runs. The value is inert here rather than a flag that
+        // would do nothing. See ADR-0012.
+        keep_partial: true,
     };
     download_resolved(media, &options, Hooks::default()).map(|_| ())
 }
@@ -336,6 +348,10 @@ pub fn download_resolved(
         },
     };
 
+    // Bound before the callbacks are moved into the executor below. Whether the
+    // control was cancelled is what distinguishes "the user stopped this" from
+    // "this went wrong", and the two get different treatment on failure.
+    let control = hooks.control;
     let result = match hooks.control {
         Some(control) => {
             let on_progress = hooks.on_progress;
@@ -365,6 +381,17 @@ pub fn download_resolved(
             // Anything FFmpeg did write is kept; `release_reservation` only
             // takes the file back while it is still empty.
             release_reservation(&target);
+            // A cancelled download is one the user said they did not want, so
+            // by default its partial goes too. A *failed* one keeps its
+            // partial: that file is the evidence for the failure, and a
+            // download that died at 90% may still be worth having. See
+            // ADR-0012.
+            // `cancelled_by_request`, not `is_cancelled`: a job stopped
+            // because the native port closed was not cancelled by anyone, and
+            // the extension already promises that such a job keeps its file.
+            if !options.keep_partial && control.is_some_and(ProcessControl::cancelled_by_request) {
+                remove_partial(&target.path);
+            }
             return Err(match (outdated, error) {
                 // An old FFmpeg that fails names itself, whatever it failed at.
                 (Some(version), DownerError::FfmpegFailed { stderr, .. }) => {
@@ -382,6 +409,15 @@ pub fn download_resolved(
         println!("Download complete: {}", destination.display());
     }
     Ok(destination)
+}
+
+/// Delete a cancelled download's partly written file.
+///
+/// Best-effort on purpose. The download has already ended and the user has
+/// already been told; a file that cannot be removed — permissions, a vanished
+/// directory — is not worth turning a clean cancel into an error report.
+fn remove_partial(path: &Path) {
+    let _ = std::fs::remove_file(path);
 }
 
 /// Whether an input is an HLS playlist.

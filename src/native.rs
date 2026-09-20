@@ -53,6 +53,11 @@ const ERROR_INVALID_HLS_INFO: &str = "invalid_hls_info";
 const ERROR_DOWNLOAD_FAILED: &str = "download_failed";
 const ERROR_CONTROL_FAILED: &str = "control_failed";
 const ERROR_CANCELLED: &str = "cancelled";
+/// A download that died at the resume, before FFmpeg produced any further
+/// output. Separate from `download_failed` because the remedy differs: the
+/// input is fine, the connections it was holding are not. See
+/// `docs/adr/0012-control-semantics.md`.
+const ERROR_RESUME_FAILED: &str = "resume_failed";
 
 static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(1);
 type SharedOutput = Arc<Mutex<io::Stdout>>;
@@ -122,6 +127,15 @@ struct NativeRequest {
     total_segments: Option<u64>,
     #[serde(default)]
     total_duration_ms: Option<u64>,
+    /// Keep the partly written file when the download is **cancelled**.
+    ///
+    /// Absent means delete it: a cancel is the user saying they do not want
+    /// this file, and a half-written video left in their downloads folder is
+    /// litter they did not ask for. A client that wants the fragment for
+    /// diagnostics asks for it. Failures are not cancels — those keep their
+    /// partial file either way. See `docs/adr/0012-control-semantics.md`.
+    #[serde(default)]
+    keep_partial: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -414,7 +428,13 @@ fn start_download(
                     // token would simply move from the log to the failure
                     // message the popup shows and persists.
                     error: Some(crate::redact::redact_text(&error.to_string())),
-                    error_code: Some(ERROR_DOWNLOAD_FAILED),
+                    // Still `failed`, still one terminal event: only the code
+                    // and the advice change. A resume failure is a failure.
+                    error_code: Some(if worker_task.control.resume_pending() {
+                        ERROR_RESUME_FAILED
+                    } else {
+                        ERROR_DOWNLOAD_FAILED
+                    }),
                     job_id: Some(worker_job_id.clone()),
                     state: Some("failed".to_string()),
                     ..NativeResponse::default()
@@ -642,10 +662,15 @@ fn cancelled_response(job_id: &str) -> NativeResponse {
     }
 }
 
+/// Stop every running job because the port closed — Firefox quitting, the
+/// extension reloading, a crash. Not a cancel anyone asked for, so the
+/// part-written files are kept whatever `keep_partial` says: the extension
+/// reconciles such a job to `interrupted` on its next start and tells the user
+/// the file is still there.
 fn cancel_all(tasks: &ActiveTasks) {
     if let Ok(active) = tasks.lock() {
         for task in active.values() {
-            let _ = task.control.cancel();
+            let _ = task.control.cancel_for_shutdown();
         }
     }
 }
@@ -703,6 +728,7 @@ fn download(
         threads: request.threads,
         quiet: true,
         playlist_text: request.playlist_text.clone(),
+        keep_partial: request.keep_partial,
     };
     let info = task.hls_info.lock().ok().and_then(|info| *info);
     let state = if task.control.is_paused() {
