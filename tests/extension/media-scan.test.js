@@ -160,3 +160,93 @@ test("collectCandidates tolerates being called with nothing", () => {
   assert.deepEqual(collectCandidates(), []);
   assert.deepEqual(collectCandidates({ baseUrl: PAGE_BASE }), []);
 });
+
+// ---------------------------------------------------------------------------
+// KEI-61: which candidates are listed, and how well they are believed.
+// ---------------------------------------------------------------------------
+
+const { mediaKind, collapseSegments } = require("../../extension/media-scan.js");
+
+/**
+ * The detection rule comes from one place, as the extension list does.
+ *
+ * `src/scraper.rs::media_kind` asserts against the same table in
+ * `scraper::tests::media_kinds_match_the_shared_case_table`, so a rule change
+ * on one side without the other fails here or there.
+ */
+test("media kinds match the shared case table", () => {
+  assert.ok(sharedVocabulary.detection_cases.length >= 12);
+  for (const { url, kind, why } of sharedVocabulary.detection_cases) {
+    assert.equal(mediaKind(url), kind, `${url}: ${why}`);
+  }
+});
+
+test("a TypeScript bundle and an image with a media-like name are not listed", () => {
+  const found = collectCandidates({
+    html: `
+      <script type="module" src="/src/main.ts"></script>
+      <script type="module" src="/assets/app.tsx"></script>
+      <img src="https://cdn.example.test/thumbs/poster.mp4.jpg">
+      <a href="/go?next=.mp4">next</a>
+      <video src="/clip.mp4"></video>
+    `,
+    baseUrl: PAGE_BASE
+  });
+  assert.deepEqual(urls(found), ["https://example.test/clip.mp4"]);
+});
+
+test("a segment is hidden when the playlist that lists it is present", () => {
+  const found = collectCandidates({
+    resourceUrls: [
+      "https://cdn.example.test/v/master.m3u8",
+      "https://cdn.example.test/v/high/seg-001.ts",
+      "https://cdn.example.test/v/high/seg-002.ts"
+    ],
+    baseUrl: PAGE_BASE
+  });
+  assert.deepEqual(urls(found), ["https://cdn.example.test/v/master.m3u8"]);
+});
+
+test("a segment with no playlist in sight is still listed", () => {
+  const found = collapseSegments([
+    { url: "https://cdn.example.test/v/seg-001.ts", kind: "file" }
+  ]);
+  assert.equal(found.length, 1);
+});
+
+test("a resource the player loaded outranks a URL only found in the markup", () => {
+  const played = "https://cdn.example.test/v/master.m3u8";
+  const mentioned = "https://cdn.example.test/other/backup.m3u8";
+  const found = collectCandidates({
+    resourceUrls: [played],
+    html: `<script>var fallback = "${mentioned}"; var current = "${played}";</script>`,
+    baseUrl: PAGE_BASE
+  });
+  assert.deepEqual(urls(found), [played, mentioned]);
+  assert.equal(found[0].confidence, "observed", "the player actually fetched it");
+  assert.equal(found[1].confidence, "inferred", "this one only appears in the text");
+});
+
+test("a DOM attribute is declared, and the better evidence wins on a duplicate", () => {
+  const url = "https://cdn.example.test/v/master.m3u8";
+  const declared = collectCandidates({ attributeValues: [url], baseUrl: PAGE_BASE });
+  assert.equal(declared[0].confidence, "declared");
+
+  // The same URL through both passes is one candidate, at the better rank.
+  const both = collectCandidates({
+    attributeValues: [url],
+    resourceUrls: [url],
+    baseUrl: PAGE_BASE
+  });
+  assert.equal(both.length, 1);
+  assert.equal(both[0].confidence, "observed");
+});
+
+test("DASH is classified and flagged experimental rather than called video", () => {
+  const found = collectCandidates({
+    resourceUrls: ["https://cdn.example.test/v/manifest.mpd"],
+    baseUrl: PAGE_BASE
+  });
+  assert.equal(found[0].kind, "dash");
+  assert.equal(found[0].experimental, true);
+});

@@ -16,7 +16,7 @@ use cli::Cli;
 use error::{DownerError, DownerResult};
 use ffmpeg::{execute, FfmpegInvocation, FfmpegProgress, ProcessControl, Reporting};
 use output::{release_reservation, resolve_conflict, resolve_output_path, NamingHints, OnConflict};
-use scraper::ResolvedMedia;
+use scraper::{RenditionChoice, ResolvedMedia};
 
 /// Environment variable holding a cookie header, used when neither `--cookie`
 /// nor `--cookie-file` is supplied.
@@ -55,6 +55,13 @@ pub struct DownloadOptions {
     /// answers (KEI-87). Absent, the host fetches for itself as before. See
     /// `docs/adr/0011-one-playlist-parser.md`.
     pub playlist_text: Option<String>,
+    /// The rendition the caller chose, when they chose one.
+    ///
+    /// Absent means the default rule decides — highest bandwidth, exactly as
+    /// before — so an unchosen download is unchanged (KEI-89's criterion).
+    /// Present and not declared by the master is an error, not a fallback; see
+    /// [`DownerError::VariantNotOffered`].
+    pub rendition: Option<scraper::RenditionChoice>,
     /// Keep the partly written file when a download is **cancelled**.
     ///
     /// Off by default: a cancel is the user saying they do not want this file,
@@ -119,6 +126,17 @@ fn normalize_cookie(raw: &str) -> Option<String> {
 }
 
 /// Run one download and return an error that the binary can map to a stable exit code.
+/// A rendition choice in the words the user used, for the error that says it
+/// was not on offer.
+fn describe_rendition(choice: &RenditionChoice) -> String {
+    match choice {
+        RenditionChoice::Best => "best".to_string(),
+        RenditionChoice::Worst => "worst".to_string(),
+        RenditionChoice::Height(height) => format!("{height}p"),
+        RenditionChoice::Exact(url) => url.to_string(),
+    }
+}
+
 pub fn run(cli: Cli) -> DownerResult<()> {
     if let Some(command) = cli.command {
         return run_command(command);
@@ -145,6 +163,7 @@ pub fn run(cli: Cli) -> DownerResult<()> {
         quiet: false,
         // The CLI has no browser session to fetch with, so the host fetches.
         playlist_text: None,
+        rendition: cli.rendition,
         // Nothing can cancel a CLI download: Ctrl-C terminates the process and
         // no cleanup runs. The value is inert here rather than a flag that
         // would do nothing. See ADR-0012.
@@ -349,14 +368,14 @@ pub fn download_resolved(
     // is fetched, and the same one lands on disk. Best-effort by design: an
     // unresolvable playlist falls back to the URL as given, which is what this
     // did before. See ADR-0010.
-    let input = if !is_hls(url.as_str()) {
-        url.clone()
+    let chosen = if !is_hls(url.as_str()) {
+        None
     } else if let Some(text) = options.playlist_text.as_deref() {
         // Already fetched by whoever had the session; parsing it here is what
         // keeps one implementation of what a playlist means.
         match scraper::parse_playlist(text, url) {
-            scraper::Playlist::Master { variant } => variant.unwrap_or_else(|| url.clone()),
-            scraper::Playlist::Media(_) | scraper::Playlist::Unusable => url.clone(),
+            scraper::Playlist::Master(master) => master.choose(options.rendition.as_ref()),
+            scraper::Playlist::Media(_) | scraper::Playlist::Unusable => None,
         }
     } else {
         scraper::resolve_variant(
@@ -364,16 +383,36 @@ pub fn download_resolved(
             &options.user_agent,
             media.referer.as_ref(),
             options.cookie.as_deref(),
+            options.rendition.as_ref(),
         )
-        .unwrap_or_else(|| url.clone())
     };
+    // A rendition that was asked for and is not on offer stops the download.
+    // Falling back to the default here would hand the user a different quality
+    // from the one they picked without saying so.
+    if let Some(requested) = &options.rendition {
+        if chosen.is_none() {
+            return Err(DownerError::VariantNotOffered(describe_rendition(
+                requested,
+            )));
+        }
+    }
+    let input = chosen
+        .as_ref()
+        .map_or_else(|| url.clone(), |choice| choice.video.clone());
+    // Only when the master carries audio outside the variant. Handing FFmpeg
+    // the video alone there loses the sound — measured; see ADR-0014.
+    let audio_input = chosen.as_ref().and_then(|choice| choice.audio.clone());
     if !options.quiet && input != *url {
         println!("Selected rendition: {input}");
+        if let Some(audio) = &audio_input {
+            println!("Selected audio rendition: {audio}");
+        }
     }
 
     let invocation = FfmpegInvocation {
         program: options.ffmpeg.clone(),
         input: input.as_str().to_string(),
+        audio_input: audio_input.as_ref().map(|url| url.as_str().to_string()),
         headers: scraper::ffmpeg_headers(media.referer.as_ref(), &options.user_agent),
         // Scoped to this URL's host, so a redirect target or a cross-host HLS
         // segment server never receives the media host's session.
@@ -503,7 +542,8 @@ pub fn exit_code(error: &DownerError) -> i32 {
         }
         DownerError::FfmpegFailed { .. }
         | DownerError::SourceFetchFailed { .. }
-        | DownerError::MediaNotFound(_) => MEDIA_FAILURE_EXIT,
+        | DownerError::MediaNotFound(_)
+        | DownerError::VariantNotOffered(_) => MEDIA_FAILURE_EXIT,
         DownerError::SetupCheckFailed => SETUP_EXIT,
         DownerError::OutputIo(_) => OUTPUT_EXIT,
         DownerError::NativeIo(_) | DownerError::Host(_) => 1,

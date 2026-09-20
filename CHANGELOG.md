@@ -12,6 +12,27 @@ The Rust package and the Firefox extension share one product version; see
 
 ### Added
 
+- **A rendition picker.** The popup now enumerates what an HLS master playlist
+  offers — resolution and bit rate, ordered by what the playlist declares
+  rather than the order it lists them in — and lets you pick one. Not picking
+  downloads what it always did, the highest bandwidth, so the one-click path is
+  unchanged. A media playlist, or a master with one rendition, shows no picker
+  rather than a picker with nothing to decide.
+- **A chosen rendition keeps its audio.** When a master carries audio outside
+  the video variant (`#EXT-X-MEDIA` with a `URI`), the download now hands
+  FFmpeg the video and the audio together. Previously such a master was left
+  unresolved and every rendition was downloaded, because taking the video
+  variant alone silently lost the sound. Measured both ways in
+  `docs/adr/0014-pair-a-rendition-with-its-audio.md`.
+- `--rendition <best|worst|720p|1280x720|URL>` on the CLI, doing the same
+  thing. A rendition the playlist does not offer stops the download rather
+  than quietly becoming another one.
+- A `playlist-info` command on the native messaging protocol, and a matching
+  `playlist_info` capability, so the popup can ask the host what a playlist
+  offers. The extension fetches the playlist in the page's session and the host
+  parses it, as `docs/adr/0011-one-playlist-parser.md` requires. An optional
+  `variant_url` field on `download` carries the choice. Both are non-breaking
+  additions; the protocol version stays at 1.
 - Written, tested semantics for **Pause, Resume and Cancel**, in
   `docs/protocol.md` and the README, decided in
   `docs/adr/0012-control-semantics.md`. Pause is process suspension, not
@@ -145,6 +166,25 @@ The Rust package and the Firefox extension share one product version; see
   the host with a minimal environment, so `DOWNER_FFMPEG` is not something a
   user can set for it; the recorded path is used unless `DOWNER_FFMPEG` does
   override it.
+
+### Changed
+
+- **Which URLs are listed as downloadable.** Detection now matches the last
+  extension of the URL's *path* instead of looking for one anywhere in the
+  whole URL. A page's TypeScript (`main.ts`), an image named `poster.mp4.jpg`
+  and a link like `?next=.mp4` are no longer offered as media; a signed URL
+  such as `/video.m3u8?token=…` still is. A `.ts` URL counts as media only when
+  it looks like a packager's segment, and a segment whose playlist is also on
+  the page is folded into it rather than listed beside it.
+- The popup separates what the player actually loaded from what was only found
+  in the page's text. The latter is collapsed under "other candidates" instead
+  of ranked alongside.
+- A DASH manifest is labelled `DASH` and marked experimental, rather than shown
+  as an ordinary video. Nothing has validated `.mpd` against FFmpeg yet.
+- A master whose only separately declared rendition is subtitles is now
+  resolved to one variant like any other master. It was previously left alone
+  by a guard meant for audio, which cost twice the data for a byte-identical
+  file.
 
 ### Fixed
 

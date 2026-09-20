@@ -2535,3 +2535,163 @@ fn the_setup_check_reports_the_same_default_directory() {
         home.join("Downloads")
     );
 }
+
+// ---------------------------------------------------------------------------
+// `playlist-info`: what a master offers, so the popup can offer it (KEI-61).
+// ---------------------------------------------------------------------------
+
+/// A master with separately declared audio, as a real packager writes one:
+/// lowest variant first, two audio languages, and a subtitle rendition that is
+/// neither usable nor a reason to decline (ADR-0014).
+fn separate_audio_master() -> String {
+    concat!(
+        "#EXTM3U\n",
+        "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"English\",DEFAULT=YES,LANGUAGE=\"en\",URI=\"audio/en.m3u8\"\n",
+        "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"French\",DEFAULT=NO,LANGUAGE=\"fr\",URI=\"audio/fr.m3u8\"\n",
+        "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"sub\",NAME=\"English\",DEFAULT=YES,URI=\"subs/en.m3u8\"\n",
+        "#EXT-X-STREAM-INF:BANDWIDTH=200000,RESOLUTION=320x180,CODECS=\"avc1.42c00d,mp4a.40.2\",AUDIO=\"aud\"\n",
+        "low/video.m3u8\n",
+        "#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=1280x720,CODECS=\"avc1.64001f,mp4a.40.2\",AUDIO=\"aud\"\n",
+        "high/video.m3u8\n",
+    )
+    .to_string()
+}
+
+#[test]
+fn playlist_info_enumerates_a_masters_renditions_best_first() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg::default().install(temp.path());
+    let mut host = NativeHost::start(&ffmpeg);
+
+    host.send(&json!({
+        "command": "playlist-info",
+        "protocol_version": 1,
+        "request_id": "pi-1",
+        "url": "https://cdn.test/v/master.m3u8",
+        "playlist_text": separate_audio_master(),
+    }));
+    let event = host.next_event();
+    assert_envelope(&event, "playlist-info");
+    assert_eq!(event["ok"], json!(true));
+    assert_eq!(event["request_id"], json!("pi-1"));
+    assert_eq!(event["playlist_kind"], json!("master"));
+    assert!(
+        protocol_strings("/playlist_kinds").contains(&"master".to_string()),
+        "the kind is in the shared vocabulary"
+    );
+
+    let renditions = event["renditions"].as_array().expect("renditions");
+    assert_eq!(renditions.len(), 2, "{event}");
+    // The fixture lists the low rendition first. Publisher order is not
+    // quality order — KEI-89 measured a master where the first was the worst.
+    assert_eq!(
+        renditions[0]["url"],
+        json!("https://cdn.test/v/high/video.m3u8")
+    );
+    assert_eq!(renditions[0]["bandwidth"], json!(900_000));
+    assert_eq!(renditions[0]["width"], json!(1280));
+    assert_eq!(renditions[0]["height"], json!(720));
+    assert_eq!(renditions[0]["default"], json!(true));
+    // Reported so the popup can say the download includes it, not so the
+    // popup can send it back: the host re-derives it at download time.
+    assert_eq!(
+        renditions[0]["audio_url"],
+        json!("https://cdn.test/v/audio/en.m3u8"),
+        "DEFAULT=YES wins within the group"
+    );
+    assert_eq!(renditions[1]["bandwidth"], json!(200_000));
+    assert_eq!(renditions[1]["default"], json!(false));
+}
+
+#[test]
+fn playlist_info_reports_a_media_playlist_as_having_nothing_to_choose() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg::default().install(temp.path());
+    let mut host = NativeHost::start(&ffmpeg);
+
+    host.send(&json!({
+        "command": "playlist-info",
+        "protocol_version": 1,
+        "request_id": "pi-2",
+        "url": "https://cdn.test/v/video.m3u8",
+        "playlist_text": "#EXTM3U\n#EXTINF:4.0,\nseg-1.ts\n#EXTINF:4.0,\nseg-2.ts\n#EXT-X-ENDLIST\n",
+    }));
+    let event = host.next_event();
+    assert_envelope(&event, "playlist-info");
+    assert_eq!(event["playlist_kind"], json!("media"));
+    assert_eq!(event["total_segments"], json!(2));
+    assert_eq!(
+        event["renditions"].as_array().map(Vec::len),
+        Some(0),
+        "a media playlist offers no choice, so the popup shows no picker: {event}"
+    );
+}
+
+#[test]
+fn playlist_info_without_playlist_text_is_rejected_and_ends_no_job() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg::default().install(temp.path());
+    let mut host = NativeHost::start(&ffmpeg);
+
+    host.send(&json!({
+        "command": "playlist-info",
+        "protocol_version": 1,
+        "request_id": "pi-3",
+        "url": "https://cdn.test/v/master.m3u8",
+    }));
+    let event = host.next_event();
+    assert_envelope(&event, "rejected");
+    assert_eq!(event["error_code"], json!("invalid_request"));
+    assert_eq!(event["request_id"], json!("pi-3"));
+    // `rejected` is a connection state, never a job state.
+    assert!(
+        !protocol_strings("/job_states/terminal").contains(&"rejected".to_string()),
+        "rejected is not terminal"
+    );
+}
+
+#[test]
+fn hello_advertises_playlist_info_so_an_older_host_simply_offers_no_picker() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg::default().install(temp.path());
+    let mut host = NativeHost::start(&ffmpeg);
+
+    host.send(&json!({"command": "hello", "protocol_version": 1, "request_id": "h"}));
+    let event = host.next_event();
+    assert_eq!(
+        event["capabilities"]["playlist_info"],
+        json!(true),
+        "{event}"
+    );
+}
+
+/// The other half of the contract: naming a rendition the master does not
+/// declare fails the download rather than downloading a different quality.
+#[test]
+fn a_download_naming_an_unoffered_rendition_fails_instead_of_substituting() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg::default().install(temp.path());
+    let mut host = NativeHost::start(&ffmpeg);
+
+    host.send(&json!({
+        "command": "download",
+        "protocol_version": 1,
+        "job_id": "job-variant",
+        "request_id": "job-variant-start",
+        "url": "https://cdn.test/v/master.m3u8",
+        "output_dir": temp.path(),
+        "playlist_text": separate_audio_master(),
+        "variant_url": "https://cdn.test/v/4k/video.m3u8",
+    }));
+    let (event, _) = host.wait_for(|event| event["type"] == json!("terminal"));
+    assert_eq!(event["state"], json!("failed"), "{event}");
+    assert_eq!(event["job_id"], json!("job-variant"), "{event}");
+    assert_eq!(event["error_code"], json!("download_failed"), "{event}");
+    assert!(
+        event["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("does not offer that rendition"),
+        "{event}"
+    );
+}

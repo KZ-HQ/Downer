@@ -401,3 +401,161 @@ test("KEI-86: a cancelled download does not claim a file that was deleted", asyn
     "The part-written file was kept at /home/me/Downloads/feature.mp4."
   );
 });
+
+// ---------------------------------------------------------------------------
+// KEI-61: a list you can trust, and a choice that is real.
+// ---------------------------------------------------------------------------
+
+const MASTER = "https://cdn.example.test/v/master.m3u8";
+
+/** What the host answers `playlist-info` with for a two-rendition master. */
+function masterWithRenditions({ separateAudio = false } = {}) {
+  const audio = separateAudio ? "https://cdn.example.test/v/audio/en.m3u8" : undefined;
+  return {
+    ok: true,
+    kind: "master",
+    renditions: [
+      {
+        url: "https://cdn.example.test/v/high/video.m3u8",
+        bandwidth: 2400000,
+        width: 1920,
+        height: 1080,
+        audio_url: audio,
+        default: true
+      },
+      {
+        url: "https://cdn.example.test/v/low/video.m3u8",
+        bandwidth: 400000,
+        width: 640,
+        height: 360,
+        audio_url: audio,
+        default: false
+      }
+    ]
+  };
+}
+
+test("a master with two renditions offers them, labelled and best first", async () => {
+  const popup = await loadPopup({
+    candidates: [{ url: MASTER, kind: "hls", type: "hls", confidence: "observed" }],
+    playlists: { [MASTER]: masterWithRenditions() }
+  });
+
+  const picker = popup.picker();
+  assert.ok(picker, "a master with a real choice shows a picker");
+  assert.deepEqual(picker.options, ["1080p · 2.4 Mbps", "360p · 400 kbps"]);
+  assert.equal(
+    picker.selected,
+    "https://cdn.example.test/v/high/video.m3u8",
+    "the default is what an unchosen download already gets"
+  );
+  assert.equal(picker.note, "2 qualities");
+});
+
+test("a master whose audio is separate says the audio is included", async () => {
+  const popup = await loadPopup({
+    candidates: [{ url: MASTER, kind: "hls", type: "hls", confidence: "observed" }],
+    playlists: { [MASTER]: masterWithRenditions({ separateAudio: true }) }
+  });
+  assert.match(popup.picker().note, /audio is a separate track and is included/);
+});
+
+test("choosing a rendition sends it, and not choosing sends nothing", async () => {
+  const popup = await loadPopup({
+    candidates: [{ url: MASTER, kind: "hls", type: "hls", confidence: "observed" }],
+    playlists: { [MASTER]: masterWithRenditions() }
+  });
+
+  popup.picker().choose("https://cdn.example.test/v/low/video.m3u8");
+  await popup.download(0);
+  const request = popup.sent.filter((message) => message.type === "download-media").pop();
+  assert.equal(request.url, MASTER, "the master is still the job's URL");
+  assert.equal(request.variantUrl, "https://cdn.example.test/v/low/video.m3u8");
+
+  // And with no picker at all, the field is absent rather than guessed at.
+  const plainPopup = await loadPopup({
+    candidates: [{ url: FEATURE, kind: "file", type: "video", confidence: "declared" }]
+  });
+  await plainPopup.download(0);
+  const plainRequest = plainPopup.sent.filter((m) => m.type === "download-media").pop();
+  assert.equal(plainRequest.variantUrl, null);
+});
+
+test("a media playlist and a one-rendition master show no picker", async () => {
+  const media = await loadPopup({
+    candidates: [{ url: MASTER, kind: "hls", type: "hls", confidence: "observed" }],
+    playlists: { [MASTER]: { ok: true, kind: "media", renditions: [] } }
+  });
+  assert.equal(media.picker(), null, "nothing to decide, so no control");
+
+  const single = await loadPopup({
+    candidates: [{ url: MASTER, kind: "hls", type: "hls", confidence: "observed" }],
+    playlists: {
+      [MASTER]: {
+        ok: true,
+        kind: "master",
+        renditions: [{ url: "https://cdn.example.test/v/only.m3u8", bandwidth: 1, default: true }]
+      }
+    }
+  });
+  assert.equal(single.picker(), null);
+});
+
+test("a host that cannot enumerate leaves the row exactly as it was", async () => {
+  // No `playlists` entry at all: the background answers undefined, which is
+  // what a host too old to know `playlist-info` produces.
+  const popup = await loadPopup({
+    candidates: [{ url: MASTER, kind: "hls", type: "hls", confidence: "observed" }]
+  });
+  assert.equal(popup.picker(), null);
+  assert.equal(popup.rows().length, 1);
+  assert.equal(popup.rows()[0].download.disabled, false, "Download still works");
+});
+
+test("candidates found only in the page text are collapsed away from the list", async () => {
+  const popup = await loadPopup({
+    candidates: [
+      { url: MASTER, kind: "hls", type: "hls", confidence: "observed" },
+      { url: "https://cdn.example.test/other/a.mp4", kind: "file", type: "video", confidence: "inferred" },
+      { url: "https://cdn.example.test/other/b.mp4", kind: "file", type: "video", confidence: "inferred" }
+    ]
+  });
+
+  assert.equal(popup.status(), "1 media URL found.", "the headline counts what is listed");
+  assert.deepEqual(popup.rows().map((row) => row.label), [`HLS: ${MASTER}`]);
+  const other = popup.otherCandidates();
+  assert.equal(other.summary, "2 other candidates found in the page text");
+  assert.deepEqual(other.urls, [
+    "VIDEO: https://cdn.example.test/other/a.mp4",
+    "VIDEO: https://cdn.example.test/other/b.mp4"
+  ]);
+});
+
+test("when every candidate is weak they are still listed rather than hidden", async () => {
+  // A regex match is sometimes the only thing that finds the stream. Collapsing
+  // the whole list would leave a page that has media looking like one that
+  // does not.
+  const popup = await loadPopup({
+    candidates: [
+      { url: "https://cdn.example.test/other/a.mp4", kind: "file", type: "video", confidence: "inferred" }
+    ]
+  });
+  assert.equal(popup.rows().length, 1);
+  assert.equal(popup.otherCandidates(), null);
+});
+
+test("DASH is labelled as DASH and marked experimental", async () => {
+  const popup = await loadPopup({
+    candidates: [
+      {
+        url: "https://cdn.example.test/v/manifest.mpd",
+        kind: "dash",
+        type: "video",
+        confidence: "observed",
+        experimental: true
+      }
+    ]
+  });
+  assert.match(popup.rows()[0].label, /^DASH: https:\/\/cdn\.example\.test\/v\/manifest\.mpd/);
+  assert.match(popup.rows()[0].label, /experimental/);
+});

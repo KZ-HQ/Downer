@@ -63,11 +63,12 @@ extension correlates acknowledgements. The extension generates request IDs as
 | --- | --- | --- |
 | `hello` | — | `request_id` |
 | `status` | — | `request_id`, `output_dir`, `ffmpeg` |
-| `download` | `url` | `job_id`, `request_id`, `source_url`, `output_dir`, `title`, `on_conflict`, `overwrite`, `keep_partial`, `cookie`, `user_agent`, `threads`, `total_segments`, `total_duration_ms`, `playlist_text`, `ffmpeg` |
+| `download` | `url` | `job_id`, `request_id`, `source_url`, `output_dir`, `title`, `on_conflict`, `overwrite`, `keep_partial`, `cookie`, `user_agent`, `threads`, `total_segments`, `total_duration_ms`, `playlist_text`, `variant_url`, `ffmpeg` |
 | `pause` | `job_id` | `request_id` |
 | `resume` | `job_id` | `request_id` |
 | `cancel` | `job_id` | `request_id` |
 | `hls-info` | `job_id`, `total_segments`, `total_duration_ms` | `request_id` |
+| `playlist-info` | `url`, `playlist_text` | `request_id` |
 
 Notes:
 
@@ -105,6 +106,30 @@ Notes:
   fetches as it always has, including the `../playlist.m3u8` fallback, so a
   playlist the extension could not reach still gets its chance. See
   [ADR-0011](adr/0011-one-playlist-parser.md).
+* `variant_url` is the rendition the user picked, for a `download` whose `url`
+  is an HLS master playlist. **Absent means the host decides**, by the
+  highest-bandwidth rule it has always used, so a client that never sends this
+  field downloads exactly what it downloaded before. Present, it must be one of
+  the variants the master declares: a `variant_url` the playlist does not offer
+  **fails the download** (`download_failed`, with a message saying so) rather
+  than being replaced with the default, because a chosen quality that silently
+  becomes another one is worse than a download that stops. The host also pairs
+  the chosen variant with the master's audio rendition when there is one, which
+  is why no audio field joins this contract — the host re-derives it from the
+  playlist rather than being told. A live master repackaged between being
+  listed and being chosen is the case this refuses; the remedy is to look
+  again. See [ADR-0014](adr/0014-pair-a-rendition-with-its-audio.md).
+* `playlist-info` asks what a playlist offers, so a client can present a
+  rendition picker. The client fetches the playlist in the page's context, as
+  it already does for `download`, and sends the text; the host parses it,
+  because one implementation decides what a playlist means
+  ([ADR-0011](adr/0011-one-playlist-parser.md)). Unlike `download` it never
+  fetches for itself: it runs while a popup is open, once per playlist on the
+  page, and a host-side fetch there would be a request the page's session may
+  be the only one able to make. `playlist_text` is required; without it the
+  request is refused with `invalid_request`. It names no `job_id` — it is not
+  about a job — and uses its own short-lived connection, as `hello` and
+  `status` do.
 * `title` is the source page's title, used to name the output file when the
   media URL's own filename stem is generic (`index`, `playlist`, `master`,
   `download`, `video`, `media`, or digits only). **It is opt-in and absent by
@@ -150,6 +175,7 @@ to be present.
 | --- | --- | --- |
 | `hello` | `ready` | Handshake answer. Adds `host_version` and `capabilities`. |
 | `status` | `ready` | Setup-check answer. Adds `host_version`, `capabilities` and `status`. |
+| `playlist-info` | `ready` | What a playlist offers. Adds `playlist_kind` and `renditions`, and `total_segments` for a media playlist. |
 | `ack` | `paused`, `downloading`, `cancelling` | A control command was applied. Echoes `request_id`. |
 | `progress` | `starting`, `downloading`, `paused` | Job progress. May carry `completed_segments`, `total_segments`, `percent`, `elapsed_ms`, `metadata_error`. |
 | `log` | `downloading` | One line of FFmpeg stderr, in `log`, redacted (see below). |
@@ -210,6 +236,37 @@ reasoning is in `docs/adr/0003-redact-urls-in-logs.md`.
 * `pause_resume` — pause and resume use Unix process signals, so this is
   `true` on macOS and Linux and `false` elsewhere.
 * `hls_info` — the host accepts the `hls-info` command.
+* `playlist_info` — the host accepts the `playlist-info` command. A host that
+  reports `false`, or one too old to report it at all and so answering
+  `unsupported_command`, means the client shows no rendition picker and
+  downloads as it did before. That graceful path is why adding the command
+  needed no version bump.
+
+### `playlist-info` fields
+
+`playlist_kind` is `master`, `media` or `unusable` — the three things a
+playlist can turn out to be, mirroring `scraper::Playlist`. It is listed in
+`tests/fixtures/protocol.json` under `playlist_kinds`.
+
+`renditions` is an array, **ordered best first by declared bandwidth and then
+frame area, never by the order the master lists them in**: KEI-89 measured a
+master whose first variant was its lowest. It is empty for a `media` or
+`unusable` playlist, which is how a client knows there is nothing to choose and
+shows no picker rather than an empty one.
+
+| Field | Meaning |
+| --- | --- |
+| `url` | The variant playlist. This is what a later `download` sends back as `variant_url`. |
+| `bandwidth` | `BANDWIDTH`, in bits per second. `0` when the master omits it, which the specification does not allow. |
+| `width`, `height` | From `RESOLUTION`, absent when the master declares none. |
+| `codecs` | `CODECS` verbatim, absent when the master declares none. |
+| `audio_url` | The audio rendition this variant would be paired with, when the master carries audio outside the variant stream. |
+| `default` | Whether this is the rendition an unchosen `download` would take. Exactly one rendition carries it. |
+
+`audio_url` is reported so a client can *say* the download includes the audio,
+not so it can send it back. There is no audio field on `download`: the host
+re-derives the pairing from the playlist, which keeps playlist knowledge in one
+place.
 
 ### Terminal versus connection states
 
@@ -396,7 +453,11 @@ may change wording.
 A client must tolerate any documented optional field being absent, and must
 ignore fields it does not recognise — that is how this protocol adds
 non-breaking fields without a version bump. `title` and `on_conflict` were added
-this way; ADR-0004 records why they did not bump the version. `keep_partial` and
+this way; ADR-0004 records why they did not bump the version. `variant_url` and
+the `playlist-info` command were added the same way, for the reason ADR-0014
+gives: a host that does not know the command refuses it with
+`unsupported_command`, which the client already handles, and a client that never
+sends `variant_url` gets the behaviour it always got. `keep_partial` and
 the `resume_failed` code were added the same way, for the reason ADR-0012 gives:
 a client that does not recognise `resume_failed` still reads `state: "failed"`,
 which is true. Absent is not the

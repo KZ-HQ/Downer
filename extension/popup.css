@@ -103,3 +103,49 @@ a {
   color: #5b4300;
   font-size: 12px;
 }
+
+/*
+ * A master's renditions. Hidden until the host has enumerated them, so a
+ * playlist that offers no choice shows no control rather than an empty one —
+ * the popup looking like it offers a choice it does not is the defect KEI-61
+ * closes.
+ */
+.variants {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.variant-note {
+  color: #666;
+  font-size: 11px;
+}
+
+/* An experimental format is labelled where the label is read, not in a footnote. */
+.experimental {
+  background: #fff8e1;
+  border: 1px solid #e0c766;
+  border-radius: 3px;
+  color: #5b4300;
+  font-size: 10px;
+  margin-left: 4px;
+  padding: 0 4px;
+  text-transform: uppercase;
+}
+
+/*
+ * Candidates found only in the page text. They are kept — a regex match is
+ * sometimes the only thing that finds the stream — but they are not evidence
+ * the player used anything, so they do not share a list with what it did.
+ */
+#other-candidates {
+  font-size: 12px;
+  margin: 8px 0;
+}
+
+#other-candidates summary {
+  color: #666;
+  cursor: pointer;
+}

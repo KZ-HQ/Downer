@@ -113,3 +113,108 @@ test("no job begun in this session is reported after a cold start", async () => 
   const { sessionJobIds } = await background.send({ type: "get-download-statuses" });
   assert.deepEqual(sessionJobIds, []);
 });
+
+// ---------------------------------------------------------------------------
+// KEI-61: enumerating a playlist, and carrying the choice to the host.
+// ---------------------------------------------------------------------------
+
+const MASTER_URL = "https://cdn.test/v/master.m3u8";
+const MASTER_TEXT = [
+  "#EXTM3U",
+  '#EXT-X-STREAM-INF:BANDWIDTH=200000,RESOLUTION=320x180',
+  "low/video.m3u8",
+  '#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=1280x720',
+  "high/video.m3u8",
+  ""
+].join("\n");
+
+test("inspect-playlist fetches in the page's session and lets the host parse", async () => {
+  const background = await loadBackground({
+    native: true,
+    playlistText: MASTER_TEXT,
+    nativeOptions: {
+      playlistInfo: {
+        playlist_kind: "master",
+        renditions: [
+          { url: "https://cdn.test/v/high/video.m3u8", bandwidth: 900000, default: true }
+        ]
+      }
+    }
+  });
+
+  const response = await background.send({
+    type: "inspect-playlist",
+    url: MASTER_URL,
+    sourceUrl: "https://page.test/watch",
+    tabId: 1
+  });
+  await background.settle();
+
+  assert.equal(response.ok, true);
+  assert.equal(response.kind, "master");
+  assert.equal(response.renditions.length, 1);
+
+  // The division ADR-0011 set: this side sends the text it fetched, and does
+  // not parse it. A picker that parsed here would be the second parser KEI-51
+  // deleted.
+  const sent = background.nativePort().posted.find((m) => m?.command === "playlist-info");
+  assert.ok(sent, "the host was asked");
+  assert.equal(sent.url, MASTER_URL);
+  assert.equal(sent.playlist_text, MASTER_TEXT);
+});
+
+test("a playlist the page cannot fetch answers not-ok rather than throwing", async () => {
+  // No `playlistText`, so the in-page fetch fails. The popup shows no picker
+  // and the plain row still downloads.
+  const background = await loadBackground({ native: true });
+  const response = await background.send({
+    type: "inspect-playlist",
+    url: MASTER_URL,
+    sourceUrl: "https://page.test/watch",
+    tabId: 1
+  });
+  assert.equal(response.ok, false);
+  assert.match(response.error, /Could not fetch the playlist/);
+});
+
+test("a host that does not enumerate is not asked to", async () => {
+  const background = await loadBackground({
+    native: true,
+    playlistText: MASTER_TEXT,
+    nativeOptions: { capabilities: { pause_resume: true, hls_info: true, playlist_info: false } }
+  });
+  const response = await background.send({
+    type: "inspect-playlist",
+    url: MASTER_URL,
+    sourceUrl: "https://page.test/watch",
+    tabId: 1
+  });
+  await background.settle();
+  assert.equal(response.ok, false);
+  assert.equal(
+    background.nativePort().posted.some((m) => m?.command === "playlist-info"),
+    false,
+    "the handshake already said it cannot, so nothing is sent"
+  );
+});
+
+test("a chosen rendition rides on the download request, and absent means unchanged", async () => {
+  const background = await loadBackground({ native: true, playlistText: MASTER_TEXT });
+  await background.send({
+    type: "download-media",
+    url: MASTER_URL,
+    sourceUrl: "https://page.test/watch",
+    tabId: 1,
+    variantUrl: "https://cdn.test/v/low/video.m3u8"
+  });
+  await background.settle();
+  const chosen = background.nativePort().posted.find((m) => m?.command === "download");
+  assert.equal(chosen.variant_url, "https://cdn.test/v/low/video.m3u8");
+  assert.equal(chosen.url, MASTER_URL, "the job is still about the master");
+
+  const plain = await loadBackground({ native: true, playlistText: MASTER_TEXT });
+  await plain.send({ type: "download-media", url: MASTER_URL, sourceUrl: "https://page.test/w", tabId: 1 });
+  await plain.settle();
+  const unchosen = plain.nativePort().posted.find((m) => m?.command === "download");
+  assert.equal(unchosen.variant_url, null, "the host applies its own rule, as before");
+});

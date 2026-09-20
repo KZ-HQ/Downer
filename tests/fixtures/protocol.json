@@ -10,7 +10,8 @@
     "resume",
     "cancel",
     "hls-info",
-    "status"
+    "status",
+    "playlist-info"
   ],
   "event_types": [
     "hello",
@@ -20,7 +21,8 @@
     "terminal",
     "rejected",
     "control-error",
-    "status"
+    "status",
+    "playlist-info"
   ],
   "job_states": {
     "active": [
@@ -60,7 +62,13 @@
   "max_downloads_per_connection": 1,
   "capabilities": [
     "pause_resume",
-    "hls_info"
+    "hls_info",
+    "playlist_info"
+  ],
+  "playlist_kinds": [
+    "master",
+    "media",
+    "unusable"
   ],
   "on_conflict_policies": [
     "fail",

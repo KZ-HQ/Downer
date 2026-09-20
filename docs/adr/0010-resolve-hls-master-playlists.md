@@ -1,8 +1,17 @@
 # ADR-0010: Resolve an HLS master playlist to one rendition before FFmpeg sees it
 
-* Status: Accepted
+* Status: Accepted, partly superseded by
+  [ADR-0014](0014-pair-a-rendition-with-its-audio.md)
 * Date: 2026-09-19
 * Issue: [KEI-89](https://linear.app/kzhq/issue/KEI-89)
+
+> **Amended 2026-09-20 (KEI-61).** The decision below to leave a master with a
+> separately declared rendition alone has been replaced.
+> [ADR-0014](0014-pair-a-rendition-with-its-audio.md) pairs the chosen variant
+> with its audio and hands FFmpeg both, and narrows the guard from *any*
+> `#EXT-X-MEDIA` with a `URI` to an **audio** one — measurement showed that
+> declining for a subtitles-only master cost twice the segments for a
+> byte-identical file. Everything else here still holds.
 
 ## Context
 
@@ -61,9 +70,12 @@ or cannot be parsed costs the bandwidth this would have saved and nothing else.
 A wasteful download beats a broken one, and this change must not be able to turn
 a working download into a failing one.
 
-**A master that declares a rendition separately is left alone.** `#EXT-X-MEDIA`
-with a `URI` is how a master carries audio (or subtitles) outside the variant
-streams, referenced by group from `#EXT-X-STREAM-INF`. Measured on FFmpeg 9.0.1:
+**A master that declares a rendition separately is left alone.**
+*(Superseded by [ADR-0014](0014-pair-a-rendition-with-its-audio.md), which
+pairs them instead. The measurement below still stands and is why the guard was
+right at the time.)* `#EXT-X-MEDIA` with a `URI` is how a master carries audio
+(or subtitles) outside the variant streams, referenced by group from
+`#EXT-X-STREAM-INF`. Measured on FFmpeg 9.0.1:
 
 | Input | Streams written |
 | --- | --- |
@@ -110,12 +122,13 @@ is fetched to make the choice.
   segments a genuine download needs.
 * Only two renditions were measured. Nothing suggests more behave differently,
   but "n renditions cost n×" is inference from two points.
-* **How common a separately declared audio rendition is was not established.**
-  Masters carrying one are left unoptimised by the rule above, so those
-  downloads stay exactly as wasteful as before. Whether that describes most real
-  masters or few of them is unmeasured, and it decides how much of this issue's
-  benefit is realised in practice.
-* The guard is a conservative one: it declines whenever `#EXT-X-MEDIA` names a
-  `URI`, including for subtitles, which FFmpeg may well handle without help.
-  Narrowing it to audio alone would optimise more masters, and would need its
-  own measurement to justify.
+* ~~**How common a separately declared audio rendition is was not
+  established.**~~ Still unmeasured in the field, but no longer decisive:
+  [ADR-0014](0014-pair-a-rendition-with-its-audio.md) optimises those masters
+  too, so the answer no longer decides how much benefit is realised.
+* ~~The guard is a conservative one: it declines whenever `#EXT-X-MEDIA` names
+  a `URI`, including for subtitles.~~ **Resolved.**
+  [ADR-0014](0014-pair-a-rendition-with-its-audio.md) carries the measurement
+  this asked for: a subtitles-only master resolves to its variant with
+  identical output at half the segments, and a subtitle rendition cannot be
+  muxed into an MP4 at all.

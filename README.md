@@ -214,7 +214,32 @@ downer 'https://example.com/video.mp4' --output ./downloads/video.mp4
 downer 'https://example.com/video.mp4' --output ./downloads/video.mp4 --overwrite
 downer 'https://example.com/live/index.m3u8' --dir ./downloads --name 'Episode 4'
 downer 'https://example.com/live/index.m3u8' --dir ./downloads --on-conflict fail
+downer 'https://example.com/live/master.m3u8' --rendition 720p
+downer 'https://example.com/live/master.m3u8' --rendition worst
 ```
+
+### Choosing a quality
+
+A master playlist lists several renditions of the same video. Without
+`--rendition`, `downer` takes the highest bandwidth it declares — which is what
+it has always done, and what the extension does when you do not pick one.
+
+`--rendition` takes `best`, `worst`, a height such as `720p` (or `1280x720`, of
+which only the height is matched), or an exact variant URL. A rendition the
+playlist does not offer **stops the download** rather than quietly becoming a
+different one; a live playlist repackaged since you last looked is the case
+where that happens, and the remedy is to look again. Listing what a playlist
+offers, as machine-readable output, is discovery and belongs to a separate
+piece of work.
+
+In the extension, a master playlist with more than one rendition gets a
+**Quality** menu in the popup, defaulting to the same highest-bandwidth pick.
+A media playlist, or a master with one rendition, gets no menu.
+
+Where a master carries its audio as a separate rendition — common in modern
+packaging — the chosen video and that audio are handed to FFmpeg together, so
+picking a lower quality does not cost you the sound. See
+[ADR-0014](docs/adr/0014-pair-a-rendition-with-its-audio.md).
 
 ### Where downloads go
 
@@ -322,6 +347,12 @@ in this repository. See `AGENTS.md` for the contributor workflow.
   or other session protections can prevent metadata access even when a browser
   player can load the media.
 - Completed HLS segment counts are estimated from FFmpeg output duration.
+- DASH manifests (`.mpd`) are detected and listed, marked **experimental**.
+  Nothing has yet validated one against FFmpeg end to end.
+- A master's alternate **audio languages** are parsed but not offered: the
+  download takes the group's `DEFAULT=YES` rendition, which is what FFmpeg
+  already picked when handed the master. Subtitle renditions are ignored
+  entirely — FFmpeg cannot mux WebVTT into an MP4.
 - Batch downloads, authentication automation, provider-specific scraping,
   robust resume, and live playlist scheduling are not implemented.
 - AES-128/SAMPLE-AES, byte ranges, discontinuities, and alternate HLS tracks
