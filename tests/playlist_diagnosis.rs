@@ -137,7 +137,17 @@ fn an_unreachable_server_says_so_without_quoting_the_url() {
         !reason.contains("127.0.0.1") && !reason.contains("media/index.m3u8"),
         "the reason must not quote the URL: {reason}"
     );
-    assert!(reason.contains("could not be reached"), "{reason}");
+    // *Which* failure a dead port produces is the platform's business — a
+    // refusal on one, a timeout on another that drops instead. Pinning one
+    // phrasing would make this test a report on the runner's firewall. What is
+    // pinned is that the reason is one this code chose, so a client is never
+    // shown `reqwest`'s own `Display`.
+    assert!(
+        ["could not be reached", "timed out", "the request failed"]
+            .iter()
+            .any(|known| reason.contains(known)),
+        "unrecognised reason: {reason}"
+    );
 }
 
 /// The path that must keep working: a real playlist still yields its totals.

@@ -131,7 +131,16 @@ fn bound(detail: &str) -> String {
     }
     // Keep the *end*: the lines nearest the failure explain it, and a long
     // stderr is long because a segment message repeated.
-    let tail = &detail[detail.len() - MAX_DETAIL_BYTES..];
+    //
+    // The cut is moved forward to a character boundary. FFmpeg's output is not
+    // guaranteed ASCII — a path with an accent, a localised message — and
+    // slicing a `str` mid-character panics, which would turn a download failure
+    // into a crash while reporting it.
+    let mut cut = detail.len() - MAX_DETAIL_BYTES;
+    while cut < detail.len() && !detail.is_char_boundary(cut) {
+        cut += 1;
+    }
+    let tail = &detail[cut..];
     let tail = match tail.find('\n') {
         Some(index) => &tail[index + 1..],
         None => tail,
@@ -206,6 +215,30 @@ mod tests {
             summary.headline,
             "Opening https://cdn.example.test/hls/seg42.ts?… for reading"
         );
+    }
+
+    /// FFmpeg's output is not guaranteed ASCII, and a byte-indexed cut through
+    /// a multi-byte character panics. Reporting a failure must not be a way to
+    /// crash.
+    #[test]
+    fn a_long_tail_with_multibyte_characters_does_not_panic() {
+        // Sized so the byte-indexed cut lands *inside* a three-byte `…`
+        // rather than beside one: with the trailing `!` removed the same
+        // content cuts cleanly and proves nothing. Verified by construction —
+        // the boundary is at `len - MAX_DETAIL_BYTES`, and the single extra
+        // trailing byte shifts it one byte into the character.
+        let noisy = format!("[in#0 @ 0x1] {}\n", "…".repeat(40)).repeat(60);
+        let stderr = format!("{noisy}Error opening input files: Invalid data found!");
+        assert!(
+            !stderr.is_char_boundary(stderr.len() - MAX_DETAIL_BYTES),
+            "this fixture only tests what it claims if the cut is mid-character"
+        );
+
+        let summary = summarize(&stderr);
+        assert!(summary.detail.starts_with("…earlier output omitted…"));
+        assert!(summary
+            .detail
+            .ends_with("Error opening input files: Invalid data found!"));
     }
 
     #[test]
