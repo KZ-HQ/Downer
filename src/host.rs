@@ -32,10 +32,12 @@ pub const HOST_NAME: &str = "com.downer.native";
 
 /// The extension allowed to talk to the host.
 ///
-/// This must equal `browser_specific_settings.gecko.id` in
-/// `extension/manifest.json`; `tests/host_install.rs` reads that file and
-/// fails if the two ever drift apart.
-pub const EXTENSION_ID: &str = "downer@example.com";
+/// Read from `browser_specific_settings.gecko.id` in
+/// `extension/manifest.json` by `build.rs`, so the manifest Firefox reads is
+/// the only place the ID is written and the two cannot drift (KEI-58).
+/// `tests/host_install.rs` still asserts the agreement, which now checks the
+/// build wiring rather than two hand-typed strings.
+pub const EXTENSION_ID: &str = env!("DOWNER_EXTENSION_ID");
 
 /// Where installation puts things, resolved from the environment.
 ///

@@ -20,6 +20,11 @@ url = "2.5"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# `build.rs` reads extension/manifest.json for the add-on ID; serde_json is
+# already a runtime dependency, so this adds no new crate to the lockfile.
+[build-dependencies]
+serde_json = "1.0"
+
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.1"

@@ -12,6 +12,19 @@ The Rust package and the Firefox extension share one product version; see
 
 ### Added
 
+- **Releases.** Pushing a `vX.Y.Z` tag now publishes a GitHub Release carrying
+  the `downer` binary for macOS arm64 and Linux x86_64, the extension as
+  `downer-<version>.xpi`, and a `SHA256SUMS` covering both. The workflow
+  refuses to build unless `Cargo.toml`, `extension/manifest.json` and the tag
+  name the same version, so a half-finished version bump fails before it
+  publishes anything. `make extension-xpi` builds the same XPI from a
+  checkout, reproducibly: the same commit packages to the same bytes, so a
+  published checksum can be rechecked by rebuilding.
+- **How to install the extension permanently**, in the README. The add-on is
+  unsigned, so Firefox Release and Beta can only load it temporarily; a
+  permanent install needs Developer Edition, Nightly or ESR with
+  `xpinstall.signatures.required` set to `false`. AMO unlisted signing is
+  documented as a future option and deliberately not implemented.
 - **A rendition picker.** The popup now enumerates what an HLS master playlist
   offers — resolution and bit rate, ordered by what the playlist declares
   rather than the order it lists them in — and lets you pick one. Not picking
@@ -169,6 +182,13 @@ The Rust package and the Firefox extension share one product version; see
 
 ### Changed
 
+- **The extension has a permanent add-on ID**, `downer@kz-hq.github.io`,
+  replacing the placeholder `downer@example.com`. It is written only in
+  `extension/manifest.json` now: the native messaging host reads it from there
+  at build time, so the ID the installer allows and the ID the extension ships
+  with cannot drift apart. An add-on already installed under the placeholder ID
+  is a different add-on to Firefox and keeps its own settings; remove it and
+  install this one.
 - **Which URLs are listed as downloadable.** Detection now matches the last
   extension of the URL's *path* instead of looking for one anywhere in the
   whole URL. A page's TypeScript (`main.ts`), an image named `poster.mp4.jpg`

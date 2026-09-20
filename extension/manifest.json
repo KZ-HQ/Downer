@@ -5,7 +5,7 @@
   "description": "Find media loaded by the current page and download it with FFmpeg.",
   "browser_specific_settings": {
     "gecko": {
-      "id": "downer@example.com",
+      "id": "downer@kz-hq.github.io",
       "strict_min_version": "109.0",
       "data_collection_permissions": {
         "required": ["none"]
