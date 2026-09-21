@@ -83,6 +83,11 @@ impl NativeHost {
         let child = Command::new(assert_cmd::cargo::cargo_bin("downer"))
             .arg("--native-host")
             .env("DOWNER_FFMPEG", ffmpeg)
+            // These tests do not override `HOME`, so without this every one of
+            // them would append to the *developer's own* host log — and dozens
+            // of them run at once. The log file has its own suite
+            // (`tests/host_log.rs`), which sets this deliberately.
+            .env("DOWNER_LOG", "off")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -123,6 +128,9 @@ impl NativeHost {
         command
             .arg("--native-host")
             .env("HOME", home)
+            // Contained by the temporary `HOME` above, but off for the same
+            // reason: this suite is not about the log file.
+            .env("DOWNER_LOG", "off")
             .env_remove("DOWNER_FFMPEG")
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("XDG_DATA_HOME")

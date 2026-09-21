@@ -239,6 +239,11 @@ fn the_launcher_starts_the_native_host() {
     let status = Command::new(home.launcher_path())
         .arg(home.manifest_path())
         .arg(extension_id())
+        // Hermetic: this is the one test that runs a real host process without
+        // going through the harness above, so without these it would read the
+        // developer's config and append to their own host log.
+        .env("HOME", home.path())
+        .env("DOWNER_LOG", "off")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
