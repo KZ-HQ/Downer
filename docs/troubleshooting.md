@@ -189,8 +189,39 @@ download (bounded at 128 KiB, over at most 20 jobs), filterable by download,
 with a button to clear the history. This is the first place to look for server
 responses, playlist access failures and FFmpeg conversion errors.
 
-**The CLI** writes FFmpeg's output to its own stderr as it runs. There is no
-host log file yet.
+**The CLI** writes FFmpeg's output to its own stderr as it runs, and writes no
+file: a terminal already shows you everything.
+
+**The native host keeps its own log file**, which is where to look when there
+is nothing to look at anywhere else — a host that will not start produces no
+events, so the extension can only say "native host disconnected". Firefox sends
+the host's stderr to the Browser Console and keeps none of it after the process
+exits, which is why this file exists
+([ADR-0022](adr/0022-a-bounded-redacted-host-log-file.md)).
+
+| | |
+| --- | --- |
+| macOS | `~/Library/Logs/downer/host.log` |
+| Linux | `~/.local/state/downer/logs/host.log` |
+
+`downer doctor` prints the exact path, and so does Settings → **Check setup**.
+It holds host start and stop, every request, every FFmpeg spawn and every job's
+outcome, bounded at two files of 1 MiB so it cannot fill a disk.
+
+**It is safe to attach to a bug report.** No cookie value, URL query string or
+page title can appear in it: the logged command line carries a cookie *count*
+(`<1 cookie>`), header *names* (`<User-Agent,Referer>`) and `<output>` in place
+of the filename, since that filename is the page title when title naming is on.
+
+FFmpeg's own output is not in it by default — one line per HLS segment would
+crowd out everything else. To turn it on, put this in
+`~/.config/downer/config.json` and start a new download:
+
+```json
+{ "log_level": "debug" }
+```
+
+`"off"` disables the file entirely, and no file is created.
 
 **URLs in both are redacted**: scheme, host, port and path are kept, and the
 query, any fragment and any userinfo are replaced. Signed URLs and session

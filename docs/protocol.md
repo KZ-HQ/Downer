@@ -301,6 +301,7 @@ The response carries a `status` object:
 | `host_version` | The product version, as in `hello`. |
 | `protocol_version` | The version this host speaks. |
 | `platform` | `macos`, `linux`, or `unsupported`. Windows never appears: the host does not build there ([ADR-0021](adr/0021-windows-is-unsupported.md)), so `unsupported` means a Unix that is neither macOS nor Linux. |
+| `log_path` | Where the host writes its own log file. Present whether or not the file exists yet — the host creates it on its first line, and "nothing was logged" is an answer worth being able to check. Absent only when no home directory resolves. See [ADR-0022](adr/0022-a-bounded-redacted-host-log-file.md). |
 | `ffmpeg_path` | The FFmpeg a download started now would use. |
 | `ffmpeg_version` | As FFmpeg reports it, when it could be run. Absent when it could not. |
 | `ffmpeg_ok` | Whether FFmpeg ran at all. An FFmpeg below the supported minimum is still `true`: it downloads (ADR-0006). |
@@ -310,7 +311,7 @@ Each entry in `checks` has:
 
 | Field | Meaning |
 | --- | --- |
-| `name` | A stable identifier — `platform`, `host_registration`, `ffmpeg`, `output_directory`. Safe to key UI and tests off; never translated. |
+| `name` | A stable identifier — `platform`, `host_registration`, `ffmpeg`, `output_directory`, listed in `tests/fixtures/protocol.json` as `check_names` and asserted by both suites. Safe to key UI and tests off; never translated. |
 | `title` | A human label for the check. |
 | `outcome` | `pass`, `warn`, or `fail`. |
 | `detail` | What was found, present even on a pass — "which FFmpeg?" is the question the panel exists to answer. |
@@ -331,8 +332,9 @@ The checks the host cannot perform are the ones about reaching it. When the
 registration is missing `connectNative` fails and there is no host to ask; when
 the two sides disagree on `protocol_version` the handshake is refused by
 whichever side is newer. The extension renders these itself, as
-`host_connection` and `protocol_version`, because they need different
-instructions — re-registering the host does not fix a version mismatch, which is
+`host_connection` and `protocol_version` — its own two names, listed separately
+in the fixture as `extension_check_names` so they cannot collide with the
+host's — because they need different instructions — re-registering the host does not fix a version mismatch, which is
 ordinary upgrade skew between two halves that ship separately.
 
 `downer doctor` reports the same checks from the command line, minus those two:

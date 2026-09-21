@@ -1194,6 +1194,33 @@ fn status_reports_every_check_with_an_outcome_and_a_remedy() {
     let outcomes = protocol_strings("/check_outcomes");
     let checks = status["checks"].as_array().expect("checks are an array");
     assert!(!checks.is_empty(), "at least one check ran: {event}");
+
+    // The check names are shared vocabulary, exactly like the commands and the
+    // event types: the Settings panel and this suite both key off them, so a
+    // host that adds or renames one without saying so in the fixture is the
+    // drift `tests/fixtures/protocol.json` exists to prevent. This `status`
+    // names an `output_dir`, so every documented check runs.
+    let documented = protocol_strings("/check_names");
+    let reported: Vec<String> = checks
+        .iter()
+        .map(|check| {
+            check["name"]
+                .as_str()
+                .expect("a check has a name")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        reported, documented,
+        "the host's checks and tests/fixtures/protocol.json must agree, in order"
+    );
+
+    // `status` names the host's own log file, which is the one place a
+    // start-up failure leaves a trace; see ADR-0022.
+    assert!(
+        status["log_path"].is_string(),
+        "status names the host log file: {event}"
+    );
     for check in checks {
         let name = check["name"].as_str().expect("a check has a name");
         let outcome = check["outcome"].as_str().expect("a check has an outcome");

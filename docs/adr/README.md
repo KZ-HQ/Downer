@@ -35,6 +35,7 @@ control semantics.
 | [0019](0019-native-host-as-a-mode-of-the-cli.md) | The native host is a mode of the CLI binary | Accepted |
 | [0020](0020-json-output-is-a-cli-interface.md) | `--json` output is a public interface, versioned in the document | Accepted |
 | [0021](0021-windows-is-unsupported.md) | Windows is unsupported, and the crate refuses to build there | Accepted |
+| [0022](0022-a-bounded-redacted-host-log-file.md) | The native host keeps one bounded, redacted log file, and `status` names it | Accepted |
 
 ## Reading them together
 
@@ -43,7 +44,8 @@ beside the others on its thread.
 
 **The browser boundary.** 0001 (the wire contract) → 0019 (which program speaks
 it) → 0008 (how that program gets registered) → 0009 (how a user finds out it
-did not).
+did not) → 0022 (where it writes down what happened, since Firefox keeps none of
+it).
 
 **Cookies and secrets.** 0002 (where cookies are scoped, and what FFmpeg's argv
 exposes) → 0003 (the leak that was left, in FFmpeg's own stderr).
