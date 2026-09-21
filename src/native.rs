@@ -366,7 +366,10 @@ fn hello_response(request_id: Option<String>) -> NativeResponse {
         state: Some(STATE_READY.to_string()),
         host_version: Some(env!("CARGO_PKG_VERSION")),
         capabilities: Some(Capabilities {
-            pause_resume: cfg!(unix),
+            // Unconditionally true: the crate builds only on Unix, where
+            // SIGSTOP and SIGCONT exist (ADR-0021). The field stays on the
+            // wire because it is the protocol's, not the platform's.
+            pause_resume: true,
             hls_info: true,
             playlist_info: true,
         }),
@@ -468,7 +471,10 @@ fn status_response(
         state: Some(STATE_READY.to_string()),
         host_version: Some(env!("CARGO_PKG_VERSION")),
         capabilities: Some(Capabilities {
-            pause_resume: cfg!(unix),
+            // Unconditionally true: the crate builds only on Unix, where
+            // SIGSTOP and SIGCONT exist (ADR-0021). The field stays on the
+            // wire because it is the protocol's, not the platform's.
+            pause_resume: true,
             hls_info: true,
             playlist_info: true,
         }),

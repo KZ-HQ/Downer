@@ -34,6 +34,7 @@ control semantics.
 | [0018](0018-stable-cli-exit-codes.md) | Exit codes classify the failure and are part of the CLI contract | Accepted |
 | [0019](0019-native-host-as-a-mode-of-the-cli.md) | The native host is a mode of the CLI binary | Accepted |
 | [0020](0020-json-output-is-a-cli-interface.md) | `--json` output is a public interface, versioned in the document | Accepted |
+| [0021](0021-windows-is-unsupported.md) | Windows is unsupported, and the crate refuses to build there | Accepted |
 
 ## Reading them together
 
@@ -53,7 +54,8 @@ before FFmpeg sees it) → 0011 (who fetches a playlist, who parses it) → 0014
 
 **Downloads as processes.** 0015 (there is a process at all) → 0016 (we block
 on it rather than await it) → 0013 (one download per host process) → 0012 (what
-we can promise by signalling it).
+we can promise by signalling it) → 0021 (which platforms can keep that promise,
+and why the ones that cannot are refused at compile time).
 
 **What a script may rely on.** 0018 (the exit codes classify the failure) →
 0020 (`--json` describes the success), which makes the same promise about the

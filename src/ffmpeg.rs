@@ -353,7 +353,6 @@ impl ProcessControl {
         }
     }
 
-    #[cfg(unix)]
     fn signal_if_running(&self, signal: i32) -> Result<(), String> {
         let child = self
             .child
@@ -364,14 +363,15 @@ impl ProcessControl {
             None => Ok(()),
         }
     }
-
-    #[cfg(not(unix))]
-    fn signal_if_running(&self, _signal: i32) -> Result<(), String> {
-        Err("pause and resume are supported only on Unix platforms".to_string())
-    }
 }
 
-#[cfg(unix)]
+/// Send a signal to the running FFmpeg.
+///
+/// There is no non-Unix arm here, and that is the point of
+/// `docs/adr/0021-windows-is-unsupported.md`: pause and resume are SIGSTOP and
+/// SIGCONT, ADR-0012 promises them, and a build that could not deliver them
+/// would be promising something it cannot do. The crate refuses to compile off
+/// Unix instead, so this is the only implementation there is.
 fn signal_process(pid: u32, signal: i32) -> Result<(), String> {
     // SAFETY: pid is obtained from the live child process we spawned.
     let result = unsafe { libc::kill(pid as libc::pid_t, signal) };
@@ -385,27 +385,15 @@ fn signal_process(pid: u32, signal: i32) -> Result<(), String> {
     }
 }
 
-#[cfg(not(unix))]
-fn signal_process(_pid: u32, _signal: i32) -> Result<(), String> {
-    Err("pause and resume are supported only on Unix platforms".to_string())
-}
-
 impl Default for ProcessControl {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(unix)]
 mod unix_signal {
     pub const CONT: i32 = libc::SIGCONT;
     pub const STOP: i32 = libc::SIGSTOP;
-}
-
-#[cfg(not(unix))]
-mod unix_signal {
-    pub const CONT: i32 = 0;
-    pub const STOP: i32 = 0;
 }
 
 impl FfmpegInvocation {
@@ -965,7 +953,6 @@ mod tests {
         assert!(updates[1].finished);
     }
 
-    #[cfg(unix)]
     #[test]
     fn pause_and_resume_can_be_queued_before_ffmpeg_starts() {
         let control = ProcessControl::new();

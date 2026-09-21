@@ -39,6 +39,63 @@ pub const HOST_NAME: &str = "com.downer.native";
 /// build wiring rather than two hand-typed strings.
 pub const EXTENSION_ID: &str = env!("DOWNER_EXTENSION_ID");
 
+/// The platforms Downer distinguishes.
+///
+/// A value rather than a `cfg!` chain, because the unsupported arm has to be
+/// reachable from a supported one. The crate refuses to build at all on a
+/// non-Unix target (`src/lib.rs`), so a `cfg`-gated refusal could never be
+/// exercised by a test — the only build that could run it is the build that
+/// does not exist. Naming the platform makes the refusal ordinary code.
+///
+/// See `docs/adr/0021-windows-is-unsupported.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    MacOs,
+    Linux,
+    /// A target that builds but that Downer does not support: a Unix that is
+    /// neither macOS nor Linux, where only Firefox's registration directory is
+    /// unknown. Carries the name `std::env::consts::OS` gives it.
+    Unsupported(&'static str),
+}
+
+impl Platform {
+    /// The platform this binary was built for.
+    pub const fn current() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::MacOs
+        } else if cfg!(target_os = "linux") {
+            Self::Linux
+        } else {
+            Self::Unsupported(std::env::consts::OS)
+        }
+    }
+
+    /// How the `status` response and `downer doctor` name it. Never translated:
+    /// `docs/protocol.md` lists these as the values of `platform`.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::MacOs => "macos",
+            Self::Linux => "linux",
+            Self::Unsupported(_) => "unsupported",
+        }
+    }
+
+    pub const fn is_supported(self) -> bool {
+        !matches!(self, Self::Unsupported(_))
+    }
+}
+
+/// What every surface says about a platform Downer does not support.
+///
+/// One string, because the installer and `downer doctor` are the two places a
+/// user meets this and a second wording would read as a second problem.
+pub fn unsupported_platform_message(os: &str) -> String {
+    format!(
+        "unsupported platform: {os}. Downer supports macOS and Linux; \
+         see docs/adr/0021-windows-is-unsupported.md"
+    )
+}
+
 /// Where installation puts things, resolved from the environment.
 ///
 /// Every path is derived once, here, so tests can drive a whole install under a
@@ -67,7 +124,7 @@ impl HostPaths {
             DownerError::Host("no config directory: set HOME and try again".to_string())
         })?;
         Ok(Self {
-            manifest: manifest_dir(&home)?.join(format!("{HOST_NAME}.json")),
+            manifest: manifest_dir(&home, Platform::current())?.join(format!("{HOST_NAME}.json")),
             launcher: data.join("downer").join(format!("{HOST_NAME}.sh")),
             binary: data.join("downer").join("bin").join("downer"),
             config: config.join("downer").join("config.json"),
@@ -77,22 +134,21 @@ impl HostPaths {
 
 /// Firefox's per-user native messaging directory.
 ///
-/// Windows keeps this registration in the registry rather than a directory, and
-/// the host itself is Unix-only (pause and resume are signals), so it is
-/// refused here rather than half-supported. KEI-67 records that decision.
-fn manifest_dir(home: &Path) -> DownerResult<PathBuf> {
-    if cfg!(target_os = "macos") {
-        Ok(home
+/// Windows keeps this registration in the registry rather than a directory, but
+/// a Windows build never gets this far: the crate refuses to compile there
+/// (`src/lib.rs`). What reaches the refusal below is a Unix that is neither
+/// macOS nor Linux — a FreeBSD, say — where everything else works and only this
+/// directory is unknown. That is the degrading half of
+/// `docs/adr/0021-windows-is-unsupported.md`.
+fn manifest_dir(home: &Path, platform: Platform) -> DownerResult<PathBuf> {
+    match platform {
+        Platform::MacOs => Ok(home
             .join("Library")
             .join("Application Support")
             .join("Mozilla")
-            .join("NativeMessagingHosts"))
-    } else if cfg!(target_os = "linux") {
-        Ok(home.join(".mozilla").join("native-messaging-hosts"))
-    } else {
-        Err(DownerError::Host(
-            "native host installation is supported on macOS and Linux".to_string(),
-        ))
+            .join("NativeMessagingHosts")),
+        Platform::Linux => Ok(home.join(".mozilla").join("native-messaging-hosts")),
+        Platform::Unsupported(os) => Err(DownerError::Host(unsupported_platform_message(os))),
     }
 }
 
@@ -387,7 +443,11 @@ fn write_file(path: &Path, contents: &[u8]) -> DownerResult<()> {
         .map_err(|error| DownerError::Host(format!("could not write {}: {error}", path.display())))
 }
 
-#[cfg(unix)]
+/// Make the launcher executable.
+///
+/// Unconditionally Unix: Firefox executes the launcher directly, so the mode
+/// bits are not decoration. There is no non-Unix arm because there is no
+/// non-Unix build — see `docs/adr/0021-windows-is-unsupported.md`.
 fn set_executable(path: &Path) -> DownerResult<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).map_err(|error| {
@@ -396,11 +456,6 @@ fn set_executable(path: &Path) -> DownerResult<()> {
             path.display()
         ))
     })
-}
-
-#[cfg(not(unix))]
-fn set_executable(_path: &Path) -> DownerResult<()> {
-    Ok(())
 }
 
 /// Quote a path for `/bin/sh`.
@@ -429,6 +484,61 @@ mod tests {
     #[test]
     fn closes_and_reopens_quoting_around_a_quote() {
         assert_eq!(shell_quote("/tmp/it's/downer"), "'/tmp/it'\\''s/downer'");
+    }
+
+    /// The refusal a platform Downer does not support gets from the installer.
+    ///
+    /// Asserted from a supported platform by naming the unsupported one, which
+    /// is the whole reason [`Platform`] is a value: on Windows this code cannot
+    /// run, because on Windows the crate does not compile
+    /// (`docs/adr/0021-windows-is-unsupported.md`).
+    #[test]
+    fn an_unsupported_platform_is_refused_by_name() {
+        let error =
+            manifest_dir(Path::new("/home/someone"), Platform::Unsupported("windows")).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("unsupported platform"), "{message}");
+        assert!(message.contains("windows"), "{message}");
+        assert!(
+            message.contains("macOS and Linux"),
+            "the refusal must say what is supported: {message}"
+        );
+    }
+
+    /// The two supported platforms resolve to the directory Firefox actually
+    /// reads, whichever platform the test itself is running on.
+    #[test]
+    fn each_supported_platform_gets_its_own_firefox_directory() {
+        let home = Path::new("/home/someone");
+        let macos = manifest_dir(home, Platform::MacOs).unwrap();
+        let linux = manifest_dir(home, Platform::Linux).unwrap();
+        assert!(macos.ends_with("Mozilla/NativeMessagingHosts"), "{macos:?}");
+        assert!(
+            linux.ends_with(".mozilla/native-messaging-hosts"),
+            "{linux:?}"
+        );
+        assert_ne!(macos, linux);
+    }
+
+    /// `is_supported` and `name` agree, whichever platform this is running on.
+    ///
+    /// Deliberately not "the current platform is macOS or Linux": a Unix that
+    /// is neither still builds by design, and a test that went red there would
+    /// contradict the decision it is supposed to be guarding.
+    #[test]
+    fn a_platform_is_named_unsupported_exactly_when_it_is_unsupported() {
+        for platform in [
+            Platform::MacOs,
+            Platform::Linux,
+            Platform::Unsupported("windows"),
+            Platform::current(),
+        ] {
+            assert_eq!(
+                platform.is_supported(),
+                platform.name() != "unsupported",
+                "{platform:?}"
+            );
+        }
     }
 
     #[test]

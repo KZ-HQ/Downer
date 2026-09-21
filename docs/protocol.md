@@ -300,7 +300,7 @@ The response carries a `status` object:
 | --- | --- |
 | `host_version` | The product version, as in `hello`. |
 | `protocol_version` | The version this host speaks. |
-| `platform` | `macos`, `linux`, or `unsupported`. |
+| `platform` | `macos`, `linux`, or `unsupported`. Windows never appears: the host does not build there ([ADR-0021](adr/0021-windows-is-unsupported.md)), so `unsupported` means a Unix that is neither macOS nor Linux. |
 | `ffmpeg_path` | The FFmpeg a download started now would use. |
 | `ffmpeg_version` | As FFmpeg reports it, when it could be run. Absent when it could not. |
 | `ffmpeg_ok` | Whether FFmpeg ran at all. An FFmpeg below the supported minimum is still `true`: it downloads (ADR-0006). |
@@ -310,7 +310,7 @@ Each entry in `checks` has:
 
 | Field | Meaning |
 | --- | --- |
-| `name` | A stable identifier — `host_registration`, `ffmpeg`, `output_directory`. Safe to key UI and tests off; never translated. |
+| `name` | A stable identifier — `platform`, `host_registration`, `ffmpeg`, `output_directory`. Safe to key UI and tests off; never translated. |
 | `title` | A human label for the check. |
 | `outcome` | `pass`, `warn`, or `fail`. |
 | `detail` | What was found, present even on a pass — "which FFmpeg?" is the question the panel exists to answer. |
@@ -443,7 +443,7 @@ may change wording.
 | `host_busy` | `rejected` | A `download` arrived while this host was already running a *different* job. One host process runs one download; see **Process model**. The running job is untouched. |
 | `task_not_active` | `control-error` | A control command named a job the host is not running. |
 | `invalid_hls_info` | `control-error` | `hls-info` supplied zero or missing segment totals. |
-| `control_failed` | `control-error` | The command was understood but could not be applied (for example pause on a non-Unix platform, or a job already cancelled). |
+| `control_failed` | `control-error` | The command was understood but could not be applied (for example a job already cancelled, or the signal itself failing). |
 | `download_failed` | `terminal` | FFmpeg failed, or the media could not be resolved. The part-written file is kept. |
 | `resume_failed` | `terminal` | The job failed after a `resume`, with no further FFmpeg output since it. The input is fine; the connections FFmpeg was holding while stopped are not. The `state` is still `failed`. |
 | `cancelled` | `terminal` | The job was cancelled, by `cancel` or by EOF on stdin. A `cancel` deletes the part-written file unless `keep_partial` was `true`; EOF always keeps it, because nobody asked for that one. |
