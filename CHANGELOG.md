@@ -216,6 +216,26 @@ The Rust package and the Firefox extension share one product version; see
   Settings page's "Check setup" panel. It passes on macOS and Linux and fails
   by name anywhere else, because on a platform Downer does not support, being
   told that FFmpeg is fine is true and useless.
+- **The native host keeps a log file, and Settings tells you where it is.**
+  Firefox sends the host's stderr to the Browser Console and keeps nothing
+  after the process exits, so the failures that matter most — a host that will
+  not start, a manifest pointing somewhere stale, a missing FFmpeg — used to
+  leave no trace at all. The host now appends to
+  `~/Library/Logs/downer/host.log` on macOS and
+  `~/.local/state/downer/logs/host.log` elsewhere: host start and stop, every
+  request, every FFmpeg spawn, and every job's outcome. It is bounded at two
+  files of 1 MiB and rotates, so it cannot fill a disk. **No cookie value, URL
+  query string or page title can appear in it** — the command line is rendered
+  with the cookie replaced by a count (`<1 cookie>`), headers by their names
+  (`<User-Agent,Referer>`) and the output filename by `<output>`, because that
+  filename is the page title when title naming is on. `downer doctor` and the
+  Settings "Check setup" panel both name the file so it can be attached to a
+  bug report, and `status` carries it as `log_path`. FFmpeg's own output is
+  logged at `debug`: set `"log_level": "debug"` in
+  `~/.config/downer/config.json` to turn it on, or `"off"` for no file at all.
+  [ADR-0022](docs/adr/0022-a-bounded-redacted-host-log-file.md) records the
+  design, including why a secret is never handed to the logger rather than
+  filtered out of it.
 
 ### Changed
 
@@ -229,6 +249,9 @@ The Rust package and the Firefox extension share one product version; see
   name. Nothing changes for macOS or Linux users.
   [ADR-0021](docs/adr/0021-windows-is-unsupported.md) records the decision and
   what would have to be true to revisit it.
+- `downer install-host --ffmpeg` merges into an existing
+  `~/.config/downer/config.json` instead of replacing it, so recording a new
+  FFmpeg no longer discards a `log_level` set there.
 - **The extension has a permanent add-on ID**, `downer@kz-hq.github.io`,
   replacing the placeholder `downer@example.com`. It is written only in
   `extension/manifest.json` now: the native messaging host reads it from there

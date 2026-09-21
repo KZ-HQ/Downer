@@ -83,8 +83,13 @@
     "fail"
   ],
   "check_names": [
+    "platform",
     "host_registration",
     "ffmpeg",
     "output_directory"
+  ],
+  "extension_check_names": [
+    "host_connection",
+    "protocol_version"
   ]
 }

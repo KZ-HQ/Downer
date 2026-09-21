@@ -109,6 +109,14 @@ pub struct Report {
     pub host_version: &'static str,
     pub protocol_version: u32,
     pub platform: &'static str,
+    /// Where the native host writes its own log file.
+    ///
+    /// Reported even when the file does not exist yet — the host creates it on
+    /// its first line, and "nothing has been logged" is itself an answer worth
+    /// being able to check. Absent only when no home directory resolves, which
+    /// is the same condition that stops the host being installed at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_path: Option<String>,
     /// The FFmpeg that a download started right now would use.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ffmpeg_path: Option<String>,
@@ -175,6 +183,7 @@ pub fn run(output_dir: Option<&Path>, ffmpeg: Option<&Path>) -> Report {
         host_version: env!("CARGO_PKG_VERSION"),
         protocol_version: crate::native::PROTOCOL_VERSION,
         platform: PLATFORM,
+        log_path: crate::hostlog::default_path().map(|path| path.display().to_string()),
         ffmpeg_path: Some(ffmpeg_path.display().to_string()),
         ffmpeg_version: version.map(|version| version.to_string()),
         // An FFmpeg that could not be probed is not usable for a download: the
@@ -602,6 +611,7 @@ mod tests {
             host_version: "0.0.0",
             protocol_version: 1,
             platform: "linux",
+            log_path: None,
             ffmpeg_path: None,
             ffmpeg_version: None,
             ffmpeg_ok: true,

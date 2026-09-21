@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     error::{DownerError, DownerResult},
     ffmpeg::{FfmpegProgress, ProcessControl},
+    hostlog,
     output::{NamingHints, OnConflict},
     scraper::{hls_info_with_timeout, HlsInfo, ResolvedMedia},
     DownloadOptions,
@@ -299,8 +300,23 @@ pub fn run_stdio() -> DownerResult<()> {
     let output = Arc::new(Mutex::new(io::stdout()));
     let job = Arc::new(Mutex::new(None));
 
+    // Only the host logs to a file. A terminal already shows what Firefox
+    // swallows, and a `downer <url>` run that silently started writing under
+    // the user's home would be a surprise. See ADR-0022.
+    hostlog::init_default();
+    hostlog::info(
+        "host.start",
+        &[
+            ("version", env!("CARGO_PKG_VERSION")),
+            ("protocol", &PROTOCOL_VERSION.to_string()),
+        ],
+    );
+
     loop {
         let Some(payload) = read_message(&mut input).map_err(DownerError::NativeIo)? else {
+            // EOF is how closing Firefox looks from here, so it is the normal
+            // end of a host process rather than an error.
+            hostlog::info("host.stop", &[("reason", "eof")]);
             cancel_for_shutdown(&job);
             return Ok(());
         };
@@ -309,6 +325,7 @@ pub fn run_stdio() -> DownerResult<()> {
             Err(error) => {
                 // A malformed frame carries no request_id and no job_id, so it is
                 // rejected without touching any running job.
+                hostlog::error("request.invalid", &[("error", &error.to_string())]);
                 let response = rejected(
                     ERROR_INVALID_REQUEST,
                     format!("invalid native request: {error}"),
@@ -321,6 +338,13 @@ pub fn run_stdio() -> DownerResult<()> {
         };
         let version = request.protocol_version.unwrap_or(LEGACY_PROTOCOL_VERSION);
         if version != PROTOCOL_VERSION && version != LEGACY_PROTOCOL_VERSION {
+            hostlog::error(
+                "request.version_rejected",
+                &[
+                    ("their_version", &version.to_string()),
+                    ("our_version", &PROTOCOL_VERSION.to_string()),
+                ],
+            );
             let response = rejected(
                 ERROR_UNSUPPORTED_PROTOCOL_VERSION,
                 format!(
@@ -332,6 +356,14 @@ pub fn run_stdio() -> DownerResult<()> {
             send_response(&output, &response).map_err(DownerError::NativeIo)?;
             continue;
         }
+        hostlog::info(
+            "request.received",
+            &[
+                ("command", &request.command),
+                ("job_id", request.job_id.as_deref().unwrap_or("-")),
+                ("request_id", request.request_id.as_deref().unwrap_or("-")),
+            ],
+        );
         if request.command == "download" {
             start_download(request, output.clone(), job.clone()).map_err(DownerError::NativeIo)?;
             continue;
@@ -609,6 +641,22 @@ fn start_download(request: NativeRequest, output: SharedOutput, job: ActiveJob) 
                 },
             }
         };
+        hostlog::event(
+            if response.ok {
+                hostlog::Level::Info
+            } else {
+                hostlog::Level::Error
+            },
+            "job.terminal",
+            &[
+                ("job_id", &worker_job_id),
+                ("state", response.state.as_deref().unwrap_or("-")),
+                ("error_code", response.error_code.unwrap_or("-")),
+                // Already redacted where it was built, and redacted again on
+                // the way into the file. Neither layer is load-bearing alone.
+                ("error", response.error.as_deref().unwrap_or("")),
+            ],
+        );
         let _ = send_response(&output, &response);
         clear_job(&job, &worker_job_id);
     });
@@ -1002,6 +1050,11 @@ fn download(
                 log: crate::redact::redact_text(&line),
             },
         );
+        // Debug, because a long HLS download writes one of these per segment
+        // and the default level must not fill the file with them. This is the
+        // "configurable level" the issue asks for: `log_level: "debug"` in the
+        // host config turns FFmpeg's own output on.
+        hostlog::debug("ffmpeg.stderr", &[("job_id", &log_job_id), ("line", &line)]);
     };
     // The job error names an old FFmpeg on its own, but a download that still
     // succeeds would say nothing at all, so the warning also goes out as a log

@@ -404,8 +404,16 @@ link in the popup) has:
 | **When a file of that name already exists** | Keep both, stop, or replace. |
 | **Name downloads after the page title** | Off by default. |
 | **Keep the part-written file when I cancel** | Off by default; failures always keep theirs. |
-| **Check setup** | Runs the diagnostics in the host and shows the results. |
+| **Check setup** | Runs the diagnostics in the host and shows the results, including the path to the host's own log file. |
 | **Live FFmpeg logs** | The most recent 500 lines per download, filterable by download, with a button to clear the history. |
+
+The **native host's own log file** — named by **Check setup** and by `downer
+doctor` — is separate from the live console above: it survives the browser
+closing and records what happened before any download started, which is where
+to look when the host will not start at all. It is bounded, redacted and safe
+to attach to a bug report;
+[troubleshooting](troubleshooting.md#where-the-logs-are) has the paths and how
+to raise its level.
 
 ## Protected media
 

@@ -17,6 +17,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const { loadOptions } = require("./helpers/extension-dom.js");
+const protocol = require("../fixtures/protocol.json");
 
 const TOKEN = "SENTINEL-SIGNED-TOKEN-MUST-NOT-PERSIST";
 const JOB_A = { id: "a", url: "https://cdn.example.test/a/index.m3u8", state: "downloading" };
@@ -140,6 +141,71 @@ test("Check setup renders every check with its outcome and remedy", async () => 
   assert.match(text, /FFmpeg 6\.1\.1/);
   assert.match(text, /Upgrade FFmpeg\./);
   assert.match(text, /Choose a directory you can write to\./);
+});
+
+test("the Check setup panel names the host's own log file", async () => {
+  // The one place a start-up failure leaves a trace: Firefox sends the host's
+  // stderr to the Browser Console and nothing survives the process exiting.
+  // The panel is where a user is told where to look (ADR-0022).
+  const page = await loadOptions({
+    setupResponse: {
+      ok: true,
+      status: {
+        host_version: "0.5.0",
+        protocol_version: 1,
+        platform: "linux",
+        log_path: "/home/u/.local/state/downer/logs/host.log",
+        checks: []
+      }
+    }
+  });
+  await page.checkSetup();
+
+  assert.match(page.setupText(), /Native host log: \/home\/u\/\.local\/state\/downer\/logs\/host\.log/);
+});
+
+test("an older host that reports no log path is rendered without one", async () => {
+  // The field is optional on the wire, so a host built before it existed must
+  // not produce an empty row or the literal "undefined".
+  const page = await loadOptions({
+    setupResponse: {
+      ok: true,
+      status: { host_version: "0.4.0", protocol_version: 1, platform: "linux", checks: [] }
+    }
+  });
+  await page.checkSetup();
+
+  assert.doesNotMatch(page.setupText(), /Native host log/);
+  assert.doesNotMatch(page.setupText(), /undefined/);
+});
+
+test("the checks the extension invents never collide with the host's own names", async () => {
+  // `tests/fixtures/protocol.json` is the shared vocabulary, and check names
+  // are part of it: the Rust suite asserts the host emits exactly
+  // `check_names`, and this asserts the extension only ever adds names from
+  // `extension_check_names`. A collision would put two different meanings
+  // under one identifier in the same panel.
+  const hostNames = new Set(protocol.check_names);
+  for (const name of protocol.extension_check_names) {
+    assert.ok(
+      !hostNames.has(name),
+      `${name} is claimed by both the host and the extension`
+    );
+  }
+
+  // And the names the extension actually synthesizes are the documented ones.
+  for (const [error, expected] of [
+    ["No such native application com.downer.native", "host_connection"],
+    ["unsupported protocol version 99; this host speaks version 1", "protocol_version"]
+  ]) {
+    const page = await loadOptions({ setupResponse: { ok: false, error } });
+    await page.checkSetup();
+    assert.ok(
+      protocol.extension_check_names.includes(expected),
+      `${expected} is documented in tests/fixtures/protocol.json`
+    );
+    assert.equal(page.setupOutcomes().length, 1);
+  }
 });
 
 test("an unreachable host is itself reported as a failed check, with what to do", async () => {

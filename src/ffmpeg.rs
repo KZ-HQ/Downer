@@ -486,7 +486,116 @@ impl FfmpegInvocation {
     }
 }
 
+/// What replaces the output path in a logged command line.
+///
+/// The output *filename* is the page title when title naming is on, and
+/// `AGENTS.md` allows a title into the output path and nowhere else — "never
+/// let it into a log, an error, or any event but the output path". So the name
+/// is dropped and the directory is logged separately, which is the half that
+/// answers the question a log is asked ("where was it trying to write?").
+pub const LOGGED_OUTPUT: &str = "<output>";
+
+impl FfmpegInvocation {
+    /// Render this invocation as a command line safe to write to a log file.
+    ///
+    /// Derived from [`FfmpegInvocation::to_args`] rather than rebuilt, so the
+    /// logged command cannot drift from the executed one — the single-renderer
+    /// rule of `docs/adr/0007-structured-ffmpeg-command-model.md` applies to
+    /// this reading of it too.
+    ///
+    /// Three substitutions, each because the value is something a log must
+    /// never carry:
+    ///
+    /// * `-cookies` becomes a **count**. Whether cookies were forwarded is the
+    ///   first question in every protected-media report; which cookies they
+    ///   were is never anyone's business.
+    /// * `-headers` becomes its **field names**. `User-Agent` and `Referer` are
+    ///   not secret today, but a log that names them survives a future header
+    ///   that is.
+    /// * The output path becomes [`LOGGED_OUTPUT`], for the reason above.
+    ///
+    /// URLs keep their scheme, host and path and lose their query, but that
+    /// happens in `hostlog`, which redacts every value it writes.
+    pub fn to_log_args(&self) -> Vec<String> {
+        let output = self.output.clone().into_os_string();
+        let mut rendered = Vec::new();
+        let mut replacement: Option<String> = None;
+        for argument in self.to_args() {
+            if let Some(value) = replacement.take() {
+                rendered.push(value);
+                continue;
+            }
+            if argument == output {
+                rendered.push(LOGGED_OUTPUT.to_string());
+                continue;
+            }
+            let text = argument.to_string_lossy().into_owned();
+            replacement = match text.as_str() {
+                "-cookies" => Some(summarize_cookies(self.cookies.as_deref())),
+                "-headers" => Some(summarize_headers(self.headers.as_deref())),
+                _ => None,
+            };
+            rendered.push(text);
+        }
+        rendered
+    }
+}
+
+/// `<2 cookies>` — how many were forwarded, never which.
+fn summarize_cookies(cookies: Option<&str>) -> String {
+    let count = cookies
+        .map(|value| value.lines().filter(|line| !line.trim().is_empty()).count())
+        .unwrap_or(0);
+    match count {
+        1 => "<1 cookie>".to_string(),
+        other => format!("<{other} cookies>"),
+    }
+}
+
+/// `<User-Agent,Referer>` — which headers were sent, never their values.
+fn summarize_headers(headers: Option<&str>) -> String {
+    let names: Vec<&str> = headers
+        .map(|value| {
+            value
+                .lines()
+                .filter_map(|line| line.split(':').next())
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if names.is_empty() {
+        return "<no headers>".to_string();
+    }
+    format!("<{}>", names.join(","))
+}
+
+/// Record a spawn in the host's log file.
+///
+/// A no-op in the CLI, which never initialises a logger (ADR-0022) — so this
+/// sits at the spawn itself rather than in the host, and every FFmpeg run the
+/// host makes is logged without the host having to remember to.
+fn log_spawn(invocation: &FfmpegInvocation) {
+    crate::hostlog::info(
+        "ffmpeg.spawn",
+        &[
+            ("program", &invocation.program.display().to_string()),
+            ("args", &invocation.to_log_args().join(" ")),
+            // The directory, never the filename: the name can be a page title.
+            (
+                "output_dir",
+                &invocation
+                    .output
+                    .parent()
+                    .map(|dir| dir.display().to_string())
+                    .unwrap_or_default(),
+            ),
+        ],
+    );
+}
+
 pub fn execute(invocation: &FfmpegInvocation) -> DownerResult<PathBuf> {
+    log_spawn(invocation);
     let mut child = Command::new(&invocation.program)
         .args(invocation.to_args())
         .stdin(Stdio::null())
@@ -558,6 +667,7 @@ where
     F: Fn(FfmpegProgress) + Send + Sync + 'static,
     L: Fn(String) + Send + Sync + 'static,
 {
+    log_spawn(invocation);
     let mut child = Command::new(&invocation.program)
         .args(invocation.to_args())
         .stdin(Stdio::null())
@@ -801,6 +911,95 @@ mod tests {
 
     /// The leniency options are the caller's decision, not a URL substring
     /// match, so an old FFmpeg simply never has them rendered (ADR-0006).
+    /// The logged command line carries no cookie, under any spelling.
+    ///
+    /// The sentinel is fake on purpose: `AGENTS.md` forbids a real cookie in a
+    /// test, and a fake one proves the same thing — that the value never
+    /// reaches the rendering, whatever it was.
+    #[test]
+    fn a_logged_command_line_counts_cookies_instead_of_carrying_them() {
+        const SENTINEL: &str = "DOWNER-COOKIE-SENTINEL-2f8a";
+        let mut invocation = plain();
+        invocation.cookies = Some(format!(
+            "session={SENTINEL}; path=/; domain=example.com\nother={SENTINEL}; path=/; domain=example.com"
+        ));
+
+        let logged = invocation.to_log_args().join(" ");
+        assert!(!logged.contains(SENTINEL), "{logged}");
+        assert!(!logged.contains("session="), "{logged}");
+        assert!(logged.contains("-cookies <2 cookies>"), "{logged}");
+
+        // And the executed command still carries the real thing, or the
+        // download would break.
+        let executed = strings(&invocation).join(" ");
+        assert!(executed.contains(SENTINEL));
+    }
+
+    #[test]
+    fn one_cookie_is_counted_in_the_singular_and_none_at_all_is_zero() {
+        let mut invocation = plain();
+        invocation.cookies = Some("session=x; path=/; domain=example.com".to_string());
+        assert!(invocation.to_log_args().join(" ").contains("<1 cookie>"));
+        assert_eq!(summarize_cookies(None), "<0 cookies>");
+    }
+
+    /// Headers are named, not quoted. A `Referer` tells you which page's
+    /// session was in play; its value would not add anything a log may hold.
+    #[test]
+    fn a_logged_command_line_names_headers_without_their_values() {
+        let mut invocation = plain();
+        invocation.headers = Some(
+            "User-Agent: Mozilla/5.0 (secret build 9)\r\nReferer: https://example.com/watch?id=42\r\n"
+                .to_string(),
+        );
+
+        let logged = invocation.to_log_args().join(" ");
+        assert!(logged.contains("-headers <User-Agent,Referer>"), "{logged}");
+        assert!(!logged.contains("Mozilla"), "{logged}");
+        assert!(!logged.contains("id=42"), "{logged}");
+    }
+
+    /// The output filename is the page title when title naming is on, and
+    /// `AGENTS.md` keeps a title out of every log.
+    #[test]
+    fn a_logged_command_line_drops_the_output_filename() {
+        let invocation = FfmpegInvocation::new(
+            PathBuf::from("ffmpeg"),
+            "https://example.com/video.m3u8",
+            PathBuf::from("/home/someone/Downloads/Someone's Private Video Title.mp4"),
+            false,
+        );
+
+        let logged = invocation.to_log_args().join(" ");
+        assert!(!logged.contains("Private Video Title"), "{logged}");
+        assert!(logged.ends_with(LOGGED_OUTPUT), "{logged}");
+    }
+
+    /// The logged line is the executed line, substitutions aside — so a reader
+    /// debugging from the log is reading what actually ran.
+    #[test]
+    fn a_logged_command_line_matches_the_executed_one_position_for_position() {
+        let mut invocation = plain();
+        invocation.cookies = Some("session=x; path=/; domain=example.com".to_string());
+        invocation.headers = Some("User-Agent: test\r\n".to_string());
+        invocation.hls_lenient = true;
+        invocation.threads = Some(4);
+
+        let executed = strings(&invocation);
+        let logged = invocation.to_log_args();
+        assert_eq!(executed.len(), logged.len(), "{logged:?}");
+
+        let substituted: Vec<usize> = executed
+            .iter()
+            .zip(&logged)
+            .enumerate()
+            .filter(|(_, (left, right))| left != right)
+            .map(|(index, _)| index)
+            .collect();
+        // Exactly three: the cookie value, the header block, and the output.
+        assert_eq!(substituted.len(), 3, "{substituted:?} in {logged:?}");
+    }
+
     #[test]
     fn segment_extension_options_follow_the_lenient_flag() {
         let lenient = FfmpegInvocation {

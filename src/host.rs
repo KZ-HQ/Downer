@@ -227,7 +227,13 @@ pub fn install(options: &InstallOptions) -> DownerResult<InstallReport> {
     write_launcher(&paths.launcher, &binary)?;
     write_manifest(&paths.manifest, &paths.launcher, options.dev)?;
     if let Some(ffmpeg) = ffmpeg.as_deref() {
-        write_config(&paths.config, &HostConfig::with_ffmpeg(ffmpeg))?;
+        // Merged into whatever is already there rather than written over it.
+        // The file now carries a second setting the user may have chosen
+        // (`log_level`), and reinstalling to record a new FFmpeg must not
+        // silently discard it.
+        let mut config = load_config();
+        config.ffmpeg = Some(ffmpeg.to_path_buf());
+        write_config(&paths.config, &config)?;
     }
 
     Ok(InstallReport {
@@ -359,13 +365,26 @@ fn write_manifest(manifest: &Path, launcher: &Path, dev: bool) -> DownerResult<(
 pub struct HostConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ffmpeg: Option<PathBuf>,
+    /// How much the host writes to its log file: `off`, `error`, `info` or
+    /// `debug`.
+    ///
+    /// It lives here rather than in an environment variable because Firefox
+    /// launches the host with a minimal environment, so `DOWNER_LOG` cannot
+    /// reach it — the same reason `ffmpeg` is recorded here. A string rather
+    /// than an enum so an unrecognised value degrades to the default instead of
+    /// making the whole file unparseable and taking the FFmpeg path down with
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_level: Option<String>,
 }
 
 impl HostConfig {
-    fn with_ffmpeg(ffmpeg: &Path) -> Self {
-        Self {
-            ffmpeg: Some(ffmpeg.to_path_buf()),
-        }
+    /// The configured level, or the default when absent or unrecognised.
+    pub fn log_level(&self) -> crate::hostlog::Level {
+        self.log_level
+            .as_deref()
+            .and_then(crate::hostlog::Level::parse)
+            .unwrap_or_default()
     }
 }
 

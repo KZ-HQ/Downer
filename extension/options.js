@@ -185,6 +185,17 @@ function renderSetupReport(report) {
     `downer ${report.host_version} (protocol ${report.protocol_version}) on ${report.platform}`;
   resultsElement.append(summary);
 
+  // The host's own log file, which is the one place a start-up failure leaves a
+  // trace: Firefox sends the host's stderr to the Browser Console, and nothing
+  // survives the process exiting. Shown as selectable text rather than a link
+  // because an extension cannot open a `file:` URL for the user anyway.
+  if (report.log_path) {
+    const log = document.createElement("p");
+    log.className = "check-summary";
+    log.textContent = `Native host log: ${report.log_path}`;
+    resultsElement.append(log);
+  }
+
   const list = document.createElement("ul");
   list.className = "checks";
   for (const check of report.checks || []) {

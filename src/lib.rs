@@ -30,6 +30,7 @@ pub mod error;
 pub mod failure;
 pub mod ffmpeg;
 pub mod host;
+pub mod hostlog;
 pub mod native;
 pub mod output;
 pub mod redact;
@@ -313,6 +314,12 @@ fn run_doctor(args: &cli::DoctorArgs) -> DownerResult<()> {
         "downer {} (protocol {}), {}",
         report.host_version, report.protocol_version, report.platform
     );
+    // The native host's log, not this command's: `downer doctor` prints to a
+    // terminal, and the file exists because Firefox gives the host nowhere else
+    // to write (ADR-0022). Naming it here is how a user finds it to attach.
+    if let Some(log_path) = &report.log_path {
+        println!("Native host log: {log_path}");
+    }
     println!();
     for check in &report.checks {
         println!("[{}] {}", check.outcome, check.title);
