@@ -44,7 +44,9 @@ already-established browser session can be used for protected media.
   `Cargo.lock`.
 
 - **macOS or Linux.** Windows is not supported: it registers native hosts in the
-  registry, and pause/resume use Unix signals.
+  registry, and pause/resume use Unix signals. The crate refuses to build on a
+  non-Unix target rather than produce a binary that cannot keep those
+  promises; see [ADR-0021](docs/adr/0021-windows-is-unsupported.md).
 
 ## Quick start
 

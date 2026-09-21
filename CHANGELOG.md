@@ -212,9 +212,23 @@ The Rust package and the Firefox extension share one product version; see
   the host with a minimal environment, so `DOWNER_FFMPEG` is not something a
   user can set for it; the recorded path is used unless `DOWNER_FFMPEG` does
   override it.
+- **A "Supported platform" setup check**, first in `downer doctor` and in the
+  Settings page's "Check setup" panel. It passes on macOS and Linux and fails
+  by name anywhere else, because on a platform Downer does not support, being
+  told that FFmpeg is fine is true and useless.
 
 ### Changed
 
+- **Windows is recorded as unsupported, and building for it now stops rather
+  than producing a binary.** `cargo build` on any non-Unix target fails with a
+  message naming both reasons — pause and resume are Unix signals, and Firefox
+  registers native hosts there through the registry rather than a launcher
+  script. Previously such a build succeeded and failed later, at run time, the
+  first time anyone pressed Pause. A Unix that is neither macOS nor Linux is
+  unaffected: it still builds, and refuses only the Firefox registration, by
+  name. Nothing changes for macOS or Linux users.
+  [ADR-0021](docs/adr/0021-windows-is-unsupported.md) records the decision and
+  what would have to be true to revisit it.
 - **The extension has a permanent add-on ID**, `downer@kz-hq.github.io`,
   replacing the placeholder `downer@example.com`. It is written only in
   `extension/manifest.json` now: the native messaging host reads it from there

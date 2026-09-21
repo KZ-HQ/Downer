@@ -1,3 +1,28 @@
+// Downer is a Unix program, and refuses to pretend otherwise.
+//
+// Pause and resume are SIGSTOP and SIGCONT (`src/ffmpeg.rs`), and the native
+// messaging host Firefox launches is a `/bin/sh` script pointed at by a
+// manifest in a per-user directory (`src/host.rs`). Windows has neither: it
+// registers native hosts in the registry, and has no process-stop signal. A
+// Windows build would therefore compile, install nothing Firefox could find,
+// and fail the pause and resume that `docs/adr/0012-control-semantics.md`
+// promises — at run time, in front of a user, with no remedy available to
+// them. Refusing at compile time says so once, to the only person who can act
+// on it.
+//
+// The gate is `not(unix)` rather than `windows` deliberately. A Unix that is
+// neither macOS nor Linux keeps every one of those mechanisms and lacks only
+// Firefox's registration directory, so it builds and degrades at run time
+// instead; `src/host.rs::manifest_dir` is where it finds out.
+//
+// See `docs/adr/0021-windows-is-unsupported.md`.
+#[cfg(not(unix))]
+compile_error!(
+    "Downer supports macOS and Linux only. Windows is not supported: pause and resume are Unix \
+     signals, and the Firefox native messaging host is registered through a launcher script \
+     rather than the Windows registry. See docs/adr/0021-windows-is-unsupported.md."
+);
+
 pub mod cli;
 pub mod diagnostics;
 pub mod discovery;

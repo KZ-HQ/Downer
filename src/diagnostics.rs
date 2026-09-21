@@ -160,7 +160,10 @@ pub fn run(output_dir: Option<&Path>, ffmpeg: Option<&Path>) -> Report {
     };
     let version = ffmpeg::version(&ffmpeg_path);
 
+    // The platform check comes first because it subsumes the others: on a
+    // platform Downer does not support, "FFmpeg is fine" is true and useless.
     let mut checks = vec![
+        platform_check(host::Platform::current()),
         host_registration_check(),
         ffmpeg_check(&ffmpeg_path, version),
     ];
@@ -182,13 +185,34 @@ pub fn run(output_dir: Option<&Path>, ffmpeg: Option<&Path>) -> Report {
     }
 }
 
-const PLATFORM: &str = if cfg!(target_os = "macos") {
-    "macos"
-} else if cfg!(target_os = "linux") {
-    "linux"
-} else {
-    "unsupported"
-};
+const PLATFORM: &str = host::Platform::current().name();
+
+/// Is Downer running on a platform it supports?
+///
+/// Windows never reaches this: the crate does not compile there
+/// (`docs/adr/0021-windows-is-unsupported.md`). What this catches is a Unix
+/// that is neither macOS nor Linux, where downloads work but the native host
+/// cannot be registered with Firefox — so it fails rather than warns. The
+/// platform is a parameter so the failing branch can be asserted from a passing
+/// one, which is the only way it can be tested at all.
+fn platform_check(platform: host::Platform) -> Check {
+    const NAME: &str = "platform";
+    const TITLE: &str = "Supported platform";
+
+    match platform {
+        host::Platform::MacOs | host::Platform::Linux => {
+            Check::pass(NAME, TITLE, platform.name().to_string())
+        }
+        host::Platform::Unsupported(os) => Check::fail(
+            NAME,
+            TITLE,
+            host::unsupported_platform_message(os),
+            "Downloads may work, but the native host cannot be registered with Firefox here. \
+             Use the command line on this platform, or macOS or Linux for the extension."
+                .to_string(),
+        ),
+    }
+}
 
 /// Is the native host registered with Firefox, and does the registration still
 /// point at something that exists?
@@ -512,6 +536,42 @@ mod tests {
         assert!(check.detail.contains("cannot be written to"));
 
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    /// The unsupported-platform report, asserted from a supported platform.
+    ///
+    /// This is the doctor half of KEI-67's acceptance criterion. It names the
+    /// platform rather than relying on `cfg`, because the platform the criterion
+    /// is about — Windows — is one this test could never run on: the crate
+    /// refuses to build there (`docs/adr/0021-windows-is-unsupported.md`).
+    #[test]
+    fn an_unsupported_platform_fails_the_report_and_says_what_is_supported() {
+        let check = platform_check(host::Platform::Unsupported("windows"));
+        assert_eq!(check.outcome, Outcome::Fail, "{check:?}");
+        assert_eq!(check.name, "platform");
+        assert!(check.detail.contains("windows"), "{check:?}");
+        assert!(check.detail.contains("macOS and Linux"), "{check:?}");
+        let remedy = check.remedy.expect("a failure always says what to do");
+        assert!(remedy.contains("Firefox"), "{remedy}");
+    }
+
+    #[test]
+    fn a_supported_platform_passes_and_names_itself() {
+        for platform in [host::Platform::MacOs, host::Platform::Linux] {
+            let check = platform_check(platform);
+            assert_eq!(check.outcome, Outcome::Pass, "{check:?}");
+            assert_eq!(check.detail, platform.name());
+            assert!(check.remedy.is_none(), "a pass has nothing to remedy");
+        }
+    }
+
+    /// The reported `platform` string is the one `docs/protocol.md` documents.
+    #[test]
+    fn the_reported_platform_is_a_documented_value() {
+        assert!(
+            matches!(PLATFORM, "macos" | "linux" | "unsupported"),
+            "protocol.md lists the permitted values; got {PLATFORM}"
+        );
     }
 
     #[test]

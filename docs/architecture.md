@@ -195,7 +195,10 @@ than protocol-level pausing, and that a long pause can cost the download — is 
 * **Resume of a failed download.** Partial files are kept as evidence, not as
   something to continue from. Byte-range resume is M5's.
 * **Windows.** Native hosts are registered in the registry there, and
-  pause/resume use Unix signals.
+  pause/resume use Unix signals. The crate refuses to compile on any non-Unix
+  target, so this is a build-time answer rather than a runtime one; a Unix
+  that is neither macOS nor Linux builds and refuses only the Firefox
+  registration. See [ADR-0021](adr/0021-windows-is-unsupported.md).
 
 ## Testing the seams
 

@@ -10,7 +10,10 @@ organized by symptom.
 ## Before you start
 
 **Platform.** macOS and Linux. Windows is not supported: it registers native
-messaging hosts in the registry, and pause/resume use Unix signals.
+messaging hosts in the registry, and pause/resume use Unix signals. Building
+from source on Windows stops with a message saying so rather than producing a
+binary that half works —
+[ADR-0021](adr/0021-windows-is-unsupported.md) records why.
 
 **FFmpeg 7.1 or newer**, which Downer runs but does not bundle. An older FFmpeg
 is warned about rather than refused — two HLS options are dropped so the
