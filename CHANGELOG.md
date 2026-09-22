@@ -10,7 +10,15 @@ The Rust package and the Firefox extension share one product version; see
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **The popup no longer offers a Quality picker that has nothing to pick
+  from.** `popup.js` had always hidden the rendition control for a playlist with
+  fewer than two renditions, but `.variants { display: flex }` in `popup.css`
+  overrode the `hidden` attribute — which is only a user-agent stylesheet
+  `display: none`, at a precedence any author rule beats. The picker rendered
+  empty on every single-rendition download. Both stylesheets now carry
+  `[hidden] { display: none !important; }`.
 
 ## [0.6.0] - 2026-09-22
 

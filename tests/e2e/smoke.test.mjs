@@ -13,6 +13,8 @@
  *     scan of the live DOM finds what the jsdom tests expect from the same
  *     fixtures. A difference between the two is a jsdom artefact, and the
  *     browser is the one that is right.
+ *   - Gecko's cascade actually hides what the popup hides. jsdom does not model
+ *     this at all, which is how KEI-97 shipped.
  *
  * Nothing here needs FFmpeg or the native messaging host: `download-media` is
  * the only message that reaches them, and it is deliberately not exercised.
@@ -67,6 +69,43 @@ const SCAN_TAB = `
   } finally {
     await browser.tabs.remove(tab.id);
   }
+`;
+
+/**
+ * Whether the popup's own stylesheet still lets `hidden` hide things.
+ *
+ * `hidden` is a user-agent `display: none` at the lowest precedence in the
+ * cascade, so any author rule that sets `display` on the same element beats it
+ * and the element stays on screen. That is KEI-97: `.variants { display: flex }`
+ * left an empty Quality picker rendered for every playlist with one rendition,
+ * while `popup.js` read as correct.
+ *
+ * Only a browser can answer this. jsdom does not load stylesheets, and its
+ * `getComputedStyle` reports `display: none` for a `[hidden]` element whether or
+ * not a rule overrides it, so the jsdom suite passes on the broken stylesheet.
+ * `tests/extension/hidden-attribute.test.js` guards the same thing inside
+ * `make check`, but it does so by reading the stylesheet's text; this is the
+ * rendered result.
+ *
+ * Every class the stylesheet gives a `display` to is tested, not just
+ * `.variants`, so the next rule to fall into the same trap is caught here.
+ */
+const HIDDEN_CASCADE = `
+  const withDisplay = [...document.styleSheets]
+    .flatMap((sheet) => [...sheet.cssRules])
+    .filter((rule) => rule.style && rule.style.display)
+    .map((rule) => rule.selectorText);
+  const classes = withDisplay.filter((selector) => /^\\.[A-Za-z0-9_-]+$/.test(selector));
+  const stillVisible = [];
+  for (const selector of classes) {
+    const element = document.createElement("div");
+    element.className = selector.slice(1);
+    element.hidden = true;
+    document.body.append(element);
+    if (getComputedStyle(element).display !== "none") stillVisible.push(selector);
+    element.remove();
+  }
+  return { withDisplay, classes, stillVisible };
 `;
 
 test(
@@ -137,6 +176,23 @@ test(
       );
 
       assert.deepEqual(urls(await scan("anchor-non-media")), []);
+    });
+
+    await t.test("the popup's stylesheet lets the hidden attribute hide things", async () => {
+      await browser.openExtensionPage(extensionUrl("popup.html"));
+      const cascade = await browser.evaluate(HIDDEN_CASCADE);
+
+      // The guard is worthless if the page under test has no display rules to
+      // guard, so prove the sample is real before asserting it is clean.
+      assert.ok(
+        cascade.classes.includes(".variants"),
+        `popup.css should still give .variants a display; saw ${JSON.stringify(cascade.withDisplay)}`
+      );
+      assert.deepEqual(
+        cascade.stillVisible,
+        [],
+        "these classes override the hidden attribute and render while hidden"
+      );
     });
   }
 );

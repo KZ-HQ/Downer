@@ -4,6 +4,16 @@ body {
   margin: 0;
 }
 
+/*
+ * The same guard `popup.css` carries, for the same reason: `hidden` is a UA
+ * `display: none` that any author `display` rule overrides. Nothing on this page
+ * is hidden today; the rule is here so that the first thing that is does not
+ * have to rediscover KEI-97.
+ */
+[hidden] {
+  display: none !important;
+}
+
 main {
   margin: 0 auto;
   max-width: 1100px;
