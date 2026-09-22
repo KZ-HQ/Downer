@@ -140,17 +140,56 @@ a new user's first screen.
 * The headline count describes what is listed, not what was found, as it already
   did for `inferred` candidates. The collapsed summary carries the difference.
 
+## What was measured
+
+The rule depends entirely on a `<source>` the browser fetched showing up in
+`performance.getEntriesByType("resource")`. Media element fetches are not
+uniformly reported across browsers, so this was tested rather than assumed, on
+2026-09-22, in the Firefox `make extension-browser` installs, against a local
+page carrying the exact reported markup — one `<video>`, an `.mp4` `<source>`
+and an `.ogv` one, both served from the same origin:
+
+```
+=== performance resource entries ===
+  other    http://127.0.0.1:38995/favicon.ico
+  video    http://127.0.0.1:38995/probe.mp4      <- initiatorType "video"
+=== content script scan, BEFORE play() ===
+  observed  http://127.0.0.1:38995/probe.mp4
+  declared  http://127.0.0.1:38995/probe.ogv
+=== content script scan, AFTER play() ===
+  observed  http://127.0.0.1:38995/probe.mp4
+  declared  http://127.0.0.1:38995/probe.ogv
+```
+
+Two things, and the second corrects an assumption made while writing this
+record:
+
+* **Firefox does report the fetch**, with `initiatorType: "video"`, so the
+  signal the rule stands on exists. The `.ogv` Firefox never chose stays
+  `declared`.
+* **Playback is not required.** Firefox preloads the first playable `<source>`
+  when the page loads, so the `.mp4` was already `observed` before anything
+  called `play()`. An earlier draft of this record, and the manual-test
+  instruction written alongside it, told a reader to press play first. That was
+  wrong, and worth recording because it made a working fix look inert: a popup
+  showing two rows is the *old* behaviour, not this rule's degrade path.
+
+The degrade path is therefore narrower than the decision above implies. It
+applies to a page that sets `preload="none"`, one that builds its player after
+load and has not fetched yet, and one that calls
+`performance.clearResourceTimings()` — not to an ordinary `<video>` the user has
+merely not clicked.
+
 ## Unverified
 
-* **That `observed` is reliable in the popup's timing window.** It reads
-  `performance.getEntriesByType("resource")` at scan time. A page that fetches
-  its media long after load, or one whose entries have been cleared by
-  `performance.clearResourceTimings()`, presents as all-`declared` and gets the
-  old behaviour. That is the safe direction, but it is not measured.
 * **How often a page has two real videos and only one played.** The rule's cost
   case is judged rare from the pages this project has looked at. No survey backs
   that.
-* **The rendered result in Firefox.** The split is unit-tested and jsdom-tested.
-  Getting a headless Firefox to actually play a `<video>` so that a `<source>`
-  becomes `observed` was judged too fragile to pin in `tests/e2e/`, so the
-  browser-level check is manual.
+* **The rendered result in Firefox.** The split is unit-tested and jsdom-tested,
+  and the `observed`/`declared` grading behind it is measured above through the
+  real content script. What is not pinned in `tests/e2e/` is the whole path
+  ending in rendered popup rows, because the fixture server serves stub bytes
+  and Firefox needs real media to choose a `<source>`; that needs a small
+  committed video fixture, which is KEI-99.
+* **Pages behind a login or a player framework.** Everything above is loopback
+  with plain markup.
