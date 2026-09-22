@@ -73,6 +73,14 @@ The minimum supported Rust version is declared as `rust-version` in
 `Cargo.toml`; raising it is a deliberate change that belongs in the changelog.
 The minimum supported FFmpeg version is documented in `README.md`.
 
+The release tooling in `scripts/` runs on **Python 3.9 or newer** — the version
+macOS ships — and every one of those files carries
+`from __future__ import annotations` so its type hints cannot raise a
+`TypeError` on an interpreter older than the syntax they use. CI runners have a
+much newer Python than a laptop does, so this is a floor CI cannot check for
+you; see KEI-93, where `str | None` in a signature broke `make check` on a Mac
+while passing everywhere else.
+
 A release is a `vX.Y.Z` tag on a commit whose two version fields already say
 `X.Y.Z`; `.github/workflows/release.yml` refuses to build otherwise. The
 extension's add-on ID, `downer@kz-hq.github.io`, is written only in

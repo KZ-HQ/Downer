@@ -8,6 +8,13 @@ here rather than in the workflow means it can be run and tested locally
 (KEI-58).
 """
 
+# Annotations are not evaluated at runtime, so this file's type hints may use
+# syntax newer than the Python running it. That matters because these scripts
+# are meant to run on a laptop as well as in CI (AGENTS.md), and macOS ships
+# Python 3.9 — where `str | None` in a signature is a TypeError at import, not
+# a hint. See KEI-93.
+from __future__ import annotations
+
 import argparse
 import pathlib
 import re
