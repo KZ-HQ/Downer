@@ -216,6 +216,24 @@ The Rust package and the Firefox extension share one product version; see
   Settings page's "Check setup" panel. It passes on macOS and Linux and fails
   by name anywhere else, because on a platform Downer does not support, being
   told that FFmpeg is fine is true and useless.
+- **Downloads survive a transient network failure without you watching.**
+  Every HTTP(S) input now carries FFmpeg's reconnect options, and a download
+  that fails for a reason classified as *transient* — a connection reset, a
+  timeout, a 5xx — restarts itself up to twice with a short backoff, instead of
+  stopping and waiting for you to press **Retry**. The popup says
+  "Connection lost. Reconnecting… (attempt 2 of 3)" while it happens, and
+  **Cancel** works throughout, including during the wait between attempts.
+  A failure that will not improve on a second try is never retried: a 403, a
+  404, an unwritable path, a full disk. Tune it with `--retries N` (`0` turns
+  it off), `--reconnect-delay-max SECONDS`, and `--no-reconnect`.
+  [ADR-0023](docs/adr/0023-surviving-a-transient-failure.md) records the design,
+  including what was measured and what is retained on judgement rather than
+  evidence.
+- **`--timeout SECONDS`** bounds fetching a source page or a playlist, with a
+  connect timeout derived from it. The source-page client previously set
+  neither, so a server that accepted a connection and then said nothing could
+  hold a download for thirty seconds. It does not bound the download itself: a
+  large file is not a hung one.
 - **The native host keeps a log file, and Settings tells you where it is.**
   Firefox sends the host's stderr to the Browser Console and keeps nothing
   after the process exits, so the failures that matter most — a host that will

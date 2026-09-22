@@ -182,6 +182,20 @@ A job that was running when Firefox closed keeps its file too, and shows as
 `interrupted` — nobody asked for that file to go, so it does not
 ([ADR-0012](adr/0012-control-semantics.md)).
 
+## The download keeps restarting, or says "Reconnecting"
+
+That is deliberate. A download that fails for a reason that looks transient — a
+reset connection, a timeout, a 5xx — restarts itself up to twice before giving
+up, and the popup says which attempt is running. **Cancel** works throughout,
+including during the pause between attempts.
+
+If it restarts repeatedly and then fails anyway, the failure is not transient
+after all and the final error says what it was. If you would rather it stopped
+on the first failure, run the CLI with `--retries 0`.
+
+A retry starts the file from the beginning, so on a slow link this costs time.
+Byte-range resume, which would make a retry cheap, is not implemented.
+
 ## Where the logs are
 
 **The extension: Settings → Live FFmpeg logs.** The most recent 500 lines per

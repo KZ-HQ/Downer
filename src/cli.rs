@@ -4,6 +4,12 @@ use clap::{Parser, Subcommand};
 
 use crate::output::OnConflict;
 
+/// Clap needs a plain function for the default; the value itself lives with the
+/// options it configures.
+fn downer_default_reconnect_delay() -> u32 {
+    crate::ffmpeg::DEFAULT_RECONNECT_DELAY_MAX
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "downer",
@@ -120,6 +126,38 @@ pub struct Cli {
     /// Number of FFmpeg processing threads; omit to let FFmpeg choose.
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
     pub threads: Option<u16>,
+
+    /// Seconds FFmpeg may spend backing off before giving up on a connection.
+    ///
+    /// Applies to HTTP(S) inputs, including every HLS segment. FFmpeg's own
+    /// default is 120, which is longer than anyone watches a stalled progress
+    /// bar.
+    #[arg(long, value_name = "SECONDS", default_value_t = downer_default_reconnect_delay())]
+    pub reconnect_delay_max: u32,
+
+    /// Do not pass FFmpeg any reconnect options.
+    ///
+    /// For a server that behaves worse when a dropped request is retried, and
+    /// for reproducing a failure that reconnection would paper over.
+    #[arg(long)]
+    pub no_reconnect: bool,
+
+    /// How many times to restart a download that failed for a network reason.
+    ///
+    /// `0` turns job-level retry off. FFmpeg's own per-connection reconnection
+    /// is separate and stays on unless `--no-reconnect` is given. Only failures
+    /// classified as transient are retried: a 403 or a 404 is never retried,
+    /// whatever this says.
+    #[arg(long, value_name = "N", default_value_t = crate::DEFAULT_RETRIES)]
+    pub retries: u32,
+
+    /// Seconds a source page or playlist fetch may take in total.
+    ///
+    /// The connect timeout is derived from it, capped at ten seconds. It does
+    /// not bound the download itself, which is FFmpeg's and has no deadline by
+    /// design — a large file is not a hung one.
+    #[arg(long, value_name = "SECONDS", default_value_t = crate::DEFAULT_TIMEOUT.as_secs())]
+    pub timeout: u64,
 
     #[command(subcommand)]
     pub command: Option<Command>,

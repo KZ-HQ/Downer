@@ -97,6 +97,51 @@ pub struct DownloadOptions {
     /// the evidence for why it failed, and deleting it is irreversible at the
     /// worst possible moment. See `docs/adr/0012-control-semantics.md`.
     pub keep_partial: bool,
+    /// How hard FFmpeg should try to re-establish a dropped HTTP connection, or
+    /// `None` for `--no-reconnect`.
+    pub reconnect: Option<ffmpeg::Reconnect>,
+    /// How many times to restart FFmpeg after a failure classified as
+    /// transient. `0` disables job-level retry; the FFmpeg-level reconnect
+    /// options are independent of it.
+    pub retries: u32,
+    /// How long a page or playlist fetch may take in total. The connect timeout
+    /// is derived from it; see [`DownloadOptions::connect_timeout`].
+    pub timeout: std::time::Duration,
+}
+
+/// Attempts a download gets by default: the first, plus two retries.
+///
+/// Two rather than one because the common transient failure is a CDN node
+/// dropping out and a second node answering; two rather than five because past
+/// that the user is waiting on something that is not coming back, and a manual
+/// retry is one click.
+pub const DEFAULT_RETRIES: u32 = 2;
+
+/// The default total timeout for a page or playlist fetch.
+pub const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The longest a connection may take to establish, whatever the total is.
+///
+/// A connect that has not completed in ten seconds is not going to; the rest of
+/// the budget belongs to the transfer.
+pub const MAX_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long to wait before attempt `attempt` (which is 2 for the first retry).
+///
+/// Exponential from one second, capped: 1s, 4s, 8s, 8s… Backing off matters
+/// because the failure this retries is usually a server or a route that needs a
+/// moment; retrying instantly just spends the attempt.
+pub fn retry_backoff(attempt: u32) -> std::time::Duration {
+    const CAP: u64 = 8;
+    let seconds = 1_u64 << attempt.saturating_sub(2).min(3);
+    std::time::Duration::from_secs(seconds.min(CAP))
+}
+
+impl DownloadOptions {
+    /// The connect timeout implied by [`DownloadOptions::timeout`].
+    pub fn connect_timeout(&self) -> std::time::Duration {
+        self.timeout.min(MAX_CONNECT_TIMEOUT)
+    }
 }
 
 impl DownloadOptions {
@@ -192,7 +237,12 @@ pub fn run(cli: Cli) -> DownerResult<()> {
     // caller ever seeing the list. Only a `--select` or `--media` needs the
     // whole list, so only those pay for assembling it.
     let media = match (cli.select, cli.media.as_deref()) {
-        (None, None) => scraper::resolve_media(url, &cli.user_agent, cookie.as_deref())?,
+        (None, None) => scraper::resolve_media_with_timeout(
+            url,
+            &cli.user_agent,
+            cookie.as_deref(),
+            std::time::Duration::from_secs(cli.timeout),
+        )?,
         (select, media) => {
             let source = scraper::resolve_source(url, &cli.user_agent, cookie.as_deref())?;
             ResolvedMedia {
@@ -225,6 +275,11 @@ pub fn run(cli: Cli) -> DownerResult<()> {
         // no cleanup runs. The value is inert here rather than a flag that
         // would do nothing. See ADR-0012.
         keep_partial: true,
+        reconnect: (!cli.no_reconnect).then_some(ffmpeg::Reconnect {
+            delay_max: cli.reconnect_delay_max,
+        }),
+        retries: cli.retries,
+        timeout: std::time::Duration::from_secs(cli.timeout),
     };
     let started = std::time::Instant::now();
     let path = download_resolved(media, &options, Hooks::default())?;
@@ -371,10 +426,32 @@ pub struct Hooks<'a> {
     /// reported as "it went wrong somewhere", because the one thing that says
     /// where the fragment is has already been consumed by the error path.
     pub on_target: Option<TargetReporter>,
+    /// Called before each retry, with the attempt about to start and the total
+    /// allowed.
+    ///
+    /// A download that silently restarts looks identical to one that has hung,
+    /// so this is what turns a retry into something a user can see: the host
+    /// turns it into a `retrying` event and the CLI prints a line. See
+    /// `docs/adr/0023-surviving-a-transient-failure.md`.
+    pub on_retry: Option<RetryReporter>,
 }
 
 /// Told the path a download will write, once it has been inferred.
 pub type TargetReporter = Box<dyn Fn(&Path) + Send + Sync>;
+
+/// Told that attempt `attempt` of `total` is about to start, after `delay`.
+pub type RetryReporter = Box<dyn Fn(RetryNotice) + Send + Sync>;
+
+/// One retry, as the caller is told about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryNotice {
+    /// The attempt about to begin, counting the first try as 1.
+    pub attempt: u32,
+    /// How many attempts this download gets in total.
+    pub total: u32,
+    /// How long the backoff before it waits.
+    pub delay: std::time::Duration,
+}
 
 impl<'a> Hooks<'a> {
     /// A controllable download reporting progress and FFmpeg's output.
@@ -388,7 +465,17 @@ impl<'a> Hooks<'a> {
             on_progress: Some(Box::new(on_progress)),
             on_log: Some(Box::new(on_log)),
             on_target: None,
+            on_retry: None,
         }
+    }
+
+    /// Also report each retry before it starts.
+    pub fn reporting_retries<R>(mut self, on_retry: R) -> Self
+    where
+        R: Fn(RetryNotice) + Send + Sync + 'static,
+    {
+        self.on_retry = Some(Box::new(on_retry));
+        self
     }
 
     /// Also report the path this download resolved to, before it starts.
@@ -399,6 +486,46 @@ impl<'a> Hooks<'a> {
         self.on_target = Some(Box::new(on_target));
         self
     }
+}
+
+/// Is this failure one another attempt might survive?
+///
+/// Three things have to hold, and the order is the point: a cancelled download
+/// is the user's decision and is never retried however it failed; only
+/// `FfmpegFailed` carries stderr to classify at all; and the classification
+/// itself is conservative — see [`failure::is_transient`].
+fn worth_retrying(error: &DownerError, control: Option<&ProcessControl>) -> bool {
+    if control.is_some_and(ProcessControl::is_cancelled) {
+        return false;
+    }
+    match error {
+        DownerError::FfmpegFailed { stderr, .. } => failure::is_transient(stderr),
+        // An FFmpeg too old to run these options will be just as old next time,
+        // and everything else here is a decision about the request rather than
+        // a network event.
+        _ => false,
+    }
+}
+
+/// Sleep for `delay`, returning `false` if the download was cancelled while
+/// waiting.
+///
+/// A backoff can be seconds long, and a user who presses Cancel during one
+/// expects it to stop then. Polling in slices is enough: `ProcessControl` has
+/// no way to wake a sleeper, and adding one for this would be a condvar in the
+/// control path for a case measured in seconds.
+fn sleep_unless_cancelled(delay: std::time::Duration, control: Option<&ProcessControl>) -> bool {
+    const SLICE: std::time::Duration = std::time::Duration::from_millis(100);
+    let deadline = std::time::Instant::now() + delay;
+    while std::time::Instant::now() < deadline {
+        if control.is_some_and(ProcessControl::is_cancelled) {
+            return false;
+        }
+        std::thread::sleep(
+            SLICE.min(deadline.saturating_duration_since(std::time::Instant::now())),
+        );
+    }
+    !control.is_some_and(ProcessControl::is_cancelled)
 }
 
 /// Download `media` to the path `options` resolves, and return where it landed.
@@ -498,6 +625,7 @@ pub fn download_resolved(
         // Scoped to this URL's host, so a redirect target or a cross-host HLS
         // segment server never receives the media host's session.
         cookies: scraper::ffmpeg_cookies(url, options.cookie.as_deref()),
+        reconnect: options.reconnect,
         // An HLS input needs the leniency options, but only an FFmpeg that has
         // them can be given them; see ADR-0006.
         hls_lenient: is_hls(url.as_str()) && outdated.is_none(),
@@ -514,26 +642,77 @@ pub fn download_resolved(
     // control was cancelled is what distinguishes "the user stopped this" from
     // "this went wrong", and the two get different treatment on failure.
     let control = hooks.control;
-    let result = match hooks.control {
-        Some(control) => {
-            let on_progress = hooks.on_progress;
-            let on_log = hooks.on_log;
-            ffmpeg::execute_controlled_with_progress_and_logs(
-                &invocation,
-                control,
-                move |progress| {
-                    if let Some(hook) = &on_progress {
-                        hook(progress);
-                    }
-                },
-                move |line| {
-                    if let Some(hook) = &on_log {
-                        hook(line);
-                    }
-                },
-            )
+    let on_retry = hooks.on_retry;
+    // Shared rather than moved: the executor spawns threads, so each attempt
+    // needs its own `'static` handle to the same callbacks.
+    let on_progress = hooks.on_progress.map(std::sync::Arc::new);
+    let on_log = hooks.on_log.map(std::sync::Arc::new);
+    // The retry loop lives *here*, inside the one function that has already
+    // reserved the output path, and never around it. `resolve_conflict` above
+    // is what turns a taken name into `video_2.mp4`; running it again for a
+    // second attempt would see the first attempt's own part-written file and
+    // rename away from it, so a retried download would quietly produce a second
+    // file instead of finishing the first. One reservation, one path, however
+    // many attempts. See `docs/adr/0023-surviving-a-transient-failure.md`.
+    let attempts = options.retries.saturating_add(1);
+    let mut attempt = 1;
+    let result = loop {
+        let mut this_attempt = invocation.clone();
+        // Every attempt after the first overwrites what the last one left.
+        // That file is ours — the name was reserved above — so this is never
+        // the user's `-n` being overridden.
+        if attempt > 1 {
+            this_attempt.overwrite = true;
         }
-        None => execute(&invocation),
+        let outcome = match control {
+            Some(control) => {
+                let progress_hook = on_progress.clone();
+                let log_hook = on_log.clone();
+                ffmpeg::execute_controlled_with_progress_and_logs(
+                    &this_attempt,
+                    control,
+                    move |progress| {
+                        if let Some(hook) = &progress_hook {
+                            hook(progress);
+                        }
+                    },
+                    move |line| {
+                        if let Some(hook) = &log_hook {
+                            hook(line);
+                        }
+                    },
+                )
+            }
+            None => execute(&this_attempt),
+        };
+
+        let Err(error) = outcome else {
+            break outcome;
+        };
+        if attempt >= attempts || !worth_retrying(&error, control) {
+            break Err(error);
+        }
+
+        attempt += 1;
+        let delay = retry_backoff(attempt);
+        if let Some(hook) = on_retry.as_ref() {
+            hook(RetryNotice {
+                attempt,
+                total: attempts,
+                delay,
+            });
+        }
+        if !options.quiet {
+            eprintln!(
+                "Download failed; retrying in {}s (attempt {attempt} of {attempts}).",
+                delay.as_secs()
+            );
+        }
+        // Slept in slices so a cancel during the backoff is acted on then,
+        // rather than after a wait the user did not ask to finish.
+        if !sleep_unless_cancelled(delay, control) {
+            break Err(error);
+        }
     };
 
     let destination = match result {

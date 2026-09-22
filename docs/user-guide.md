@@ -415,6 +415,31 @@ to attach to a bug report;
 [troubleshooting](troubleshooting.md#where-the-logs-are) has the paths and how
 to raise its level.
 
+## When the network wobbles
+
+A download no longer gives up on the first dropped connection. FFmpeg is asked
+to reconnect within a transfer, and if a run still fails for a reason that looks
+transient — a reset connection, a timeout, a 5xx from the server — Downer
+restarts it, up to twice, with a short pause between attempts. The popup shows
+**Reconnecting… (attempt 2 of 3)**, and **Cancel** stops it immediately, even
+during the pause.
+
+Failures that a second attempt cannot fix are never retried: a 403 or 404 from
+the server, a path you cannot write to, a full disk. Retrying those would waste
+your time and hammer someone else's server.
+
+| Option | What it does |
+| --- | --- |
+| `--retries N` | How many times to restart a transient failure. `0` turns it off. Default 2. |
+| `--reconnect-delay-max SECONDS` | How long FFmpeg may spend backing off inside one attempt. Default 30. |
+| `--no-reconnect` | Pass FFmpeg no reconnect options at all. |
+| `--timeout SECONDS` | Bounds fetching the source page or playlist. Default 30. Does **not** bound the download itself. |
+
+A retry starts the file again from the beginning — there is no byte-range
+resume yet — so on a slow link a large file can cost real time. `--retries 0`
+is the way to opt out.
+[ADR-0023](adr/0023-surviving-a-transient-failure.md) has the reasoning.
+
 ## Protected media
 
 The extension is the easy path: it uses the Firefox cookies for the media host

@@ -81,6 +81,11 @@ fn argv_for_choice(
         playlist_text: playlist_text.map(str::to_string),
         rendition: rendition.map(|raw| raw.parse().expect("a valid rendition selector")),
         keep_partial: true,
+        reconnect: Some(downer::ffmpeg::Reconnect::default()),
+        // No retry in an argv test: it asserts on what one invocation renders,
+        // and a retried run would record the last attempt's arguments.
+        retries: 0,
+        timeout: downer::DEFAULT_TIMEOUT,
     };
     downer::download_resolved(media, &options, Hooks::default())?;
     Ok(recorded(temp.path()))

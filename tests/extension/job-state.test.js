@@ -176,10 +176,14 @@ test("an interrupted job offers no controls, so nothing is wired to a dead task"
 test("controls are offered exactly where they make sense", () => {
   assert.deepEqual([...ALL_STATES].filter(canPause).sort(), ["downloading", "preparing", "starting"]);
   assert.deepEqual([...ALL_STATES].filter(canResume), ["paused"]);
+  // `retrying` cancels but does not pause, and the asymmetry is deliberate:
+  // between attempts there is no FFmpeg process, so Pause could only pretend,
+  // while the host checks for a cancel throughout the backoff (ADR-0023).
   assert.deepEqual(
     [...ALL_STATES].filter(canCancel).sort(),
-    ["downloading", "paused", "preparing", "starting"]
+    ["downloading", "paused", "preparing", "retrying", "starting"]
   );
+  assert.ok(!canPause("retrying"), "no process to signal between attempts");
 });
 
 // --- Reconciliation ----------------------------------------------------------
@@ -260,4 +264,30 @@ test("a mixed store reconciles only what was running", () => {
     "interrupted"
   ]);
   for (const job of restored) assert.equal(isTerminal(job.state), true, job.id);
+});
+
+test("KEI-66: retrying is an active wire state, never terminal", () => {
+  // The distinction the popup rests on: an active job keeps its controls and
+  // its progress row, a terminal one is finished. A retry is between attempts,
+  // so it is active (ADR-0023).
+  assert.ok(isState("retrying"));
+  assert.ok(isActive("retrying"));
+  assert.ok(!isTerminal("retrying"));
+  assert.ok(
+    protocol.job_states.active.includes("retrying"),
+    "retrying is in tests/fixtures/protocol.json, which the Rust suite reads too"
+  );
+});
+
+test("KEI-66: a download may retry and come back, or run out of attempts", () => {
+  assert.ok(canTransition("downloading", "retrying"));
+  // The next attempt starting.
+  assert.ok(canTransition("retrying", "downloading"));
+  // The attempts running out.
+  assert.ok(canTransition("retrying", "failed"));
+  // A cancel during the backoff.
+  assert.ok(canTransition("retrying", "cancelling"));
+  assert.ok(canTransition("retrying", "cancelled"));
+  // And a job cannot open in it: a retry presupposes an attempt.
+  assert.ok(!canTransition(undefined, "retrying"));
 });

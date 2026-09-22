@@ -141,6 +141,49 @@ impl Reporting {
     };
 }
 
+/// How hard FFmpeg should try to re-establish a dropped HTTP connection.
+///
+/// A value rather than a set of flags, for the reason
+/// `docs/adr/0007-structured-ffmpeg-command-model.md` gives: the caller says
+/// what it wants, and [`FfmpegInvocation::to_args`] is the only thing that
+/// knows the spelling. `None` on the invocation means the options are not
+/// passed at all, which is what `--no-reconnect` asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reconnect {
+    /// Seconds FFmpeg may spend backing off before it gives up on one
+    /// connection. Its own default is 120, which is far longer than anyone
+    /// waits at a progress bar.
+    pub delay_max: u32,
+}
+
+/// The HTTP statuses worth reconnecting on.
+///
+/// Deliberately **not** `4xx,5xx`. A 403 or a 404 will not become a 200 by
+/// being asked again, so reconnecting on the whole 4xx range turns a dead link
+/// into repeated requests against someone else's server. The two exceptions are
+/// the two that mean "later": 408 Request Timeout and 429 Too Many Requests.
+/// See `docs/adr/0023-surviving-a-transient-failure.md`.
+pub const RECONNECT_HTTP_STATUSES: &str = "5xx,408,429";
+
+/// The default for [`Reconnect::delay_max`], in seconds.
+pub const DEFAULT_RECONNECT_DELAY_MAX: u32 = 30;
+
+impl Default for Reconnect {
+    fn default() -> Self {
+        Self {
+            delay_max: DEFAULT_RECONNECT_DELAY_MAX,
+        }
+    }
+}
+
+/// Whether FFmpeg would fetch this input over HTTP, and so whether the
+/// reconnect options mean anything for it. They are HTTP-protocol options; on a
+/// local path FFmpeg rejects nothing but gains nothing either.
+fn is_http_input(input: &str) -> bool {
+    let lowered = input.trim_start().to_ascii_lowercase();
+    lowered.starts_with("http://") || lowered.starts_with("https://")
+}
+
 /// One FFmpeg download, expressed as what it is rather than as argv.
 ///
 /// [`FfmpegInvocation::to_args`] is the only place argument order is decided,
@@ -168,6 +211,9 @@ pub struct FfmpegInvocation {
     /// FFmpeg scopes `-cookies` per request host while applying `-headers` to
     /// every request.
     pub cookies: Option<String>,
+    /// How hard to try to re-establish a dropped connection, or `None` to pass
+    /// no reconnect options at all. Applied to HTTP(S) inputs only.
+    pub reconnect: Option<Reconnect>,
     /// Whether to loosen FFmpeg's segment-extension checking. The caller
     /// decides, from the input *and* from whether this FFmpeg has the options
     /// at all — they exist only from [`MINIMUM_FFMPEG`]; see
@@ -406,6 +452,10 @@ impl FfmpegInvocation {
             audio_input: None,
             headers: None,
             cookies: None,
+            // On by default: a download that dies on one dropped connection is
+            // the defect KEI-66 exists to remove, and the options cost nothing
+            // when nothing goes wrong.
+            reconnect: Some(Reconnect::default()),
             hls_lenient: false,
             threads: None,
             overwrite,
@@ -446,6 +496,22 @@ impl FfmpegInvocation {
             .into_iter()
             .flatten()
         {
+            // HTTP(S) only, and per input: the HLS demuxer honours these for
+            // every segment it opens, which is what makes one 503 survivable.
+            if let Some(reconnect) = self.reconnect.filter(|_| is_http_input(input)) {
+                args.extend([
+                    OsString::from("-reconnect"),
+                    OsString::from("1"),
+                    OsString::from("-reconnect_streamed"),
+                    OsString::from("1"),
+                    OsString::from("-reconnect_on_network_error"),
+                    OsString::from("1"),
+                    OsString::from("-reconnect_on_http_error"),
+                    OsString::from(RECONNECT_HTTP_STATUSES),
+                    OsString::from("-reconnect_delay_max"),
+                    OsString::from(reconnect.delay_max.to_string()),
+                ]);
+            }
             if self.hls_lenient {
                 args.push(OsString::from(SEGMENT_EXTENSION_OPTIONS[0]));
                 args.push(OsString::from("ALL"));
@@ -911,6 +977,83 @@ mod tests {
 
     /// The leniency options are the caller's decision, not a URL substring
     /// match, so an old FFmpeg simply never has them rendered (ADR-0006).
+    #[test]
+    fn an_http_input_gets_the_reconnect_options_before_its_own_i() {
+        let mut invocation = plain();
+        invocation.reconnect = Some(Reconnect { delay_max: 45 });
+        let args = strings(&invocation);
+
+        let reconnect = args
+            .iter()
+            .position(|a| a == "-reconnect")
+            .expect("present");
+        let input = args.iter().position(|a| a == "-i").expect("present");
+        assert!(
+            reconnect < input,
+            "input options precede their -i: {args:?}"
+        );
+
+        for pair in [
+            ["-reconnect", "1"],
+            ["-reconnect_streamed", "1"],
+            ["-reconnect_on_network_error", "1"],
+            ["-reconnect_on_http_error", RECONNECT_HTTP_STATUSES],
+            ["-reconnect_delay_max", "45"],
+        ] {
+            assert!(
+                args.windows(2).any(|window| window == pair),
+                "{pair:?} missing from {args:?}"
+            );
+        }
+    }
+
+    /// The narrowing that matters: a 403 or a 404 is never reconnected on,
+    /// because it will not become a 200 and retrying it hammers a server that
+    /// has already answered. See ADR-0023.
+    #[test]
+    fn reconnect_covers_server_errors_and_the_two_retryable_client_ones() {
+        assert_eq!(RECONNECT_HTTP_STATUSES, "5xx,408,429");
+        assert!(!RECONNECT_HTTP_STATUSES.contains("4xx"));
+    }
+
+    #[test]
+    fn no_reconnect_leaves_every_reconnect_option_off_the_command_line() {
+        let mut invocation = plain();
+        invocation.reconnect = None;
+        let args = strings(&invocation).join(" ");
+        assert!(!args.contains("-reconnect"), "{args}");
+    }
+
+    /// They are HTTP options; a local file gains nothing from them.
+    #[test]
+    fn a_local_input_gets_no_reconnect_options() {
+        let mut invocation = plain();
+        invocation.input = "/tmp/local.mp4".to_string();
+        invocation.reconnect = Some(Reconnect::default());
+        let args = strings(&invocation).join(" ");
+        assert!(!args.contains("-reconnect"), "{args}");
+    }
+
+    /// Per input, like `-headers` and `-cookies`: the audio playlist is fetched
+    /// over the same flaky network as the video one.
+    #[test]
+    fn a_paired_audio_input_gets_its_own_reconnect_options() {
+        let mut invocation = plain();
+        invocation.audio_input = Some("https://cdn.example.test/audio.m3u8".to_string());
+        invocation.reconnect = Some(Reconnect::default());
+        let args = strings(&invocation);
+        let count = args.iter().filter(|a| *a == "-reconnect").count();
+        assert_eq!(count, 2, "one per input: {args:?}");
+    }
+
+    #[test]
+    fn http_inputs_are_recognised_by_scheme_only() {
+        assert!(is_http_input("https://example.test/a.m3u8"));
+        assert!(is_http_input("HTTP://example.test/a.m3u8"));
+        assert!(!is_http_input("/var/tmp/a.mp4"));
+        assert!(!is_http_input("file:///tmp/a.mp4"));
+    }
+
     /// The logged command line carries no cookie, under any spelling.
     ///
     /// The sentinel is fake on purpose: `AGENTS.md` forbids a real cookie in a

@@ -267,6 +267,17 @@ struct FakeFfmpeg {
     /// What the fake reports for `-version`. The default is comfortably above
     /// the documented minimum; a test lowers it to drive the too-old path.
     version: &'static str,
+    /// Fail this many invocations before succeeding, writing `fail_stderr` and
+    /// exiting non-zero each time.
+    ///
+    /// Counted in a file beside the script, so the count survives the process
+    /// exiting — which is the whole point: a retry is a *new* FFmpeg process,
+    /// and a fake that could not tell attempt 1 from attempt 2 could not
+    /// exercise one.
+    fail_attempts: u32,
+    /// What those failing attempts write to stderr. The classification in
+    /// `src/failure.rs` reads this, so it decides whether a retry happens.
+    fail_stderr: &'static str,
 }
 
 impl Default for FakeFfmpeg {
@@ -278,6 +289,8 @@ impl Default for FakeFfmpeg {
             stderr_line: None,
             exit_code: 0,
             version: "9.0.1",
+            fail_attempts: 0,
+            fail_stderr: "[tcp @ 0x1] Connection reset by peer",
         }
     }
 }
@@ -303,6 +316,14 @@ dir="$(dirname "$0")"
 last=""
 for arg in "$@"; do last="$arg"; done
 printf '%s\0' "$@" > "$dir/args"
+attempts=0
+[ -f "$dir/attempts" ] && attempts=$(cat "$dir/attempts")
+attempts=$((attempts + 1))
+echo "$attempts" > "$dir/attempts"
+if [ "$attempts" -le {fail_attempts} ]; then
+  echo '{fail_stderr}' >&2
+  exit 1
+fi
 mkdir -p "$(dirname "$last")"
 printf '%s' '{content}' > "$last"
 i=0
@@ -317,6 +338,8 @@ echo "progress=end"
 exit {exit_code}
 "#,
             version = self.version,
+            fail_attempts = self.fail_attempts,
+            fail_stderr = self.fail_stderr,
             content = self.content,
             updates = self.progress_updates,
             sleep = self.sleep_seconds,
@@ -2729,4 +2752,116 @@ fn a_download_naming_an_unoffered_rendition_fails_instead_of_substituting() {
             .contains("does not offer that rendition"),
         "{event}"
     );
+}
+
+/// A transient failure is retried, and the popup is told.
+///
+/// The fake fails its first invocation with a dropped-connection message and
+/// succeeds on the second, which is exactly the shape KEI-66 exists for.
+#[test]
+fn a_transient_failure_is_retried_and_announced() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg {
+        fail_attempts: 1,
+        fail_stderr: "[tcp @ 0x1] Connection reset by peer",
+        ..FakeFfmpeg::default()
+    }
+    .install(temp.path());
+    let downloads = temp.path().join("downloads");
+    std::fs::create_dir(&downloads).unwrap();
+    let mut host = NativeHost::start(&ffmpeg);
+
+    host.send(&download_request(
+        "https://cdn.example.test/video.mp4",
+        &downloads,
+    ));
+
+    let (retrying, _) = host.wait_for(|event| event["state"] == json!("retrying"));
+    assert_eq!(retrying["attempt"], json!(2), "{retrying}");
+    assert!(
+        retrying["max_attempts"].as_u64().unwrap_or(0) >= 2,
+        "the total is reported so the popup can say 2 of N: {retrying}"
+    );
+    // The state is shared vocabulary, so it has to be in the file both suites
+    // read — not just in the host's source.
+    assert!(
+        protocol_strings("/job_states/active").contains(&"retrying".to_string()),
+        "retrying is an active job state in tests/fixtures/protocol.json"
+    );
+
+    let (terminal, _) = host.wait_for(|event| event["type"] == json!("terminal"));
+    assert_eq!(terminal["state"], json!("completed"), "{terminal}");
+}
+
+/// The trap this design exists to avoid.
+///
+/// `download_resolved` reserves the output name *before* FFmpeg runs, and
+/// renaming is how a taken name becomes `video_2.mp4`. If the retry loop sat
+/// around that reservation rather than inside it, attempt 2 would find attempt
+/// 1's own part-written file and rename away from it — so a retried download
+/// would quietly produce a second file and leave the first behind. One name,
+/// however many attempts. See ADR-0023.
+#[test]
+fn a_retry_finishes_the_original_file_rather_than_renaming_beside_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg {
+        fail_attempts: 1,
+        ..FakeFfmpeg::default()
+    }
+    .install(temp.path());
+    let downloads = temp.path().join("downloads");
+    std::fs::create_dir(&downloads).unwrap();
+    let mut host = NativeHost::start(&ffmpeg);
+
+    host.send(&download_request(
+        "https://cdn.example.test/video.mp4",
+        &downloads,
+    ));
+    let (terminal, _) = host.wait_for(|event| event["type"] == json!("terminal"));
+    assert_eq!(terminal["state"], json!("completed"), "{terminal}");
+
+    let mut written: Vec<String> = std::fs::read_dir(&downloads)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    written.sort();
+    assert_eq!(
+        written,
+        vec!["video.mp4".to_string()],
+        "a retry must not leave a second file behind"
+    );
+}
+
+/// A 403 is the user's problem, and asking again will not change the answer.
+/// Retrying it would spend their time and hammer someone else's server.
+#[test]
+fn a_permanent_failure_is_not_retried() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = FakeFfmpeg {
+        // More failures than the retry budget, so a host that *did* retry would
+        // still end up failing — the assertion is about the absence of the
+        // `retrying` event, not about the outcome.
+        fail_attempts: 9,
+        fail_stderr: "[http @ 0x1] Server returned 403 Forbidden",
+        ..FakeFfmpeg::default()
+    }
+    .install(temp.path());
+    let downloads = temp.path().join("downloads");
+    std::fs::create_dir(&downloads).unwrap();
+    let mut host = NativeHost::start(&ffmpeg);
+
+    host.send(&download_request(
+        "https://cdn.example.test/video.mp4",
+        &downloads,
+    ));
+    let (terminal, seen) = host.wait_for(|event| event["type"] == json!("terminal"));
+    assert_eq!(terminal["state"], json!("failed"), "{terminal}");
+    assert!(
+        !seen.iter().any(|event| event["state"] == json!("retrying")),
+        "a 403 must not be retried: {seen:?}"
+    );
+
+    // And the fake was run exactly once.
+    let attempts = std::fs::read_to_string(temp.path().join("attempts")).unwrap_or_default();
+    assert_eq!(attempts.trim(), "1", "FFmpeg ran once, not three times");
 }

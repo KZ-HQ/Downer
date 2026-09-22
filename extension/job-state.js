@@ -21,7 +21,7 @@
  * `extension/task-protocol.js`, which derives from `WIRE_TERMINAL_STATES`).
  */
 var DownerJobState = (() => {
-  const WIRE_ACTIVE_STATES = ["starting", "downloading", "paused", "cancelling"];
+  const WIRE_ACTIVE_STATES = ["starting", "downloading", "retrying", "paused", "cancelling"];
   const WIRE_TERMINAL_STATES = ["completed", "failed", "cancelled"];
   const EXTENSION_ACTIVE_STATES = ["preparing"];
   const EXTENSION_TERMINAL_STATES = ["interrupted"];
@@ -43,10 +43,14 @@ var DownerJobState = (() => {
    * creates a new job with a new id rather than reviving this one.
    */
   const TRANSITIONS = {
-    starting: ["preparing", "downloading", "paused", "cancelling", ...WIRE_TERMINAL_STATES, "interrupted"],
-    preparing: ["starting", "downloading", "paused", "cancelling", ...WIRE_TERMINAL_STATES, "interrupted"],
-    downloading: ["paused", "cancelling", ...WIRE_TERMINAL_STATES, "interrupted"],
-    paused: ["downloading", "cancelling", ...WIRE_TERMINAL_STATES, "interrupted"],
+    starting: ["preparing", "downloading", "retrying", "paused", "cancelling", ...WIRE_TERMINAL_STATES, "interrupted"],
+    preparing: ["starting", "downloading", "retrying", "paused", "cancelling", ...WIRE_TERMINAL_STATES, "interrupted"],
+    downloading: ["retrying", "paused", "cancelling", ...WIRE_TERMINAL_STATES, "interrupted"],
+    // A retry goes back to `downloading` when the next attempt starts, or
+    // straight to a terminal state when the attempts run out. It is active, not
+    // terminal: the job has not finished, it is between attempts (ADR-0023).
+    retrying: ["downloading", "paused", "cancelling", ...WIRE_TERMINAL_STATES, "interrupted"],
+    paused: ["downloading", "retrying", "cancelling", ...WIRE_TERMINAL_STATES, "interrupted"],
     cancelling: [...WIRE_TERMINAL_STATES, "interrupted"],
     completed: [],
     failed: [],
@@ -104,7 +108,12 @@ var DownerJobState = (() => {
   }
 
   function canCancel(state) {
-    return canPause(state) || state === "paused";
+    // `retrying` is cancellable but deliberately not pausable. Between attempts
+    // there is no FFmpeg process to signal, so Pause could only pretend — but
+    // the host sleeps out the backoff in slices and checks for a cancel in each
+    // one, so Cancel there is honoured immediately rather than deferred to the
+    // next attempt. See ADR-0023.
+    return canPause(state) || ["paused", "retrying"].includes(state);
   }
 
   /**

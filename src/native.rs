@@ -45,6 +45,9 @@ const EVENT_CONTROL_ERROR: &str = "control-error";
 const EVENT_PLAYLIST_INFO: &str = "playlist-info";
 
 const STATE_READY: &str = "ready";
+/// A job between attempts: the last one failed for a reason worth retrying, and
+/// the next has not started. Active, never terminal (ADR-0023).
+const STATE_RETRYING: &str = "retrying";
 const STATE_REJECTED: &str = "rejected";
 const STATE_CONTROL_ERROR: &str = "control-error";
 
@@ -232,6 +235,13 @@ struct NativeResponse {
     /// The renditions a master declares, best first. Empty for anything else.
     #[serde(skip_serializing_if = "Option::is_none")]
     renditions: Option<Vec<RenditionInfo>>,
+    /// Which attempt is about to run, counting the first as 1. Present on a
+    /// `retrying` progress event and nowhere else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attempt: Option<u32>,
+    /// How many attempts this download gets in total.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_attempts: Option<u32>,
 }
 
 /// One rendition, as the popup needs to label and choose it.
@@ -279,6 +289,8 @@ impl Default for NativeResponse {
             request_id: None,
             playlist_kind: None,
             renditions: None,
+            attempt: None,
+            max_attempts: None,
         }
     }
 }
@@ -1001,6 +1013,13 @@ fn download(
             .transpose()?
             .map(crate::scraper::RenditionChoice::Exact),
         keep_partial: request.keep_partial,
+        // The host takes the defaults. The extension sends no knobs for these:
+        // a user who needs to tune reconnection is at a terminal, and one more
+        // Settings field for a value nobody changes is a worse trade than a
+        // good default. See ADR-0023.
+        reconnect: Some(crate::ffmpeg::Reconnect::default()),
+        retries: crate::DEFAULT_RETRIES,
+        timeout: crate::DEFAULT_TIMEOUT,
     };
     let info = task.hls_info.lock().ok().and_then(|info| *info);
     let state = if task.control.is_paused() {
@@ -1056,6 +1075,28 @@ fn download(
         // host config turns FFmpeg's own output on.
         hostlog::debug("ffmpeg.stderr", &[("job_id", &log_job_id), ("line", &line)]);
     };
+    // A download that restarts itself looks exactly like one that has hung, so
+    // the retry is announced rather than absorbed: the popup shows which
+    // attempt is running. See ADR-0023.
+    let retry_output = output.clone();
+    let retry_job_id = job_id.to_string();
+    let retry_task = task.clone();
+    let on_retry = move |notice: crate::RetryNotice| {
+        hostlog::info(
+            "job.retrying",
+            &[
+                ("job_id", &retry_job_id),
+                ("attempt", &notice.attempt.to_string()),
+                ("of", &notice.total.to_string()),
+                ("delay_s", &notice.delay.as_secs().to_string()),
+            ],
+        );
+        let info = retry_task.hls_info.lock().ok().and_then(|info| *info);
+        let mut response = progress_response(&retry_job_id, info, None, STATE_RETRYING, None);
+        response.attempt = Some(notice.attempt);
+        response.max_attempts = Some(notice.total);
+        let _ = send_response(&retry_output, &response);
+    };
     // The job error names an old FFmpeg on its own, but a download that still
     // succeeds would say nothing at all, so the warning also goes out as a log
     // line — the channel the Settings console already shows and persists.
@@ -1066,13 +1107,13 @@ fn download(
     crate::download_resolved(
         media,
         &options,
-        crate::Hooks::controlled(&task.control, progress, log).reporting_target(
-            move |path: &Path| {
+        crate::Hooks::controlled(&task.control, progress, log)
+            .reporting_retries(on_retry)
+            .reporting_target(move |path: &Path| {
                 if let Ok(mut current) = target.lock() {
                     *current = Some(path.to_path_buf());
                 }
-            },
-        ),
+            }),
     )
 }
 
