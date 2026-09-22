@@ -265,6 +265,20 @@ assert on the resulting DOM. That harness is not Firefox: it does not cover real
 WebExtension APIs, content-script injection, or native messaging over a real
 port.
 
+It also does not load the extension's stylesheets, and its `getComputedStyle`
+does not model the cascade the way a browser does — for a `[hidden]` element it
+reports `display: none` whether or not an author rule overrides it. So a jsdom
+test cannot see whether something the code hid is actually invisible. That
+matters because `hidden` is nothing but a UA stylesheet `display: none` at the
+lowest precedence, which any author `display` rule beats: KEI-97 was
+`.variants { display: flex }` keeping the Quality picker on screen for a
+playlist with no choice to offer, while `popup.js` read as correct and every
+jsdom test passed. Both stylesheets therefore carry
+`[hidden] { display: none !important; }`, pinned by
+`tests/extension/hidden-attribute.test.js` — a proxy for the rendered result,
+since only Firefox can check the real thing. Before adding a `display` rule to a
+selector whose element gets hidden, confirm the guard is still there.
+
 `tests/e2e/` covers all three in a real, headless Firefox. `smoke.test.mjs`
 installs `extension/` as a temporary add-on, checks that Firefox loads the
 manifest and the background scripts, exchanges messages with the background

@@ -5,6 +5,18 @@ body {
   min-width: 340px;
 }
 
+/*
+ * The `hidden` attribute is only `display: none` in the UA stylesheet, so any
+ * author rule that sets `display` on the same element silently defeats it —
+ * `.variants` below did exactly that, leaving the Quality picker on screen for
+ * a playlist with nothing to pick (KEI-97). This restores the attribute's
+ * meaning for every element in the popup, present and future. It is deliberately
+ * `!important`: the point is that it outranks whatever a rule below declares.
+ */
+[hidden] {
+  display: none !important;
+}
+
 main {
   padding: 14px 16px 16px;
 }
