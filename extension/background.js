@@ -260,6 +260,17 @@ function handleNativeEvent(jobId, response) {
       metadataError: progress.totalSegments ? null : jobs.get(jobId)?.metadataError,
       ...progress
     });
+  } else if (response?.state === "retrying") {
+    // Between attempts: the last one failed for a reason the host classified as
+    // transient and the next has not started. Active, not terminal — the job is
+    // still going, so the controls stay live (ADR-0023).
+    updateJob(jobId, {
+      state: "retrying",
+      controlError: null,
+      attempt: response.attempt,
+      maxAttempts: response.max_attempts,
+      ...progress
+    });
   } else if (response?.state === "cancelling") {
     updateJob(jobId, { state: "cancelling", controlError: null, ...progress });
   } else if (["control-error", "rejected"].includes(response?.state)) {

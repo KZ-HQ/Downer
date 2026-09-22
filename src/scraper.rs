@@ -504,6 +504,15 @@ fn is_master_playlist(playlist: &str) -> bool {
         .any(|line| line.trim().starts_with("#EXT-X-STREAM-INF:"))
 }
 
+/// The connect timeout implied by a total one.
+///
+/// One rule, here, so the CLI flag and every client agree: a connection that
+/// has not been established in ten seconds is not going to be, and the rest of
+/// the budget belongs to the transfer.
+pub fn connect_timeout(total: Duration) -> Duration {
+    total.min(crate::MAX_CONNECT_TIMEOUT)
+}
+
 /// Bounded so a slow or hanging playlist host delays a download by seconds
 /// rather than stalling it: the fallback is the download we would have run
 /// anyway.
@@ -678,7 +687,17 @@ pub fn resolve_media(
     user_agent: &str,
     cookie: Option<&str>,
 ) -> DownerResult<ResolvedMedia> {
-    let source = resolve_source(raw, user_agent, cookie)?;
+    resolve_media_with_timeout(raw, user_agent, cookie, crate::DEFAULT_TIMEOUT)
+}
+
+/// [`resolve_media`] with the source fetch bounded explicitly.
+pub fn resolve_media_with_timeout(
+    raw: &str,
+    user_agent: &str,
+    cookie: Option<&str>,
+    timeout: Duration,
+) -> DownerResult<ResolvedMedia> {
+    let source = resolve_source_with_timeout(raw, user_agent, cookie, timeout)?;
     Ok(ResolvedMedia {
         // `urls` is never empty, so the first is always there.
         url: source
@@ -703,6 +722,23 @@ pub fn resolve_source(
     user_agent: &str,
     cookie: Option<&str>,
 ) -> DownerResult<SourceMedia> {
+    resolve_source_with_timeout(raw, user_agent, cookie, crate::DEFAULT_TIMEOUT)
+}
+
+/// [`resolve_source`] with the fetch bounded explicitly.
+///
+/// Split the way [`hls_info`] and [`hls_info_with_timeout`] already are: the
+/// default is the common case, and the caller that has a `--timeout` says so.
+/// Before this existed the client set *neither* timeout, so it inherited
+/// reqwest's 30-second total with no bound at all on how long a connection
+/// could take to establish — a host that accepts a socket and then says nothing
+/// held a download for the whole budget.
+pub fn resolve_source_with_timeout(
+    raw: &str,
+    user_agent: &str,
+    cookie: Option<&str>,
+    timeout: Duration,
+) -> DownerResult<SourceMedia> {
     let input = validate_url(raw)?;
     if is_media_url(&input) {
         return Ok(SourceMedia {
@@ -713,6 +749,8 @@ pub fn resolve_source(
 
     let client = Client::builder()
         .redirect(Policy::limited(10))
+        .connect_timeout(connect_timeout(timeout))
+        .timeout(timeout)
         .build()
         .map_err(|error| DownerError::SourceFetchFailed {
             status: None,

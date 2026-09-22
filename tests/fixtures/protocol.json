@@ -28,6 +28,7 @@
     "active": [
       "starting",
       "downloading",
+      "retrying",
       "paused",
       "cancelling"
     ],

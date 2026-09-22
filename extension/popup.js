@@ -130,6 +130,9 @@ function renderDownloadStatus(job) {
   } else if (job.state === "preparing") {
     button.disabled = true;
     button.textContent = "Preparing…";
+  } else if (job.state === "retrying") {
+    button.disabled = true;
+    button.textContent = "Reconnecting…";
   } else if (job.state === "paused") {
     button.disabled = true;
     button.textContent = "Paused";
@@ -184,6 +187,18 @@ function renderDownloadStatus(job) {
     // deciding how long to leave it.
     downloadStatusElement.textContent =
       "Resume or cancel this download. A long pause can break the connection.";
+  } else if (job.state === "retrying") {
+    // Named as reconnection rather than failure: nothing has gone wrong from
+    // the user's point of view yet, and the job may well finish. Saying
+    // "failed, retrying" would ask them to worry about something they cannot
+    // act on.
+    showStatus(
+      job.attempt && job.maxAttempts
+        ? `Connection lost. Reconnecting… (attempt ${job.attempt} of ${job.maxAttempts})`
+        : "Connection lost. Reconnecting…"
+    );
+    downloadStatusElement.textContent =
+      "The download restarts from the beginning of the file. Cancel if you would rather stop.";
   } else if (job.state === "cancelling") {
     showStatus("Cancelling download…");
     downloadStatusElement.textContent = "FFmpeg is stopping; please wait.";
