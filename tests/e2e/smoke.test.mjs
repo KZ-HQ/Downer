@@ -178,6 +178,25 @@ test(
       assert.deepEqual(urls(await scan("anchor-non-media")), []);
     });
 
+    await t.test("the popup loads its scripts, in an order that works", async () => {
+      // popup.html carries five scripts with a load-order dependency:
+      // candidate-view.js reads CONFIDENCE from media-scan.js. Get the order
+      // wrong, or omit a file, and the popup throws at load and renders
+      // nothing — in a real browser, silently. Checked here rather than in
+      // jsdom because the jsdom harness evaluates its own list of files and
+      // would still pass on a broken popup.html.
+      await browser.openExtensionPage(extensionUrl("popup.html"));
+      const missing = await browser.evaluate(`
+        const required = ["DownerJobState", "DownerJobView", "DownerMediaScan", "DownerCandidateView"];
+        return required.filter((name) => typeof window[name] === "undefined");
+      `);
+      assert.deepEqual(missing, [], "popup.html did not define these");
+      assert.equal(
+        await browser.evaluate("return typeof DownerCandidateView.partition;"),
+        "function"
+      );
+    });
+
     await t.test("the popup's stylesheet lets the hidden attribute hide things", async () => {
       await browser.openExtensionPage(extensionUrl("popup.html"));
       const cascade = await browser.evaluate(HIDDEN_CASCADE);

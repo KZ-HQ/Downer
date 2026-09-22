@@ -563,6 +563,58 @@ test("candidates found only in the page text are collapsed away from the list", 
   ]);
 });
 
+test("KEI-98: a <source> the page never loaded is folded away, not listed beside the one it played", async () => {
+  // The reported page: one <video> with an .mp4 and an .ogg <source>. Firefox
+  // fetched the .mp4 and never touched the .ogg, so the popup claimed the page
+  // held two videos.
+  const popup = await loadPopup({
+    candidates: [
+      { url: "https://example.test/tags/mov_bbb.mp4", kind: "file", type: "video", confidence: "observed" },
+      { url: "https://example.test/tags/mov_bbb.ogg", kind: "file", type: "video", confidence: "declared" }
+    ]
+  });
+
+  assert.equal(popup.status(), "1 media URL found.");
+  assert.deepEqual(popup.rows().map((row) => row.label), [
+    "VIDEO: https://example.test/tags/mov_bbb.mp4"
+  ]);
+  const other = popup.otherCandidates();
+  assert.equal(other.summary, "1 other candidate this page did not load");
+  assert.deepEqual(other.urls, ["VIDEO: https://example.test/tags/mov_bbb.ogg"]);
+});
+
+test("KEI-98: two videos the page actually loaded are both listed", async () => {
+  // The rule keys off evidence, so equally-good evidence is never demoted. A
+  // page with two real videos still offers two.
+  const popup = await loadPopup({
+    candidates: [
+      { url: "https://example.test/one.mp4", kind: "file", type: "video", confidence: "observed" },
+      { url: "https://example.test/two.mp4", kind: "file", type: "video", confidence: "observed" }
+    ]
+  });
+
+  assert.equal(popup.status(), "2 media URLs found.");
+  assert.equal(popup.rows().length, 2);
+  assert.equal(popup.otherCandidates(), null);
+});
+
+test("KEI-98: a playlist stays on the list even beside media the page did load", async () => {
+  // A declared .m3u8 next to an observed preview clip. The stream is what the
+  // user came for, even before the player has started fetching it.
+  const popup = await loadPopup({
+    candidates: [
+      { url: MASTER, kind: "hls", type: "hls", confidence: "declared" },
+      { url: "https://cdn.example.test/preview.mp4", kind: "file", type: "video", confidence: "observed" }
+    ]
+  });
+
+  assert.deepEqual(popup.rows().map((row) => row.label), [
+    `HLS: ${MASTER}`,
+    "VIDEO: https://cdn.example.test/preview.mp4"
+  ]);
+  assert.equal(popup.otherCandidates(), null);
+});
+
 test("when every candidate is weak they are still listed rather than hidden", async () => {
   // A regex match is sometimes the only thing that finds the stream. Collapsing
   // the whole list would leave a page that has media looking like one that

@@ -1,6 +1,9 @@
-/* global DownerJobView, DownerJobState */
+/* global DownerJobView, DownerJobState, DownerCandidateView */
 
 const { RENDER_STALE, renderableJobs } = DownerJobView;
+// Which candidates reach the main list, and which are folded away; see
+// extension/candidate-view.js.
+const { partition: partitionCandidates, collapsedSummary } = DownerCandidateView;
 // One definition of what each state means for the UI; see extension/job-state.js.
 const {
   showsProgress,
@@ -489,12 +492,9 @@ async function scanActiveTab() {
       showStatus("No media URL found.");
       return;
     }
-    // A URL found only in the page text is weaker evidence than one the player
-    // actually loaded, so it is listed apart rather than ranked beside it.
-    const likely = candidates.filter((candidate) => candidate.confidence !== "inferred");
-    const others = candidates.filter((candidate) => candidate.confidence === "inferred");
-    const listed = likely.length ? likely : others;
-    const collapsed = likely.length ? others : [];
+    // List only the best evidence the page offers, and fold the rest under the
+    // disclosure triangle. The rule and its limits are in `candidate-view.js`.
+    const { listed, collapsed } = partitionCandidates(candidates);
 
     showStatus(`${listed.length} media URL${listed.length === 1 ? "" : "s"} found.`);
     helpElement.textContent = "HLS playlists are listed first when available.";
@@ -505,8 +505,7 @@ async function scanActiveTab() {
       addMediaRow(candidate, result.sourceUrl, tab.id, result.title, otherListElement);
     }
     if (collapsed.length) {
-      otherSummaryElement.textContent =
-        `${collapsed.length} other candidate${collapsed.length === 1 ? "" : "s"} found in the page text`;
+      otherSummaryElement.textContent = collapsedSummary(collapsed);
       otherCandidatesElement.hidden = false;
     }
     await restoreDownloadStatuses();

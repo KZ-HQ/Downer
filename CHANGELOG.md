@@ -12,6 +12,17 @@ The Rust package and the Firefox extension share one product version; see
 
 ### Fixed
 
+- **The popup no longer offers a video twice because the page declared two
+  formats for it.** A `<video>` with an `.mp4` and an `.ogg` `<source>` is one
+  video offered two ways, but both were listed as separate downloads. The popup
+  now lists only the best evidence the page offers — when something was actually
+  fetched, the URLs merely mentioned in the markup are folded under "Other
+  candidates" rather than ranked beside it. A playlist is never folded away, and
+  nothing is dropped. Detection is unchanged and the CLI's `--list` still shows
+  everything;
+  [ADR-0024](docs/adr/0024-list-only-the-best-evidence-the-page-offers.md)
+  records why the alternative — collapsing sibling `<source>` elements — would
+  have meant teaching the CLI to parse HTML.
 - **The popup no longer offers a Quality picker that has nothing to pick
   from.** `popup.js` had always hidden the rendition control for a playlist with
   fewer than two renditions, but `.variants { display: flex }` in `popup.css`

@@ -185,6 +185,7 @@ session can find the right file without opening it.
 | `extension/content.js` | Page DOM and resource-entry scan; fetches an HLS playlist in the page's own session. |
 | `extension/popup.js` | Starts downloads, renders status and controls. Holds no authoritative state. |
 | `extension/job-view.js` | Which persisted jobs a popup renders, and which may set the headline status. |
+| `extension/candidate-view.js` | Which media candidates the popup lists, and which it folds under "Other candidates" (ADR-0024). A rendering rule; detection is `media-scan.js`. |
 | `extension/background.js` | Jobs, cookies, playlist metadata, native ports, progress, log history, and restart reconciliation. |
 | `extension/job-state.js` | The job state machine: states, transitions, terminal set, render predicates. |
 | `extension/task-protocol.js` | Correlates native acknowledgements and terminal responses by job/request ID. |
