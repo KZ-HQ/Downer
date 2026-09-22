@@ -10,26 +10,7 @@ The Rust package and the Firefox extension share one product version; see
 
 ## [Unreleased]
 
-### Fixed
-
-- **The popup no longer offers a video twice because the page declared two
-  formats for it.** A `<video>` with an `.mp4` and an `.ogg` `<source>` is one
-  video offered two ways, but both were listed as separate downloads. The popup
-  now lists only the best evidence the page offers — when something was actually
-  fetched, the URLs merely mentioned in the markup are folded under "Other
-  candidates" rather than ranked beside it. A playlist is never folded away, and
-  nothing is dropped. Detection is unchanged and the CLI's `--list` still shows
-  everything;
-  [ADR-0024](docs/adr/0024-list-only-the-best-evidence-the-page-offers.md)
-  records why the alternative — collapsing sibling `<source>` elements — would
-  have meant teaching the CLI to parse HTML.
-- **The popup no longer offers a Quality picker that has nothing to pick
-  from.** `popup.js` had always hidden the rendition control for a playlist with
-  fewer than two renditions, but `.variants { display: flex }` in `popup.css`
-  overrode the `hidden` attribute — which is only a user-agent stylesheet
-  `display: none`, at a precedence any author rule beats. The picker rendered
-  empty on every single-rendition download. Both stylesheets now carry
-  `[hidden] { display: none !important; }`.
+Nothing yet.
 
 ## [0.6.0] - 2026-09-22
 
@@ -316,30 +297,6 @@ The Rust package and the Firefox extension share one product version; see
   resolved to one variant like any other master. It was previously left alone
   by a guard meant for audio, which cost twice the data for a byte-identical
   file.
-
-### Fixed
-
-- **A download with no configured directory could land somewhere you never
-  chose.** The native host fell back to `.` — its own working directory,
-  inherited from however Firefox was started, so `/` from a desktop launcher —
-  whenever the desktop reported no download directory. On Linux that is any
-  machine without XDG user-directory configuration, which minimal installs and
-  containers often lack, while the Settings placeholder promised "your
-  Downloads folder" regardless. The default is now the desktop's own download
-  directory, or `~/Downloads` where there is none, created on first use; a host
-  with no home directory at all refuses rather than guessing. `downer doctor`
-  on this machine reported `/home/user/downer` as the download directory before
-  the change.
-- **Check setup no longer reports a failed setup that works.** A download
-  creates its output directory, but the directory check called a
-  not-yet-created one "not a directory" — which, once the default became
-  `~/Downloads`, was the ordinary case on a fresh Linux machine. It now asks
-  whether the directory can be *created*, says "(will be created)" when it
-  cannot yet be written to because it is not there, and still fails when a file
-  is in the way or a parent is unwritable.
-
-### Changed
-
 - **A running download always shows evidence that it is running, and a stopped
   one says why in its first line.** Four defects that were one: in each, the
   host already had the answer and discarded it before the user could see it.
@@ -478,6 +435,43 @@ The Rust package and the Firefox extension share one product version; see
 
 ### Fixed
 
+- **The popup no longer offers a video twice because the page declared two
+  formats for it.** A `<video>` with an `.mp4` and an `.ogg` `<source>` is one
+  video offered two ways, but both were listed as separate downloads. The popup
+  now lists only the best evidence the page offers — when something was actually
+  fetched, the URLs merely mentioned in the markup are folded under "Other
+  candidates" rather than ranked beside it. A playlist is never folded away, and
+  nothing is dropped. Detection is unchanged and the CLI's `--list` still shows
+  everything;
+  [ADR-0024](docs/adr/0024-list-only-the-best-evidence-the-page-offers.md)
+  records why the alternative — collapsing sibling `<source>` elements — would
+  have meant teaching the CLI to parse HTML.
+- **The popup no longer offers a Quality picker that has nothing to pick
+  from.** `popup.js` had always hidden the rendition control for a playlist with
+  fewer than two renditions, but `.variants { display: flex }` in `popup.css`
+  overrode the `hidden` attribute — which is only a user-agent stylesheet
+  `display: none`, at a precedence any author rule beats. The picker rendered
+  empty on every single-rendition download. Both stylesheets now carry
+  `[hidden] { display: none !important; }`.
+
+- **A download with no configured directory could land somewhere you never
+  chose.** The native host fell back to `.` — its own working directory,
+  inherited from however Firefox was started, so `/` from a desktop launcher —
+  whenever the desktop reported no download directory. On Linux that is any
+  machine without XDG user-directory configuration, which minimal installs and
+  containers often lack, while the Settings placeholder promised "your
+  Downloads folder" regardless. The default is now the desktop's own download
+  directory, or `~/Downloads` where there is none, created on first use; a host
+  with no home directory at all refuses rather than guessing. `downer doctor`
+  on this machine reported `/home/user/downer` as the download directory before
+  the change.
+- **Check setup no longer reports a failed setup that works.** A download
+  creates its output directory, but the directory check called a
+  not-yet-created one "not a directory" — which, once the default became
+  `~/Downloads`, was the ordinary case on a fresh Linux machine. It now asks
+  whether the directory can be *created*, says "(will be created)" when it
+  cannot yet be written to because it is not there, and still fails when a file
+  is in the way or a parent is unwritable.
 - A native messaging channel that settled by *failing* — a `rejected` answering
   the request that starts a download — left its port open, so the host process
   behind it stayed alive with nothing to do until garbage collection reached
