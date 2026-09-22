@@ -37,6 +37,7 @@ control semantics.
 | [0021](0021-windows-is-unsupported.md) | Windows is unsupported, and the crate refuses to build there | Accepted |
 | [0022](0022-a-bounded-redacted-host-log-file.md) | The native host keeps one bounded, redacted log file, and `status` names it | Accepted |
 | [0023](0023-surviving-a-transient-failure.md) | Survive a transient failure by retrying the whole download, bounded and announced | Accepted |
+| [0024](0024-list-only-the-best-evidence-the-page-offers.md) | The popup lists only the best evidence the page offers; detection and the CLI are unchanged | Accepted |
 
 ## Reading them together
 
@@ -54,6 +55,10 @@ exposes) → 0003 (the leak that was left, in FFmpeg's own stderr).
 **HLS.** 0015 (FFmpeg does the fetching, leniently) → 0010 (resolve a master
 before FFmpeg sees it) → 0011 (who fetches a playlist, who parses it) → 0014
 (pair the chosen video with its audio).
+
+**What the user is offered.** 0011 (detection is one rule in two languages) →
+0024 (which of what it finds the popup puts in front of you, and why that is a
+rendering decision rather than a detection one).
 
 **Downloads as processes.** 0015 (there is a process at all) → 0016 (we block
 on it rather than await it) → 0013 (one download per host process) → 0012 (what

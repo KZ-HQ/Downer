@@ -157,10 +157,18 @@ async function loadPopup({ candidates = [], sourceUrl = "https://example.test/fi
     }
   });
   dom.window.browser = stub.api;
-  // Loaded in popup.html order: job-state.js, job-view.js, popup.js.
-  dom.window.eval(extensionSource("job-state.js"));
-  dom.window.eval(extensionSource("job-view.js"));
-  dom.window.eval(extensionSource("popup.js"));
+  // Loaded in popup.html order. Keep this list in step with that file: a script
+  // the popup ships but this harness omits fails here as an undefined global,
+  // which is the intended way to find out.
+  for (const file of [
+    "job-state.js",
+    "job-view.js",
+    "media-scan.js",
+    "candidate-view.js",
+    "popup.js"
+  ]) {
+    dom.window.eval(extensionSource(file));
+  }
   await settle();
 
   const document = dom.window.document;

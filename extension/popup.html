@@ -21,6 +21,9 @@
   </main>
   <script src="job-state.js"></script>
   <script src="job-view.js"></script>
+  <!-- candidate-view.js reads CONFIDENCE from media-scan.js, so that loads first. -->
+  <script src="media-scan.js"></script>
+  <script src="candidate-view.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>
