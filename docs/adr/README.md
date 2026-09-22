@@ -36,6 +36,7 @@ control semantics.
 | [0020](0020-json-output-is-a-cli-interface.md) | `--json` output is a public interface, versioned in the document | Accepted |
 | [0021](0021-windows-is-unsupported.md) | Windows is unsupported, and the crate refuses to build there | Accepted |
 | [0022](0022-a-bounded-redacted-host-log-file.md) | The native host keeps one bounded, redacted log file, and `status` names it | Accepted |
+| [0023](0023-surviving-a-transient-failure.md) | Survive a transient failure by retrying the whole download, bounded and announced | Accepted |
 
 ## Reading them together
 
@@ -57,7 +58,8 @@ before FFmpeg sees it) → 0011 (who fetches a playlist, who parses it) → 0014
 **Downloads as processes.** 0015 (there is a process at all) → 0016 (we block
 on it rather than await it) → 0013 (one download per host process) → 0012 (what
 we can promise by signalling it) → 0021 (which platforms can keep that promise,
-and why the ones that cannot are refused at compile time).
+and why the ones that cannot are refused at compile time) → 0023 (what happens
+when the process dies for a reason nobody chose).
 
 **What a script may rely on.** 0018 (the exit codes classify the failure) →
 0020 (`--json` describes the success), which makes the same promise about the

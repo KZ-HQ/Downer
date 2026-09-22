@@ -108,7 +108,12 @@ var DownerJobState = (() => {
   }
 
   function canCancel(state) {
-    return canPause(state) || state === "paused";
+    // `retrying` is cancellable but deliberately not pausable. Between attempts
+    // there is no FFmpeg process to signal, so Pause could only pretend — but
+    // the host sleeps out the backoff in slices and checks for a cancel in each
+    // one, so Cancel there is honoured immediately rather than deferred to the
+    // next attempt. See ADR-0023.
+    return canPause(state) || ["paused", "retrying"].includes(state);
   }
 
   /**

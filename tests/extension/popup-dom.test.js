@@ -138,6 +138,38 @@ test("a job from this session for this page does render and does set the headlin
   assert.equal(row.download.disabled, true);
 });
 
+test("KEI-66: a retrying job says which attempt, and keeps Cancel available", async () => {
+  const popup = await loadPopup({
+    candidates: [{ url: FEATURE, type: "video" }],
+    jobs: [{ id: "live-1", url: FEATURE, state: "retrying", attempt: 2, maxAttempts: 3 }],
+    sessionJobIds: ["live-1"]
+  });
+
+  // Named as reconnection, not failure: nothing has gone wrong that the user
+  // can act on, and the job may well finish.
+  assert.match(popup.status(), /Reconnecting/);
+  assert.match(popup.status(), /attempt 2 of 3/);
+  assert.doesNotMatch(popup.status(), /failed/i);
+
+  const [row] = popup.rows();
+  assert.equal(row.download.text, "Reconnecting…");
+  assert.equal(row.download.disabled, true);
+  // Active, not terminal, so stopping it is still the user's to do.
+  assert.equal(row.cancel.hidden, false);
+});
+
+test("KEI-66: a retrying job without counts still reads as reconnection", async () => {
+  // `attempt` and `max_attempts` are optional on the wire, so a host that does
+  // not send them must not produce "attempt undefined of undefined".
+  const popup = await loadPopup({
+    candidates: [{ url: FEATURE, type: "video" }],
+    jobs: [{ id: "live-1", url: FEATURE, state: "retrying" }],
+    sessionJobIds: ["live-1"]
+  });
+  assert.match(popup.status(), /Reconnecting/);
+  assert.doesNotMatch(popup.status(), /undefined/);
+});
+
 test("a live download in this session shows progress and offers Pause and Cancel", async () => {
   const popup = await loadPopup({
     candidates: [{ url: FEATURE, type: "video" }],

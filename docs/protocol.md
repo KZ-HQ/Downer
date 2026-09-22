@@ -177,7 +177,7 @@ to be present.
 | `status` | `ready` | Setup-check answer. Adds `host_version`, `capabilities` and `status`. |
 | `playlist-info` | `ready` | What a playlist offers. Adds `playlist_kind` and `renditions`, and `total_segments` for a media playlist. |
 | `ack` | `paused`, `downloading`, `cancelling` | A control command was applied. Echoes `request_id`. |
-| `progress` | `starting`, `downloading`, `paused` | Job progress. May carry `completed_segments`, `total_segments`, `percent`, `elapsed_ms`, `metadata_error`. |
+| `progress` | `starting`, `downloading`, `retrying`, `paused` | Job progress. May carry `completed_segments`, `total_segments`, `percent`, `elapsed_ms`, `metadata_error`, and — on `retrying` only — `attempt` and `max_attempts`. |
 | `log` | `downloading` | One line of FFmpeg stderr, in `log`, redacted (see below). |
 | `terminal` | `completed`, `failed`, `cancelled` | The job ended. All three carry `path`; `failed` and `cancelled` also carry `error` and `error_code`. |
 | `rejected` | `rejected` | The host refused the request. Carries `error`, `error_code`, and the `request_id` being refused. **Never terminal.** |
@@ -374,8 +374,10 @@ behind it and why a long-lived host was not chosen.
                     ┌──────────────► cancelled
                     │                    ▲
 starting ──► downloading ⇄ paused        │
+                    │  ▲      │          │
+                    │  │      └──────────┤
+                    │  └── retrying      │
                     │         │          │
-                    │         └──────────┤
                     ├──► cancelling ─────┘
                     ├──► completed
                     └──► failed
@@ -383,6 +385,16 @@ starting ──► downloading ⇄ paused        │
 
 * `starting` is emitted once, when the host has registered the job.
 * `downloading` and `paused` alternate as pause/resume are applied.
+* `retrying` says an attempt failed for a reason the host classified as
+  transient and the next one has not started yet. It carries `attempt` and
+  `max_attempts`, so a client can say *"attempt 2 of 3"*. It is **active, not
+  terminal**: the job has not finished, and the controls stay live — a cancel
+  during the backoff is acted on immediately rather than after the wait. The
+  next attempt returns the job to `downloading`; when the attempts run out the
+  job reaches `failed` exactly as it would have on the first one. A failure
+  classified as permanent — a 403, a 404, no space on the device — never
+  produces this state at all. See
+  [ADR-0023](adr/0023-surviving-a-transient-failure.md).
 * `cancelling` acknowledges a `cancel`; the `cancelled` terminal event follows
   once FFmpeg has actually stopped.
 * Exactly one terminal event is emitted per job, and nothing follows it.
