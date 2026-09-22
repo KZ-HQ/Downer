@@ -102,10 +102,23 @@ class ReleaseNotes(unittest.TestCase):
             changelog_section.section("## [1.0.0]\n\n## [0.9.0]\n\n- Old.\n", "1.0.0")
 
     def test_the_real_changelog_has_an_unreleased_section(self):
-        body = changelog_section.section(
-            changelog_section.CHANGELOG.read_text(encoding="utf-8"), "Unreleased"
-        )
-        self.assertTrue(body.strip())
+        # The heading must exist, so the next change has somewhere to go.
+        #
+        # Its body may be empty, and this deliberately does not call `section()`,
+        # which treats an empty body as an error. Immediately after a release an
+        # empty `Unreleased` is the *correct* state — the previous contents have
+        # just been moved under the new version number — and requiring content
+        # here would mean the repository could never be left in the state a
+        # release leaves it in. The rule that matters is unchanged and still
+        # tested by `test_an_empty_section_is_an_error`: publishing a *version*
+        # whose notes say nothing is an error.
+        text = changelog_section.CHANGELOG.read_text(encoding="utf-8")
+        headings = [
+            match.group("name").casefold()
+            for line in text.splitlines()
+            if (match := changelog_section.HEADING.match(line))
+        ]
+        self.assertIn("unreleased", headings)
 
 
 class Packaging(unittest.TestCase):

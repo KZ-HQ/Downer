@@ -21,7 +21,13 @@ fn help_and_version_are_available() {
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("downer 0.5.0"));
+        // Read from the package rather than written out, so a version bump does
+        // not need this test edited — which is how it came to assert 0.5.0
+        // while the crate said 0.6.0 (KEI-93).
+        .stdout(predicate::str::contains(format!(
+            "downer {}",
+            env!("CARGO_PKG_VERSION")
+        )));
 }
 
 #[test]

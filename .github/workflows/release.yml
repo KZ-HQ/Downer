@@ -106,7 +106,10 @@ jobs:
             echo
             echo '## Installing'
             echo
-            echo 'See "Installing the extension" and "Installing the native host" in the README.'
+            echo 'See the [user guide](https://github.com/KZ-HQ/Downer/blob/main/docs/user-guide.md#install)'
+            echo 'for installing the CLI, registering the native messaging host, and installing the'
+            echo 'extension.'
+            echo
             echo 'The extension is unsigned: Firefox Release and Beta cannot install it permanently.'
             echo
             echo '## Checksums'

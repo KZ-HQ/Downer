@@ -10,6 +10,10 @@ The Rust package and the Firefox extension share one product version; see
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.6.0] - 2026-09-22
+
 ### Added
 
 - **CLI discovery, selection and JSON output.** `downer URL --list` prints
