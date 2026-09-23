@@ -12,10 +12,48 @@ agree, and when they disagree the extension is the one to believe: it runs the
 checks *inside the native host*, in the minimal environment Firefox gives it,
 which is where downloads actually happen.
 
+## "Apple could not verify downer is free of malware"
+
+macOS, on the first run of a binary downloaded from a release. It is not signed
+or notarised by Apple, and macOS marks anything a browser downloads as
+quarantined, so Gatekeeper refuses to run it. Nothing is wrong with the file:
+[check it against `SHA256SUMS`](user-guide.md#1-get-the-binary) if you have not.
+
+**Press Done, not Move to Bin.** Move to Bin is the default button, and it
+deletes the download.
+
+Then clear the mark, from the directory you unpacked into:
+
+```sh
+xattr -d com.apple.quarantine ./downer
+```
+
+The other route is **System Settings → Privacy & Security**, which for a while
+after a refused run offers **Open Anyway** for the file it just blocked. The
+right-click → **Open** shortcut that older guides describe no longer gets past
+this as of macOS 15.
+
+Do either **before** `downer install-host`. That command copies the binary, and
+Firefox runs the copy. If you registered the host first, or used Open Anyway,
+and the extension now says the host disconnected, see the last cause under the
+next entry.
+
+## "Firefox has prevented this site from installing an unverified add-on"
+
+You clicked the `.xpi` on the release page. The extension is unsigned, and that
+is the message Firefox gives when a web page offers an unsigned add-on.
+
+Save the file instead, then install it from disk as
+[the user guide](user-guide.md#3-install-the-extension) describes:
+`about:debugging` → **This Firefox** → **Load Temporary Add-on** in any Firefox,
+or `about:addons` → gear → **Install Add-on From File…** in Developer Edition,
+Nightly or ESR with `xpinstall.signatures.required` set to `false`. Firefox
+Release and Beta cannot keep it installed across a restart.
+
 ## "Native host disconnected", or the popup does nothing
 
 Firefox's wording for "no such native application, or it exited immediately".
-Four causes, in the order worth checking.
+Five causes, in the order worth checking.
 
 **The host was never registered.** Run `downer install-host` and reload the
 extension. `downer doctor` reports this as a failing check.
@@ -35,10 +73,32 @@ the old host. This is this project's most common "it worked before" report:
 cargo build --release      # or: make extension
 ```
 
+A development install (`make extension`, which runs `downer install-host --dev`)
+and a release's `downer install-host` register into the **same** place, and
+Firefox runs whichever was installed last. The manifest in
+`~/Library/Application Support/Mozilla/NativeMessagingHosts/` (macOS) or
+`~/.mozilla/native-messaging-hosts/` (Linux) says `(development build)` in its
+description when it was the former.
+
 **The add-on ID does not match.** The host allows exactly
 `downer@kz-hq.github.io`. If you built an XPI from a modified
 `extension/manifest.json`, the host will refuse it. Both sides read that one
 field, so an unmodified checkout cannot drift.
+
+**macOS is refusing to run the installed binary.** A host that Gatekeeper
+blocks never starts, so it writes nothing to [its log](#where-the-logs-are) and
+the extension sees only the disconnect. Look for the quarantine mark on what
+`install-host` wrote:
+
+```sh
+xattr -l ~/Library/Application\ Support/downer/bin/downer
+```
+
+If `com.apple.quarantine` is listed, clear it from all of it:
+
+```sh
+xattr -dr com.apple.quarantine ~/Library/Application\ Support/downer
+```
 
 ## "FFmpeg not found" — but it is on my PATH
 

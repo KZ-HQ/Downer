@@ -111,6 +111,14 @@ jobs:
             echo 'extension.'
             echo
             echo 'The extension is unsigned: Firefox Release and Beta cannot install it permanently.'
+            echo 'Save the `.xpi` and install it from disk; Firefox will not install it from this page.'
+            echo
+            echo 'On macOS the binary is not notarised, so Gatekeeper refuses a downloaded copy. If'
+            echo 'macOS asks, choose **Done**, not Move to Bin, then run'
+            echo '`xattr -d com.apple.quarantine ./downer` in the unpacked directory before anything else.'
+            echo
+            echo 'Check a download with `sha256sum -c --ignore-missing SHA256SUMS`'
+            echo '(`shasum -a 256 -c --ignore-missing SHA256SUMS` on macOS).'
             echo
             echo '## Checksums'
             echo

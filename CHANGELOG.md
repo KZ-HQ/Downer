@@ -10,7 +10,20 @@ The Rust package and the Firefox extension share one product version; see
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **Installing from a release on macOS now works by following the user guide.**
+  Three things stood between the published tarball and a running `downer`, and
+  the guide mentioned none of them. The binary is not notarised, so Gatekeeper
+  refuses a browser download with "Apple could not verify downer is free of
+  malware" — and its default button, **Move to Bin**, deletes the file. The
+  documented checksum command, `sha256sum -c SHA256SUMS`, reported the release's
+  other files as `FAILED` and exited non-zero for anyone who had downloaded only
+  their own; it is now `-c --ignore-missing`. And the guide wrote `downer` where
+  an unpacked release needs `./downer`. The user guide's first step, the release
+  notes and `docs/troubleshooting.md` now cover all three, along with clicking
+  the `.xpi` on the release page, which Firefox refuses. Nothing about the
+  published artifacts changed.
 
 ## [0.6.0] - 2026-09-22
 

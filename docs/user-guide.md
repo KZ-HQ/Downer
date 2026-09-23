@@ -28,15 +28,47 @@ released binary.
 ### 1. Get the binary
 
 From a release, on the [releases page](https://github.com/KZ-HQ/Downer/releases):
-download the `downer-<version>-<target>.tar.gz` for your platform, and check it
-against the `SHA256SUMS` published beside it.
+download the `downer-<version>-<target>.tar.gz` for your platform and the
+`SHA256SUMS` beside it, check one against the other, and unpack:
 
 ```sh
-sha256sum -c SHA256SUMS      # shasum -a 256 -c SHA256SUMS on macOS
+sha256sum -c --ignore-missing SHA256SUMS
+# on macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
 tar xzf downer-<version>-<target>.tar.gz
+cd downer-<version>-<target>
 ```
 
-Or from source:
+Look for `OK` beside the file you downloaded. `--ignore-missing` is there because
+`SHA256SUMS` lists every file in the release and you downloaded one; without it
+the check reports the others as `FAILED` and exits non-zero even when yours is
+fine.
+
+**On macOS, clear the quarantine mark before running anything.** The binary is
+not signed or notarised by Apple, and macOS marks what a browser downloads as
+quarantined, so its first run is refused:
+
+> **"downer" Not Opened.** Apple could not verify "downer" is free of malware
+> that may harm your Mac or compromise your privacy.
+
+**Do not press Move to Bin.** It is the default button, and it deletes the file
+you have just checked. Press **Done**, then:
+
+```sh
+xattr -d com.apple.quarantine ./downer
+```
+
+The checksum is what tells you this is the file the release published; the mark
+only records that it came from the internet. If `xattr` answers
+`No such xattr`, the file was never marked and there is nothing to do. Do this
+**before** step 2, because `downer install-host` copies the binary and Firefox
+runs the copy. [Troubleshooting](troubleshooting.md#apple-could-not-verify-downer-is-free-of-malware)
+covers the other route, through System Settings.
+
+The rest of this guide writes `downer`. Until you move the binary somewhere on
+your `PATH`, run it as `./downer` from the unpacked directory.
+
+Or from source, which avoids the quarantine mark altogether because a binary you
+compiled was never downloaded:
 
 ```sh
 cargo install --path .
